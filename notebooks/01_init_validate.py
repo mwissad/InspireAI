@@ -1,7 +1,7 @@
 # Databricks notebook source
 # MAGIC %md
 # # Step 1: Initialize & Validate
-# Reads widget values, validates all inputs, and persists configuration for downstream tasks.
+# Reads widget values, validates all inputs, persists config, and launches the pipeline.
 
 # COMMAND ----------
 
@@ -18,14 +18,17 @@ def create_widgets():
     1- UC Metadata
     2- Inspire Database
     3- Operation
-    4- Quality Level
-    5- Business Domains
-    6- Business Priorities
-    7- Strategic Goals
-    8- Generation Options
-    9- Generation Path
-    10- Documents Languages
-    11- AI Model
+    4- Table Election
+    5- Use Cases Quality
+    6- Business Domains
+    7- Business Priorities
+    8- Strategic Goals
+    9- Generation Options
+    10- SQL Generation Per Domain
+    11- Generation Path
+    12- Documents Languages
+    13- AI Model
+    14- Inspire Session ID
     """
     
     log_print("Creating widgets (retaining existing values)...")
@@ -60,20 +63,35 @@ def create_widgets():
     except Exception as e:
         widget_errors.append(f"Operation: {e}")
     
-    # --- 4. Quality Level (controls quality filtering) ---
+    # --- 4. Table Election (controls which tables are used for use case generation) ---
     try:
-        quality_level_options = ["Extreme Quality", "High Quality"]
-        dbutils.widgets.dropdown("04_quality_level", "Extreme Quality", quality_level_options, "05. Quality Level")
+        table_election_options = [
+            "Let Inspire Decides",
+            "All Tables",
+            "Transactional Only"
+        ]
+        dbutils.widgets.dropdown("04_table_election", "Let Inspire Decides", table_election_options, "05. Table Election")
     except Exception as e:
-        widget_errors.append(f"Quality Level: {e}")
+        widget_errors.append(f"Table Election: {e}")
     
-    # --- 5. Business Domains (comma-separated list of domains) ---
+    # --- 5. Use Cases Quality (controls post-generation quality filtering threshold) ---
     try:
-        dbutils.widgets.text("05_business_domains", "", "06. Business Domains")
+        use_cases_quality_options = [
+            "Good Quality",
+            "High Quality",
+            "Very High Quality"
+        ]
+        dbutils.widgets.dropdown("05_use_cases_quality", "High Quality", use_cases_quality_options, "06. Use Cases Quality")
+    except Exception as e:
+        widget_errors.append(f"Use Cases Quality: {e}")
+    
+    # --- 6. Business Domains (comma-separated list of domains) ---
+    try:
+        dbutils.widgets.text("06_business_domains", "", "07. Business Domains")
     except Exception as e:
         widget_errors.append(f"Business Domains: {e}")
     
-    # --- 6. Business Priorities (multi-select) ---
+    # --- 7. Business Priorities (multi-select) ---
     try:
         business_priorities_options = [
             "Increase Revenue",
@@ -87,17 +105,17 @@ def create_widgets():
             "Protect Revenue",
             "Execute Strategy"
         ]
-        dbutils.widgets.multiselect("06_business_priorities", "Increase Revenue", business_priorities_options, "07. Business Priorities")
+        dbutils.widgets.multiselect("07_business_priorities", "Increase Revenue", business_priorities_options, "08. Business Priorities")
     except Exception as e:
         widget_errors.append(f"Business Priorities: {e}")
     
-    # --- 7. Strategic Goals ---
+    # --- 8. Strategic Goals ---
     try:
-        dbutils.widgets.text("07_strategic_goals", "", "08. Strategic Goals")
+        dbutils.widgets.text("08_strategic_goals", "", "09. Strategic Goals")
     except Exception as e:
         widget_errors.append(f"Strategic Goals: {e}")
     
-    # --- 8. Generation Options (multiselect with generation choices) ---
+    # --- 9. Generation Options (multiselect with generation choices) ---
     try:
         generation_options = [
             "SQL Code",
@@ -108,21 +126,33 @@ def create_widgets():
             "Unstructured Data Usecases"
         ]
         dbutils.widgets.multiselect(
-            "08_generation_options", 
+            "09_generation_options", 
             "SQL Code",
             generation_options, 
-            "09. Generation Options"
+            "10. Generation Options"
         )
     except Exception as e:
         widget_errors.append(f"Generation Options: {e}")
     
-    # --- 9. Generation Path ---
+    # --- 10. Generation Path ---
     try:
-        dbutils.widgets.text("09_generation_path", "./inspire_gen/", "10. Generation Path")
+        sql_per_domain_options = ["0", "1", "2", "3", "4", "5", "All"]
+        dbutils.widgets.dropdown(
+            "10_sql_generation_per_domain",
+            "0",
+            sql_per_domain_options,
+            "11. SQL Generation Per Domain"
+        )
+    except Exception as e:
+        widget_errors.append(f"SQL Generation Per Domain: {e}")
+
+    # --- 11. Generation Path ---
+    try:
+        dbutils.widgets.text("11_generation_path", "./inspire_gen/", "12. Generation Path")
     except Exception as e:
         widget_errors.append(f"Generation Path: {e}")
     
-    # --- 10. Documents Languages (multiselect) ---
+    # --- 12. Documents Languages (multiselect) ---
     try:
         lang_choices = [
             "English", "French", "German", "Spanish", "Hindi",
@@ -131,15 +161,21 @@ def create_widgets():
             "Italian", "Polish", "Romanian", "Ukrainian", "Dutch", "Korean",
             "Indonesian", "Malay", "Tamil"
         ]
-        dbutils.widgets.multiselect("10_documents_languages", "English", lang_choices, "11. Documents Languages")
+        dbutils.widgets.multiselect("12_documents_languages", "English", lang_choices, "13. Documents Languages")
     except Exception as e:
         widget_errors.append(f"Documents Languages: {e}")
     
-    # --- 11. AI Model (model endpoint for ai_query in generated SQL) ---
+    # --- 13. AI Model (model endpoint for ai_query in generated SQL) ---
     try:
-        dbutils.widgets.text("11_ai_model", "databricks-gpt-oss-120b", "12. AI Model")
+        dbutils.widgets.text("13_ai_model", "databricks-gpt-oss-120b", "14. AI Model")
     except Exception as e:
         widget_errors.append(f"AI Model: {e}")
+    
+    # --- 14. Inspire Session ID (optional - auto-generated if empty) ---
+    try:
+        dbutils.widgets.text("14_session_id", "", "15. Inspire Session ID")
+    except Exception as e:
+        widget_errors.append(f"Inspire Session ID: {e}")
     
     if widget_errors:
         log_print(f"⚠️ Some widgets had errors during creation:", level="WARNING")
@@ -182,14 +218,13 @@ import tempfile
 import shutil
 import datetime
 import html
-import pkg_resources
 import warnings
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col
 from pyspark.sql.utils import AnalysisException
 from collections import defaultdict
 import concurrent.futures
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 import threading
 import gc
 
@@ -197,16 +232,33 @@ import gc
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service import workspace
 
+# --- Global Configuration ---
+AI_MODEL_NAME = "databricks-gpt-oss-20b"
+
+# Token-to-Character Ratios (for context limit calculations)
+# English: 1 token ≈ 4 characters
+# Non-English: 1 token ≈ 2 characters
+TOKEN_TO_CHAR_RATIO_ENGLISH = 4
+TOKEN_TO_CHAR_RATIO_NON_ENGLISH = 2
+
+
 # COMMAND ----------
 
-# ─── Read & validate widget values, then save config ───
+# ─── Run main ───
 create_widgets()
 
 def main():
-
+    """
+    Main function to read widget values, validate inputs,
+    and run the DatabricksInspire class.
+    
+    *** IMPORTANT ***
+    Run the `create_widgets()` cell first and fill in the UI values
+    BEFORE running this main() function.
+    """
+    
     print_ascii_banner()
 
-    # --- Read all widget values ---
     # --- 1. Get Widget Values ---
     
     # --- Business Name ---
@@ -224,20 +276,22 @@ def main():
     operation_mode = dbutils.widgets.get("03_operation")
     log_print(f"🎯 Operation Mode: {operation_mode}")
     
-    # --- Quality Level (controls quality filtering) ---
-    quality_level = dbutils.widgets.get("04_quality_level")
-    if not quality_level or not quality_level.strip():
-        quality_level = "Extreme Quality"
-    log_print(f"🎚️ Quality Level: {quality_level}")
+    # --- Table Election Mode ---
+    table_election_mode = dbutils.widgets.get("04_table_election")
+    log_print(f"🗳️ Table Election: {table_election_mode}")
+    
+    # --- Use Cases Quality Filter ---
+    use_cases_quality = dbutils.widgets.get("05_use_cases_quality")
+    log_print(f"🎚️ Use Cases Quality: {use_cases_quality}")
     
     # --- Business Domains ---
-    business_domains_str = dbutils.widgets.get("05_business_domains")
+    business_domains_str = dbutils.widgets.get("06_business_domains")
     
     # --- Business Priorities (multi-select) ---
-    business_priorities_str = dbutils.widgets.get("06_business_priorities")
+    business_priorities_str = dbutils.widgets.get("07_business_priorities")
     
     # --- Strategic Goals ---
-    strategic_goals_str = dbutils.widgets.get("07_strategic_goals")
+    strategic_goals_str = dbutils.widgets.get("08_strategic_goals")
     
     # Check if this is a JSON file path (docs-only mode)
     json_file_path = None
@@ -277,7 +331,7 @@ def main():
     tables_str = ','.join(tables_list)
     
     # --- Generation Options ---
-    generate_str = dbutils.widgets.get("08_generation_options")
+    generate_str = dbutils.widgets.get("09_generation_options")
     # Force "use cases" to be included always
     if generate_str:
         if "use cases" not in generate_str:
@@ -294,17 +348,28 @@ def main():
     
     # Set use_unstructured_data_str based on Unstructured Data Usecases selection
     use_unstructured_data_str = "yes" if use_unstructured_data else "no"
+
+    # --- SQL Generation Per Domain ---
+    try:
+        sql_generation_per_domain = dbutils.widgets.get("10_sql_generation_per_domain").strip()
+    except Exception:
+        sql_generation_per_domain = "0"
+    if not sql_generation_per_domain:
+        sql_generation_per_domain = "0"
     
     # --- Generation Path ---
-    generation_path = dbutils.widgets.get("09_generation_path")
+    generation_path = dbutils.widgets.get("11_generation_path")
     
     # --- Documents Languages (multiselect) ---
-    output_language_str = dbutils.widgets.get("10_documents_languages") 
+    output_language_str = dbutils.widgets.get("12_documents_languages") 
     
     # --- AI Model (model endpoint for ai_query in generated SQL) ---
-    sql_model_serving = dbutils.widgets.get("11_ai_model")
+    sql_model_serving = dbutils.widgets.get("13_ai_model")
     if not sql_model_serving or not sql_model_serving.strip():
         sql_model_serving = "databricks-gpt-oss-120b"
+
+    # --- Inspire Session ID (optional - auto-generated if empty) ---
+    user_session_id = dbutils.widgets.get("14_session_id").strip()
 
     # ============================================================================
     # --- 2. VALIDATE ALL WIDGET VALUES (FAIL FAST BEFORE ANY PROCESSING) ---
@@ -320,25 +385,15 @@ def main():
     else:
         log_print(f"✅ Business Name: '{business_name}'")
     
-    # Validate Inspire Database (REQUIRED, format: catalog.database)
+    # Validate Inspire Database (OPTIONAL, format: catalog.database when provided)
     if not inspire_database:
-        validation_errors.append("❌ 'Inspire Database' (02_inspire_database) is REQUIRED. Format: catalog.database (e.g., my_catalog.my_schema)")
+        log_print("ℹ️ Inspire Database: Not provided (optional). SQL will use placeholder database 'main._inspire'")
     else:
         inspire_db_parts = inspire_database.split('.')
         if len(inspire_db_parts) != 2 or not inspire_db_parts[0].strip() or not inspire_db_parts[1].strip():
             validation_errors.append(f"❌ 'Inspire Database' (02_inspire_database) must be in 'catalog.database' format (got: '{inspire_database}')")
         else:
-            # Verify that the catalog actually exists in Unity Catalog
-            inspire_catalog = inspire_db_parts[0].strip()
-            try:
-                spark.sql(f"USE CATALOG `{inspire_catalog}`")
-                log_print(f"✅ Inspire Database: '{inspire_database}' (catalog '{inspire_catalog}' exists)")
-            except Exception as cat_err:
-                validation_errors.append(
-                    f"❌ Catalog '{inspire_catalog}' does not exist in your workspace. "
-                    f"Please create it first or choose an existing catalog. "
-                    f"(Inspire Database was set to '{inspire_database}')"
-                )
+            log_print(f"✅ Inspire Database: '{inspire_database}'")
     
     # Validate Operation mode
     valid_operations = ["Discover Usecases", "Re-generate SQL"]
@@ -346,6 +401,20 @@ def main():
         validation_errors.append(f"❌ 'Operation' (03_operation) must be one of: {', '.join(valid_operations)}")
     else:
         log_print(f"✅ Operation: '{operation_mode}'")
+    
+    # Validate Table Election mode
+    valid_table_elections = ["Let Inspire Decides", "All Tables", "Transactional Only"]
+    if table_election_mode not in valid_table_elections:
+        validation_errors.append(f"❌ 'Table Election' (04_table_election) must be one of: {', '.join(valid_table_elections)}")
+    else:
+        log_print(f"✅ Table Election: '{table_election_mode}'")
+    
+    # Validate Use Cases Quality
+    valid_quality_filters = ["Good Quality", "High Quality", "Very High Quality"]
+    if use_cases_quality not in valid_quality_filters:
+        validation_errors.append(f"❌ 'Use Cases Quality' (05_use_cases_quality) must be one of: {', '.join(valid_quality_filters)}")
+    else:
+        log_print(f"✅ Use Cases Quality: '{use_cases_quality}'")
     
     # AUTO-ENABLE SQL Code generation for "Re-generate SQL" mode (regardless of checkbox)
     if operation_mode == "Re-generate SQL" and "SQL Code" not in generate_options_list:
@@ -425,12 +494,22 @@ def main():
     # Log derived options
     generate_sql_code = "SQL Code" in generate_options_list
     generate_sample_result = "Sample Results" in generate_options_list
+    valid_sql_per_domain = {"0", "1", "2", "3", "4", "5", "All"}
+    if sql_generation_per_domain not in valid_sql_per_domain:
+        validation_errors.append("❌ 'SQL Generation Per Domain' (10_sql_generation_per_domain) must be one of: 0, 1, 2, 3, 4, 5, All")
+    else:
+        log_print(f"✅ SQL Generation Per Domain: {sql_generation_per_domain}")
     log_print(f"ℹ️ SQL Code Generation: {'Enabled' if generate_sql_code else 'DISABLED (notebooks will have placeholder SQL)'}")
     log_print(f"ℹ️ Sample Results: {'Enabled (SQL will be executed and samples generated)' if generate_sample_result else 'Disabled'}")
     log_print(f"ℹ️ Unstructured Data Usecases: {'Enabled' if use_unstructured_data else 'Disabled'}")
     log_print("ℹ️ Technical table filtering: Aggressive (mandatory)")
     if generate_sql_code:
         log_print(f"✅ AI Model: '{sql_model_serving}' (for ai_query in generated SQL)")
+    
+    if user_session_id:
+        log_print(f"✅ Inspire Session ID: '{user_session_id}' (user-provided)")
+    else:
+        log_print(f"ℹ️ Inspire Session ID: Not provided (will be auto-generated)")
     
     if validation_errors:
         import sys as _sys
@@ -455,35 +534,52 @@ def main():
     log_print("✅ ALL VALIDATIONS PASSED - Starting generation...")
     log_print("=" * 80)
 
-
-    # --- Build config dict from validated widget values ---
+    # --- 3. Pack values and Run ---
+    
     widget_values = {
         "business": business_name,
+        "inspire_database": inspire_database,
+        "operation_mode": operation_mode,
+        "table_election_mode": table_election_mode,
+        "use_cases_quality": use_cases_quality,
+        "strategic_goals": strategic_goals_str,
+        "business_priorities": business_priorities_str,
+        "business_domains": business_domains_str,
         "catalogs": catalogs_str,
         "schemas": schemas_str,
         "tables": tables_str,
         "generate": generate_str,
         "generation_path": generation_path,
         "output_language": output_language_str,
-        "business_priorities": business_priorities_str,
-        "strategic_goals": strategic_goals_str,
-        "business_domains": business_domains_str,
         "use_unstructured_data": use_unstructured_data_str,
+        "sql_generation_per_domain": sql_generation_per_domain,
         "technical_exclusion_strategy": technical_exclusion_strategy,
-        "operation_mode": operation_mode,
         "sql_model_serving": sql_model_serving,
-        "quality_level": quality_level,
         "json_file_path": json_file_path,
-        "inspire_database": inspire_database,
+        "session_id": user_session_id
     }
 
-    # --- Save validated config to pipeline state ---
-    pipeline_state = PipelineState(spark, inspire_database)
-    pipeline_state.ensure_table()
-    pipeline_state.save("config", widget_values)
-    
-    log_print("✅ Configuration validated and saved. Ready for next phase.")
-    dbutils.notebook.exit(json.dumps({"status": "success", "inspire_database": inspire_database}))
+    inspirer = None
+    try:
+        inspirer = DatabricksInspire(**widget_values)
+        inspirer.run()
+        inspirer.finalize_atomic_writer(success=True)
+    except NameError as ne:
+        if inspirer:
+            inspirer.finalize_atomic_writer(success=False, error_message=str(ne))
+        if ('DataLoader' in str(ne) or 'AIAgent' in str(ne) or 
+            'PROMPT_TEMPLATES' in str(ne) or 'DatabricksInspire' in str(ne) or 
+            'setup_logging' in str(ne) or 'TranslationService' in str(ne)):
+            
+            print(f"ERROR: A required class, function, or variable is missing: {ne}", file=sys.stderr)
+            print("Please ensure `setup_logging`, `DataLoader`, `AIAgent`, `PROMPT_TEMPLATES`, `TranslationService`, and `DatabricksInspire` are defined in preceding cells.", file=sys.stderr)
+        else:
+            raise
+    except Exception as e:
+        if inspirer:
+            inspirer.finalize_atomic_writer(success=False, error_message=str(e))
+        print(f"An unexpected error occurred: {e}", file=sys.stderr)
+        logging.getLogger("main").critical("Main execution failed")
 
 main()
 

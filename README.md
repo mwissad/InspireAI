@@ -20,44 +20,53 @@ Point it at your Databricks workspace, provide business context, and Inspire AI 
 │                                          │                  │
 └──────────────────────────────────────────┼──────────────────┘
                                            │ Databricks REST APIs
-                                           │ (Jobs, Clusters, Unity Catalog,
-                                           │  SQL Statement Execution, Workspace)
+                                           │ (Jobs, SQL Statements,
+                                           │  Unity Catalog, Workspace)
                                            ▼
                   ┌──────────────────────────────────────────┐
                   │          Databricks Workspace            │
                   │                                          │
                   │  ┌────────────────────────────────────┐  │
-                  │  │   Multi-Task Pipeline (9 notebooks) │  │
+                  │  │   Inspire v41 Single Notebook       │  │
+                  │  │   (DBC archive → auto-published)    │  │
                   │  │                                      │  │
-                  │  │  01_init_validate                    │  │
-                  │  │       ▼                              │  │
-                  │  │  02_business_context                 │  │
-                  │  │       ▼                              │  │
-                  │  │  03_schema_discovery                 │  │
-                  │  │       ▼                              │  │
-                  │  │  04_use_case_gen                     │  │
-                  │  │       ▼                              │  │
-                  │  │  05_scoring_quality                  │  │
-                  │  │       ▼                              │  │
-                  │  │  06_sql_notebooks                    │  │
-                  │  │       ▼                              │  │
-                  │  │  07_documentation                    │  │
-                  │  │       ▼                              │  │
-                  │  │  08_samples_finalize                 │  │
+                  │  │   Phases:                            │  │
+                  │  │   1. Init & Business Context         │  │
+                  │  │   2. Use Case Generation (parallel)  │  │
+                  │  │   3. Domain Clustering               │  │
+                  │  │   4. Scoring & Deduplication         │  │
+                  │  │   5. SQL Generation (parallel)       │  │
+                  │  │   6. Summary & Artifacts             │  │
+                  │  │   7. Translation (optional)          │  │
                   │  └────────────────────────────────────┘  │
                   │                                          │
                   │  ┌────────────────────────────────────┐  │
                   │  │  Unity Catalog (Delta Tables)       │  │
                   │  │  └─ <catalog>.<schema>              │  │
-                  │  │     ├─ _pipeline_state              │  │
-                  │  │     ├─ _pipeline_use_cases_raw      │  │
-                  │  │     ├─ _pipeline_use_cases_scored   │  │
-                  │  │     ├─ _pipeline_use_cases_final    │  │
-                  │  │     ├─ _pipeline_business_schema    │  │
-                  │  │     └─ __inspire_usecases           │  │
+                  │  │     ├─ __inspire_session            │  │
+                  │  │     │    ├─ session_id (PK)         │  │
+                  │  │     │    ├─ processing_status       │  │
+                  │  │     │    ├─ completed_percent       │  │
+                  │  │     │    ├─ widget_values (JSON)    │  │
+                  │  │     │    ├─ results_json (JSON)     │  │
+                  │  │     │    └─ completed_on            │  │
+                  │  │     │                               │  │
+                  │  │     └─ __inspire_step               │  │
+                  │  │          ├─ step_id (PK)            │  │
+                  │  │          ├─ stage_name              │  │
+                  │  │          ├─ step_name               │  │
+                  │  │          ├─ status                  │  │
+                  │  │          ├─ progress_increment      │  │
+                  │  │          └─ result_json (JSON)      │  │
                   │  └────────────────────────────────────┘  │
                   └──────────────────────────────────────────┘
 ```
+
+### Key Design Principles (v41)
+
+- **Single Notebook Design:** The entire pipeline runs as one Databricks notebook (published from a `.dbc` archive). No multi-task workflow orchestration needed.
+- **READY/DONE Handshake:** Real-time progress tracking via `__inspire_session` and `__inspire_step` Delta tables. The app polls for new steps, renders them, then ACKs by setting `processing_status = 'done'`.
+- **results_json:** When the pipeline completes, the full use case catalog is stored in `__inspire_session.results_json` — a structured JSON with domains, use cases, table/column registries, and executive summaries.
 
 ---
 
@@ -77,10 +86,10 @@ Point it at your Databricks workspace, provide business context, and Inspire AI 
 | Page | Description |
 |------|-------------|
 | **Landing** | Welcome screen with branding |
-| **Config** | Connect to Databricks (token, cluster, notebook paths), publish notebooks |
+| **Config** | Connect to Databricks (token, cluster, notebook path), publish the notebook |
 | **Launch** | Configure pipeline parameters (catalog, schema, business context, AI model) and submit |
-| **Monitor** | Real-time job tracking with per-task status, logs, and progress |
-| **Results** | Browse generated use cases — filterable cards with scores, SQL, and metadata |
+| **Monitor** | Real-time pipeline tracking with session/step polling, progress bar, and stage timeline |
+| **Results** | Browse generated use cases — session picker, domain breakdown, filterable cards with scores, SQL, and metadata |
 
 ### Backend (`backend/`)
 
@@ -94,36 +103,32 @@ Point it at your Databricks workspace, provide business context, and Inspire AI 
 
 | Endpoint | Description |
 |----------|-------------|
-| `POST /api/run/pipeline` | Submit the 9-step multi-task pipeline as a Databricks job |
-| `POST /api/run` | Submit a single notebook run |
-| `GET /api/run/:id/status` | Poll job/task status |
+| `POST /api/run` | Submit the Inspire notebook as a Databricks job |
+| `GET /api/run/:id` | Poll job status |
 | `GET /api/run/:id/output` | Retrieve notebook output |
+| `POST /api/publish` | Upload bundled DBC to workspace |
 | `GET /api/catalogs` | List Unity Catalog catalogs |
 | `GET /api/catalogs/:name/schemas` | List schemas in a catalog |
 | `GET /api/warehouses` | List SQL warehouses |
 | `GET /api/clusters` | List available clusters |
-| `POST /api/publish/pipeline` | Upload notebooks to Databricks workspace |
-| `GET /api/results/tables` | List pipeline output tables in a schema |
-| `GET /api/results/use-cases` | Fetch generated use cases from Delta tables |
-| `GET /api/results/pipeline-state` | Fetch pipeline execution state |
+| **v41 Session/Step Tracking** | |
+| `GET /api/inspire/sessions` | List all Inspire sessions in a database |
+| `GET /api/inspire/session` | Poll a specific session (progress, status, results) |
+| `GET /api/inspire/steps` | Get step events (delta: new since last poll) |
+| `POST /api/inspire/ack` | ACK processed steps (READY → DONE handshake) |
+| `GET /api/inspire/results` | Fetch final `results_json` from a completed session |
+| `GET /api/results/tables` | List Inspire tables in a schema |
 
 ### Notebooks (`notebooks/`)
 
-The AI pipeline is composed of 9 Databricks notebooks plus a shared commons library:
+The v41 pipeline is a single monolithic notebook. When extracted, it contains:
 
-| Notebook | Description |
-|----------|-------------|
-| `00_inspire_commons.py` | Shared library — `DatabricksInspire` class, `PipelineState`, utilities, LLM orchestration |
-| `01_init_validate.py` | Validate inputs, check catalog/schema existence, initialize pipeline state |
-| `02_business_context.py` | Extract business context from documents & user input using LLM |
-| `03_schema_discovery.py` | Discover Unity Catalog metadata — tables, columns, comments, relationships |
-| `04_use_case_gen.py` | Generate use cases via 2-pass LLM ensemble with table coverage retries |
-| `05_scoring_quality.py` | Cluster, deduplicate, score, and quality-filter use cases |
-| `06_sql_notebooks.py` | Generate SQL for each use case, validate it, assemble domain notebooks |
-| `07_documentation.py` | Generate PDF, PPTX, and Excel catalogs |
-| `08_samples_finalize.py` | Execute sample queries and finalize the pipeline |
+| File | Description |
+|------|-------------|
+| `00_inspire_commons.py` | Shared library — `DatabricksInspire` class, `PipelineState`, `AtomicWriter`, LLM orchestration, logging |
+| `01_init_validate.py` | Entry point — `create_widgets()`, `main()`, validates inputs, runs the full pipeline |
 
-State between notebooks is persisted via Delta tables using the `PipelineState` class.
+The notebook auto-creates `__inspire_session` and `__inspire_step` Delta tables for tracking.
 
 ---
 
@@ -136,14 +141,17 @@ State between notebooks is persisted via Delta tables using the `PipelineState` 
 - A **Databricks workspace** with:
   - A Personal Access Token (PAT)
   - Access to Unity Catalog
-  - A SQL Warehouse or All-Purpose Cluster
-  - (Optional) Serverless compute enabled
+  - A SQL Warehouse (for Results page queries)
+  - A cluster or serverless compute
 
 ### 1. Clone the repository
 
 ```bash
 git clone https://github.com/mwissad/InspireApp.git
 cd InspireApp
+
+# For v41 (latest):
+git checkout v41_dev
 ```
 
 ### 2. Install dependencies
@@ -191,10 +199,10 @@ cd frontend && npm run dev
 ### 5. Use the app
 
 1. Open [http://localhost:5173](http://localhost:5173)
-2. **Config page:** Enter your Databricks PAT token, select a cluster, and publish the pipeline notebooks
+2. **Config page:** Enter your Databricks PAT token, select a cluster, and publish the Inspire notebook
 3. **Launch page:** Configure parameters (catalog to analyze, business context, AI model) and submit
-4. **Monitor page:** Watch real-time progress of all 8 pipeline tasks
-5. **Results page:** Browse, search, and filter the generated use cases
+4. **Monitor page:** Watch real-time progress with the READY/DONE handshake protocol — see each pipeline stage, step, and substep as they execute
+5. **Results page:** Select a completed session to browse, search, and filter the generated use cases with executive summaries and domain breakdowns
 
 ---
 
@@ -222,31 +230,21 @@ InspireApp/
 │       ├── components/           # Reusable UI components
 │       │   ├── ConfigForm.jsx    # Pipeline parameter form
 │       │   ├── Header.jsx        # Page headers
-│       │   ├── RunStatus.jsx     # Job status badges
 │       │   ├── SettingsPanel.jsx  # Connection settings
-│       │   ├── Stepper.jsx       # Pipeline progress stepper
 │       │   └── DatabricksLogo.jsx
 │       └── pages/
 │           ├── LandingPage.jsx   # Welcome screen
 │           ├── ConfigPage.jsx    # Databricks connection setup
 │           ├── LaunchPage.jsx    # Parameter config & job submission
-│           ├── MonitorPage.jsx   # Real-time job monitoring
-│           └── ResultsPage.jsx   # Use case browser
+│           ├── MonitorPage.jsx   # Real-time session/step monitoring
+│           └── ResultsPage.jsx   # Use case browser (reads results_json)
 │
 ├── notebooks/
-│   ├── 00_inspire_commons.py     # Shared library (~34K lines)
-│   ├── 01_init_validate.py       # Step 1: Init & validate
-│   ├── 02_business_context.py    # Step 2: Business context extraction
-│   ├── 03_schema_discovery.py    # Step 3: Schema discovery
-│   ├── 04_use_case_gen.py        # Step 4: Use case generation
-│   ├── 05_scoring_quality.py     # Step 5: Scoring & quality
-│   ├── 06_sql_notebooks.py       # Step 6: SQL gen & notebooks
-│   ├── 07_documentation.py       # Step 7: Documentation
-│   ├── 08_samples_finalize.py    # Step 8: Samples & finalize
-│   └── workflow_definition.json  # Multi-task pipeline DAG definition
+│   ├── 00_inspire_commons.py     # Shared library
+│   └── 01_init_validate.py       # Pipeline entry point
 │
-├── databricks_inspire_v38.dbc    # Bundled DBC archive (auto-published)
-└── split_notebook.py             # Utility: split monolith into notebooks
+├── databricks_inspire_v41.dbc    # Bundled DBC archive (auto-published)
+└── split_notebook.py             # Utility: extract notebooks from DBC
 ```
 
 ---
@@ -258,12 +256,14 @@ InspireApp/
 | Parameter | Description |
 |-----------|-------------|
 | `inspire_database` | Target `catalog.schema` where pipeline stores results |
-| `catalogs_to_analyze` | Comma-separated list of catalogs to scan |
-| `schemas_to_analyze` | Comma-separated schemas to include (or `*` for all) |
-| `business_context` | Free-text business description for the LLM |
-| `ai_model_name` | Databricks Foundation Model endpoint (e.g., `databricks-claude-sonnet-4`) |
-| `max_parallelism` | Max concurrent LLM calls (default: 10) |
-| `generation_options` | Output types: `excel`, `notebooks`, `pdf`, `pptx` |
+| `uc_metadata` | Comma-separated `catalog.schema` paths to scan |
+| `business_name` | Company/business name for the analysis |
+| `operation` | `Discover Usecases` or `SQL Regeneration` |
+| `quality_level` | Use case quality threshold |
+| `strategic_goals` | Comma-separated strategic goals for alignment scoring |
+| `business_priorities` | Comma-separated business priorities |
+| `generation_options` | Output types: `Use Cases`, `SQL`, `Summary`, `Excel` |
+| `documents_languages` | Output languages (e.g. `English`, `Arabic`) |
 
 ### Environment Variables (`backend/.env`)
 
@@ -272,6 +272,67 @@ InspireApp/
 | `DATABRICKS_HOST` | Yes | — | Full Databricks workspace URL |
 | `NOTEBOOK_PATH` | No | — | Default notebook path (overridable in UI) |
 | `PORT` | No | `3001` | Backend server port |
+
+---
+
+## 📊 Tracking Tables (`__inspire_session` & `__inspire_step`)
+
+### `__inspire_session`
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `session_id` | BIGINT | Unique session identifier |
+| `processing_status` | STRING | `'done'` or `'ready'` (READY/DONE handshake) |
+| `completed_percent` | DOUBLE | 0.0 → 100.0 progress |
+| `widget_values` | VARIANT | JSON: all input parameters |
+| `results_json` | VARIANT | JSON: final use case catalog (populated on completion) |
+| `completed_on` | TIMESTAMP | NULL while running; set when pipeline finishes |
+
+### `__inspire_step`
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `step_id` | BIGINT | Unique step identifier |
+| `session_id` | BIGINT | FK to `__inspire_session` |
+| `stage_name` | STRING | Business-friendly stage title |
+| `step_name` | STRING | Stable action title |
+| `sub_step_name` | STRING | Live status text |
+| `status` | STRING | `started`, `ended_success`, `ended_warning`, `ended_error` |
+| `progress_increment` | DOUBLE | Per-event delta |
+| `result_json` | VARIANT | Step-specific structured payload |
+
+### `results_json` Structure
+
+When the pipeline completes, `results_json` contains:
+
+```json
+{
+  "business_name": "Contoso",
+  "title": "Contoso Use Cases Catalog",
+  "executive_summary": "...",
+  "domains_summary": "...",
+  "table_registry": { "t001": "catalog.schema.table" },
+  "column_registry": { "c001": "catalog.schema.table.column, description" },
+  "domains": [
+    {
+      "domain_name": "Customer Analytics",
+      "summary": "...",
+      "use_cases": [
+        {
+          "No": "1",
+          "Name": "Forecast Revenue",
+          "Business Domain": "Customer Analytics",
+          "type": "Risk",
+          "Quality": "Very High",
+          "Priority": "Very High",
+          "SQL": "CREATE OR REPLACE TABLE ...",
+          "..."
+        }
+      ]
+    }
+  ]
+}
+```
 
 ---
 
@@ -300,9 +361,18 @@ InspireApp/
 
 ### Modifying the pipeline
 
-1. Edit notebooks in `notebooks/`
-2. Update `workflow_definition.json` if adding/removing steps
+1. Update the DBC archive (`databricks_inspire_v41.dbc`)
+2. Use `split_notebook.py` to extract individual notebooks
 3. Re-publish via the Config page in the UI
+
+---
+
+## 🌿 Branches
+
+| Branch | Description |
+|--------|-------------|
+| `main` | Original version with multi-task pipeline (v38) |
+| `v41_dev` | v41 single-notebook design with session/step tracking |
 
 ---
 

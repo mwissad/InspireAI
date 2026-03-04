@@ -26,24 +26,16 @@ export default function App() {
   const [settings, setSettings] = useState({
     databricksToken: '',
     notebookPath: '',
-    pipelineBasePath: '',
     notebookPublished: false,
-    pipelinePublished: false,
     clusterId: '',
-    runMode: 'pipeline', // 'single' or 'pipeline'
   });
   const [runId, setRunId] = useState(null);
-  const [runMode, setRunMode] = useState(null); // tracks how the current run was submitted
   const [lastJobParams, setLastJobParams] = useState(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState(null);
 
   const isConnected = !!settings.databricksToken;
-  const isReady = isConnected && (
-    settings.runMode === 'pipeline'
-      ? !!settings.pipelineBasePath
-      : !!settings.notebookPath
-  );
+  const isReady = isConnected && !!settings.notebookPath;
 
   const apiFetch = useCallback(
     (url, options = {}) =>
@@ -61,29 +53,15 @@ export default function App() {
     setIsSubmitting(true);
     setSubmitError(null);
     try {
-      let res;
-      if (settings.runMode === 'pipeline' && settings.pipelineBasePath) {
-        // Submit as multi-task pipeline
-        res = await apiFetch('/api/run/pipeline', {
-          method: 'POST',
-          body: JSON.stringify({
-            params,
-            cluster_id: settings.clusterId || undefined,
-            notebook_base_path: settings.pipelineBasePath,
-            inspire_database: params['02_inspire_database'] || '',
-          }),
-        });
-      } else {
-        // Submit as single notebook
-        res = await apiFetch('/api/run', {
-          method: 'POST',
-          body: JSON.stringify({
-            params,
-            cluster_id: settings.clusterId || undefined,
-            notebook_path: settings.notebookPath || undefined,
-          }),
-        });
-      }
+      // v41: single notebook run
+      const res = await apiFetch('/api/run', {
+        method: 'POST',
+        body: JSON.stringify({
+          params,
+          cluster_id: settings.clusterId || undefined,
+          notebook_path: settings.notebookPath || undefined,
+        }),
+      });
       let data;
       try {
         data = await res.json();
@@ -92,7 +70,6 @@ export default function App() {
       }
       if (!res.ok) throw new Error(data.error || `Failed to submit (HTTP ${res.status})`);
       setRunId(data.run_id);
-      setRunMode(data.mode || 'single');
       setLastJobParams(params);
       setPage('monitor');
     } catch (err) {
@@ -219,9 +196,7 @@ export default function App() {
           {page === 'monitor' && canMonitor && (
             <MonitorPage
               runId={runId}
-              runMode={runMode}
               inspireDatabase={lastJobParams?.['02_inspire_database'] || ''}
-              generationOptions={lastJobParams?.['08_generation_options']?.split(',') || []}
               onNewRun={handleNewRun}
               onBack={handleNewRun}
               apiFetch={apiFetch}

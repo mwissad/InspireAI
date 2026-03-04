@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Split databricks_inspire_v38.dbc into independent phase notebooks
+Split databricks_inspire_v41.dbc into independent phase notebooks
 for a Databricks Lakeflow (Workflows) multi-task job.
 
 Architecture:
@@ -17,7 +17,8 @@ Architecture:
 State between phases is persisted via:
   - Delta table: {inspire_database}._inspire_pipeline_state (JSON config)
   - IntermediateStorageManager: file-based use case storage
-  - Delta tables: tracking table, use case catalog
+  - Delta tables: __inspire_session, __inspire_step (tracking)
+  - Delta tables: use case catalog
 """
 
 import json
@@ -26,7 +27,7 @@ import zipfile
 import shutil
 
 # ─── Configuration ───
-DBC_PATH = "databricks_inspire_v38.dbc"
+DBC_PATH = "databricks_inspire_v41.dbc"
 OUTPUT_DIR = "notebooks"
 
 # ─── Extract notebook from DBC ───
@@ -55,8 +56,8 @@ def main():
     print("📂 Extracting notebook from DBC...")
     nb = extract_notebook_source(DBC_PATH)
     
-    # The main code is in commands[1]
-    main_code = nb['commands'][1]['command']
+    # v41: main code is in commands[2] (commands[0] is entry point, commands[1] is markdown)
+    main_code = nb['commands'][2]['command']
     lines = main_code.split('\n')
     total_lines = len(lines)
     print(f"   Total lines: {total_lines}")

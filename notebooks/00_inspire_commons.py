@@ -1,69 +1,4 @@
 # Databricks notebook source
-# ==============================================================================
-# ALL IMPORTS (must be at the top so every phase notebook inherits them via %run)
-# ==============================================================================
-# --- Standard library ---
-import os
-import sys
-import re
-import json
-import csv
-import io
-import uuid
-import base64
-import random
-import tempfile
-import shutil
-import datetime
-import html
-import logging
-import warnings
-import subprocess
-import time
-import traceback
-import copy
-import math
-import hashlib
-import gc
-import threading
-import concurrent.futures
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from collections import defaultdict
-from typing import List, Dict, Optional, Tuple, Any, Union
-from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
-from enum import Enum
-
-# --- Third-party ---
-import pandas as pd
-import pkg_resources
-
-# --- PySpark ---
-from pyspark.sql import SparkSession, Row, DataFrame
-from pyspark.sql import functions as F
-from pyspark.sql.functions import (
-    col, lit, when, coalesce, concat, length, explode, array, struct,
-    count, sum as spark_sum, avg, min as spark_min, max as spark_max,
-    row_number, dense_rank, collect_list, collect_set, first,
-    upper, lower, trim, regexp_replace, split, size,
-    to_json, from_json, current_timestamp, date_format,
-    monotonically_increasing_id, udf, broadcast
-)
-from pyspark.sql.types import (
-    StructType, StructField, StringType, IntegerType, LongType,
-    DoubleType, BooleanType, ArrayType, MapType, TimestampType
-)
-from pyspark.sql.utils import AnalysisException
-from pyspark.sql.window import Window
-
-# --- Databricks SDK ---
-try:
-    from databricks.sdk import WorkspaceClient
-    from databricks.sdk.service import workspace
-except ImportError:
-    WorkspaceClient = None
-    workspace = None
-
 DATABRICKS_INSPIRE_BANNER = r"""
 ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
 ┃    ____        _        _          _      _                             ┃
@@ -80,126 +15,289 @@ DATABRICKS_INSPIRE_BANNER = r"""
 ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 """
 
-# --- Global Configuration ---
-AI_MODEL_NAME = "databricks-gpt-oss-20b"
+import logging
 
 # ==============================================================================
-# TECHNICAL CONTEXT - Prompt to Model Mapping Configuration
+# TECHNICAL CONTEXT - Prompt to Model Type Cascade Configuration
 # ==============================================================================
-# This structure maps all prompts to their assigned LLM models.
-# Modify the "model" field for each prompt to route it to a different model.
-# Available models are defined in the "models" section below.
+# Each prompt is mapped to a model_type (thinker/worker). At runtime, the system
+# resolves model_type to an ordered list of models (sorted by "order" field).
+# The lowest-order model is tried first; on failure, the next one is used.
+# To change which type of model a prompt uses, modify "model_type" below.
+# To add/remove/reorder models, modify the "models" section.
 # ==============================================================================
 TECHNICAL_CONTEXT = {
+    "runtime": {
+        "llm_timeout_seconds": 300,
+        "sql_generation_base_timeout": 180,
+        "sql_generation_per_cte_timeout": 30,
+        "sql_generation_max_timeout": 360,
+        "max_retry_attempts": 0,
+        "scan_parallelism": 8,
+        "metadata_parallelism": 8,
+        "global_min_parallelism": 4,
+        "global_max_parallelism": 20,
+        "default_max_parallelism": 16,
+        "cluster_memory_gb": 32,
+        "cluster_worker_count": 2,
+        "quality_scoring_batch_size": 30,
+        "quality_scoring_max_workers": 10,
+        "value_scoring_retry_batch_size": 40,
+        "value_scoring_max_retry_rounds": 2,
+        "batch_processing_timeout": 900,
+        "batch_processing_max_attempts": 3,
+        "use_combined_scoring": True,
+        "table_election_threshold": 5,
+        "table_election_transactional_tables_min": 3,
+    },
     "prompts_models": [
         # === PHASE 1: INITIALIZATION & CONTEXT EXTRACTION ===
         # Temperature: 0.3-0.4 for accurate extraction of business context
-        {"prompt_name": "BUSINESS_CONTEXT_WORKER_PROMPT", "model": "claude-sonnet-4-5", "temperature": 0.3},      # Step 1: Extract business context, goals, priorities
-        {"prompt_name": "UNSTRUCTURED_DATA_DOCUMENTS_PROMPT", "model": "claude-sonnet-4-5", "temperature": 0.4},  # Step 2: Generate unstructured doc list (if enabled)
-        {"prompt_name": "FILTER_BUSINESS_TABLES_PROMPT", "model": "claude-sonnet-4-5", "temperature": 0.2},       # Step 3: Filter business vs technical tables (precision needed)
+        {"prompt_name": "BUSINESS_CONTEXT_WORKER_PROMPT", "model_type": "worker", "temperature": 0.3, "stage_name": "Business Context", "step_name": "Business Context Worker", "progress_increment": 2.0},      # Step 1: Extract business context, goals, priorities
+        {"prompt_name": "UNSTRUCTURED_DATA_DOCUMENTS_PROMPT", "model_type": "worker", "temperature": 0.4, "stage_name": "Unstructured Context", "step_name": "Document Discovery", "progress_increment": 1.0},  # Step 2: Generate unstructured doc list (if enabled)
+        {"prompt_name": "FILTER_BUSINESS_TABLES_PROMPT", "model_type": "worker", "temperature": 0.2, "stage_name": "Table Filtering", "step_name": "Business Table Filter", "progress_increment": 2.0},       # Step 3: Filter business vs technical tables (precision needed)
         
         # === PHASE 2: USE CASE GENERATION (PARALLEL) ===
-        # Temperature: 0.7-0.8 for creative/innovative use case generation
-        {"prompt_name": "BASE_USE_CASE_GEN_PROMPT", "model": "claude-sonnet-4-5", "temperature": 0.7},            # Step 4: Main structured data use case generation (creative)
-        {"prompt_name": "AI_USE_CASE_GEN_PROMPT", "model": "claude-sonnet-4-5", "temperature": 0.8},              # Step 4: AI/ML focused use case generation (highly creative)
-        {"prompt_name": "STATS_USE_CASE_GEN_PROMPT", "model": "claude-sonnet-4-5", "temperature": 0.7},           # Step 4: Statistical use case generation (creative)
-        {"prompt_name": "UNSTRUCTURED_DATA_USE_CASE_GEN_PROMPT", "model": "claude-sonnet-4-5", "temperature": 0.7}, # Step 4: Unstructured data use cases (creative)
+        # Temperature: 0.4-0.5 — lowered for Extreme Quality (reduces hallucination, keeps creativity)
+        {"prompt_name": "BASE_USE_CASE_GEN_PROMPT", "model_type": "worker", "temperature": 0.4, "stage_name": "Use Cases Generation", "step_name": "Base Use Cases", "progress_increment": 4.0},            # Step 4: Main structured data use case generation
+        {"prompt_name": "AI_USE_CASE_GEN_PROMPT", "model_type": "worker", "temperature": 0.5, "stage_name": "AI Use Cases Generation", "step_name": "AI Use Cases", "progress_increment": 4.0},              # Step 4: AI/ML focused use case generation
+        {"prompt_name": "STATS_USE_CASE_GEN_PROMPT", "model_type": "worker", "temperature": 0.4, "stage_name": "Statistical Use Cases Generation", "step_name": "Statistical Use Cases", "progress_increment": 4.0},           # Step 4: Statistical use case generation
+        {"prompt_name": "UNSTRUCTURED_DATA_USE_CASE_GEN_PROMPT", "model_type": "worker", "temperature": 0.5, "stage_name": "Use Cases Generation", "step_name": "Unstructured Use Cases", "progress_increment": 2.0}, # Step 4: Unstructured data use cases
         
         # === PHASE 3: DOMAIN CLUSTERING ===
         # Temperature: 0.4-0.5 for balanced clustering decisions
-        {"prompt_name": "DOMAIN_FINDER_PROMPT", "model": "claude-sonnet-4-5", "temperature": 0.5},                # Step 5: Cluster use cases into business domains
-        {"prompt_name": "SUBDOMAIN_DETECTOR_PROMPT", "model": "claude-sonnet-4-5", "temperature": 0.4},           # Step 6: Detect subdomains within each domain
-        {"prompt_name": "DOMAINS_MERGER_PROMPT", "model": "claude-sonnet-4-5", "temperature": 0.4},               # Step 7: Merge similar domains (optional)
+        {"prompt_name": "DOMAIN_FINDER_PROMPT", "model_type": "worker", "temperature": 0.5, "stage_name": "Business Domains Clustering", "step_name": "Domain Finder", "progress_increment": 2.0},                # Step 5: Cluster use cases into business domains
+        {"prompt_name": "SUBDOMAIN_DETECTOR_PROMPT", "model_type": "worker", "temperature": 0.4, "stage_name": "Business Domain Clustering", "step_name": "Subdomain Detector", "progress_increment": 2.0},           # Step 6: Detect subdomains within each domain
+        {"prompt_name": "DOMAINS_MERGER_PROMPT", "model_type": "worker", "temperature": 0.4, "stage_name": "Business Domains Clustering", "step_name": "Domain Merger", "progress_increment": 1.0},               # Step 7: Merge similar domains (optional)
         
         # === PHASE 4: SCORING & DEDUPLICATION (PARALLEL SCORING) ===
         # Temperature: 0.2 for consistent, accurate scoring
         # VALUE SCORE: Focuses on business value, ROI, strategic alignment
         # QUALITY SCORE: Focuses on data sufficiency, cause-effect, technical design validity
-        {"prompt_name": "USE_CASE_VALUE_SCORE_PROMPT", "model": "claude-sonnet-4-5", "temperature": 0.2},        # Step 8a: Score use cases (ROI, Strategic Alignment) - VALUE focus
-        {"prompt_name": "USE_CASE_QUALITY_SCORE_PROMPT", "model": "claude-sonnet-4-5", "temperature": 0.1},      # Step 8b: Score use cases (Data Sufficiency, Cause-Effect) - QUALITY focus
-        {"prompt_name": "REVIEW_USE_CASES_PROMPT", "model": "claude-sonnet-4-5", "temperature": 0.3},            # Step 9: Intelligent deduplication using scores
+        {"prompt_name": "USE_CASE_VALUE_SCORE_PROMPT", "model_type": "worker", "temperature": 0.2, "stage_name": "Use Cases Scoring", "step_name": "Value Scoring", "progress_increment": 2.0},        # Step 8a: Score use cases (ROI, Strategic Alignment) - VALUE focus
+        {"prompt_name": "USE_CASE_QUALITY_SCORE_PROMPT", "model_type": "worker", "temperature": 0.1, "stage_name": "Use Cases Scoring", "step_name": "Quality Scoring", "progress_increment": 2.0},      # Step 8b: Score use cases (Data Sufficiency, Cause-Effect) - QUALITY focus
+        {"prompt_name": "COMBINED_VALUE_QUALITY_SCORE_PROMPT", "model_type": "worker", "temperature": 0.15, "stage_name": "Use Cases Scoring", "step_name": "Combined Value Quality Scoring", "progress_increment": 3.0}, # Step 8c: Combined value+quality scoring in one pass
+        {"prompt_name": "REVIEW_USE_CASES_PROMPT", "model_type": "worker", "temperature": 0.3, "stage_name": "Review", "step_name": "Use Cases Review", "progress_increment": 2.0},            # Step 9: Deduplication (global via thinker override, per-domain fallback via worker cascade)
         
         # === PHASE 5: SQL GENERATION ===
         # Temperature: 0.1-0.2 for accurate, syntactically correct SQL
-        {"prompt_name": "USE_CASE_SQL_GEN_PROMPT", "model": "claude-sonnet-4-5", "temperature": 0.1},             # Step 10: Generate SQL (accuracy critical)
-        {"prompt_name": "USE_CASE_SQL_FIX_PROMPT", "model": "claude-sonnet-4-5", "temperature": 0.1},             # Step 11: Fix SQL errors (precision critical)
-        {"prompt_name": "INTERPRET_USER_SQL_REGENERATION_PROMPT", "model": "claude-sonnet-4-5", "temperature": 0.2}, # SQL Regeneration mode (special)
+        {"prompt_name": "USE_CASE_SQL_GEN_PROMPT", "model_type": "worker", "temperature": 0.1, "stage_name": "SQL Generation", "step_name": "SQL Generator", "progress_increment": 4.0},             # Step 10: Generate SQL (accuracy critical)
+        {"prompt_name": "USE_CASE_SQL_FIX_PROMPT", "model_type": "worker", "temperature": 0.1, "stage_name": "SQL Generation", "step_name": "SQL Fixer", "progress_increment": 2.0},             # Step 11: Fix SQL errors (precision critical)
+        {"prompt_name": "INTERPRET_USER_SQL_REGENERATION_PROMPT", "model_type": "worker", "temperature": 0.2, "stage_name": "SQL Regeneration", "step_name": "User Intent Interpreter", "progress_increment": 1.0}, # SQL Regeneration mode (special)
         
         # === PHASE 6: SUMMARY & ARTIFACTS ===
         # Temperature: 0.5-0.6 for engaging summaries and dashboards
-        {"prompt_name": "SUMMARY_GEN_PROMPT", "model": "claude-sonnet-4-5", "temperature": 0.5},                  # Step 12: Generate executive summary
-        {"prompt_name": "DASHBOARDS_GEN_PROMPT", "model": "claude-sonnet-4-5", "temperature": 0.6},               # Step 13: Generate dashboards (if enabled)
+        {"prompt_name": "SUMMARY_GEN_PROMPT", "model_type": "worker", "temperature": 0.5, "stage_name": "Summary", "step_name": "Executive Summary", "progress_increment": 1.0},                  # Step 12: Generate executive summary
+        {"prompt_name": "DASHBOARDS_GEN_PROMPT", "model_type": "worker", "temperature": 0.6, "stage_name": "Dashboard", "step_name": "Dashboard Generation", "progress_increment": 2.0},               # Step 13: Generate dashboards (if enabled)
         
         # === PHASE 7: TRANSLATION (MULTI-LANGUAGE) ===
         # Temperature: 0.2-0.3 for accurate translation
-        {"prompt_name": "KEYWORDS_TRANSLATE_PROMPT", "model": "claude-sonnet-4-5", "temperature": 0.2},           # Step 14: Translate keywords (accuracy)
-        {"prompt_name": "USE_CASE_TRANSLATE_PROMPT", "model": "claude-sonnet-4-5", "temperature": 0.3},           # Step 15: Translate use cases
+        {"prompt_name": "KEYWORDS_TRANSLATE_PROMPT", "model_type": "worker", "temperature": 0.2, "stage_name": "Translation", "step_name": "Keywords Translation", "progress_increment": 1.0},           # Step 14: Translate keywords (accuracy)
+        {"prompt_name": "USE_CASE_TRANSLATE_PROMPT", "model_type": "worker", "temperature": 0.3, "stage_name": "Translation", "step_name": "Use Cases Translation", "progress_increment": 1.0},           # Step 15: Translate use cases
     ],
-    "models": [
-        {
-            "name": "claude-sonnet-4-5",
-            "llm_endpoint_name": "databricks-claude-sonnet-4-5",
-            "llm_input_context_tokens_count": 200000,
-            "llm_output_context_tokens_count": 128000
-        },
-        {
-            "name": "claude-opus-4-5",
-            "llm_endpoint_name": "databricks-claude-opus-4-5",
-            "llm_input_context_tokens_count": 200000,
-            "llm_output_context_tokens_count": 64000
-        },
-        {
-            "name": "gpt-oss-120b",
-            "llm_endpoint_name": "databricks-gpt-oss-120b",
-            "llm_input_context_tokens_count": 131000,
-            "llm_output_context_tokens_count": 131000
-        },
-        {
-            "name": "gpt-oss-20b",
-            "llm_endpoint_name": "databricks-gpt-oss-20b",
-            "llm_input_context_tokens_count": 131000,
-            "llm_output_context_tokens_count": 32000
-        }
+    "models": [                                                                                                                                                                                                                                     
+      {                                                                                                                                                                                                                                             
+        "name": "claude-opus-4-6",                                                                                                                                                                                                                  
+        "order": 1,                                         
+        "type": "thinker",                                                                                                                                                                                                                          
+        "llm_endpoint_name": "databricks-claude-opus-4-6",                                                                                                                                                                                          
+        "llm_input_context_tokens_count": 200000,
+        "llm_output_context_tokens_count": 128000
+      },
+      {
+        "name": "claude-sonnet-4-6",
+        "order": 2,
+        "type": "worker",
+        "llm_endpoint_name": "databricks-claude-sonnet-4-6",
+        "llm_input_context_tokens_count": 200000,
+        "llm_output_context_tokens_count": 64000
+      },
+      {
+        "name": "claude-opus-4-5",
+        "order": 3,
+        "type": "thinker",
+        "llm_endpoint_name": "databricks-claude-opus-4-5",
+        "llm_input_context_tokens_count": 200000,
+        "llm_output_context_tokens_count": 64000
+      },
+      {
+        "name": "claude-sonnet-4-5",
+        "order": 4,
+        "type": "worker",
+        "llm_endpoint_name": "databricks-claude-sonnet-4-5",
+        "llm_input_context_tokens_count": 200000,
+        "llm_output_context_tokens_count": 64000
+      },
+      {
+        "name": "gpt-oss-120b",
+        "order": 5,
+        "type": "worker",
+        "llm_endpoint_name": "databricks-gpt-oss-120b",
+        "llm_input_context_tokens_count": 131072,
+        "llm_output_context_tokens_count": 25000
+      },
+      {
+        "name": "gpt-oss-20b",
+        "order": 6,
+        "type": "worker",
+        "llm_endpoint_name": "databricks-gpt-oss-20b",
+        "llm_input_context_tokens_count": 131072,
+        "llm_output_context_tokens_count": 25000
+      }
     ]
 }
 
-def get_model_endpoint_for_prompt(prompt_name: str) -> str:
+MULTI_ENTITY_PROGRESS_PROMPTS = {
+    "USE_CASE_VALUE_SCORE_PROMPT",
+    "USE_CASE_QUALITY_SCORE_PROMPT",
+    "COMBINED_VALUE_QUALITY_SCORE_PROMPT",
+    "REVIEW_USE_CASES_PROMPT",
+    "USE_CASE_SQL_GEN_PROMPT",
+    "USE_CASE_SQL_FIX_PROMPT",
+    "KEYWORDS_TRANSLATE_PROMPT",
+    "USE_CASE_TRANSLATE_PROMPT",
+}
+
+PROMPT_STORY_TITLES = {
+    "BUSINESS_CONTEXT_WORKER_PROMPT": ("Business Understanding", "Understanding Business Priorities"),
+    "UNSTRUCTURED_DATA_DOCUMENTS_PROMPT": ("Document Discovery", "Discovering Business Documents"),
+    "FILTER_BUSINESS_TABLES_PROMPT": ("Data Preparation", "Selecting Business Tables"),
+    "BASE_USE_CASE_GEN_PROMPT": ("Use Case Design", "Generating Core Use Cases"),
+    "AI_USE_CASE_GEN_PROMPT": ("Use Case Design", "Generating AI Use Cases"),
+    "STATS_USE_CASE_GEN_PROMPT": ("Use Case Design", "Generating Statistical Use Cases"),
+    "UNSTRUCTURED_DATA_USE_CASE_GEN_PROMPT": ("Use Case Design", "Generating Document-Based Use Cases"),
+    "DOMAIN_FINDER_PROMPT": ("Domain Mapping", "Mapping Business Domains"),
+    "SUBDOMAIN_DETECTOR_PROMPT": ("Domain Mapping", "Refining Business Subdomains"),
+    "DOMAINS_MERGER_PROMPT": ("Domain Mapping", "Consolidating Overlapping Domains"),
+    "USE_CASE_VALUE_SCORE_PROMPT": ("Use Case Prioritization", "Scoring Business Value"),
+    "USE_CASE_QUALITY_SCORE_PROMPT": ("Use Case Prioritization", "Scoring Use Case Quality"),
+    "COMBINED_VALUE_QUALITY_SCORE_PROMPT": ("Use Case Prioritization", "Ranking Use Cases"),
+    "REVIEW_USE_CASES_PROMPT": ("Use Case Prioritization", "Reviewing and Removing Duplicates"),
+    "USE_CASE_SQL_GEN_PROMPT": ("Implementation Planning", "Generating Implementation Plans"),
+    "USE_CASE_SQL_FIX_PROMPT": ("Implementation Planning", "Improving Plan Readiness"),
+    "INTERPRET_USER_SQL_REGENERATION_PROMPT": ("Implementation Planning", "Interpreting Revision Request"),
+    "SUMMARY_GEN_PROMPT": ("Executive Readout", "Building Executive Summary"),
+    "DASHBOARDS_GEN_PROMPT": ("Executive Readout", "Preparing Dashboard Ideas"),
+    "KEYWORDS_TRANSLATE_PROMPT": ("Localization", "Translating Business Keywords"),
+    "USE_CASE_TRANSLATE_PROMPT": ("Localization", "Translating Use Cases"),
+}
+
+PROMPT_STORY_STARTED_MESSAGES = {
+    "BUSINESS_CONTEXT_WORKER_PROMPT": "Inspire has started understanding business priorities and strategic goals",
+    "UNSTRUCTURED_DATA_DOCUMENTS_PROMPT": "Inspire has started discovering business-relevant documents",
+    "FILTER_BUSINESS_TABLES_PROMPT": "Inspire has started inspecting business tables for relevance",
+    "BASE_USE_CASE_GEN_PROMPT": "Inspire has started generating core business use cases",
+    "AI_USE_CASE_GEN_PROMPT": "Inspire has started inspecting business tables to generate AI-focused use cases",
+    "STATS_USE_CASE_GEN_PROMPT": "Inspire has started generating statistically driven use cases",
+    "UNSTRUCTURED_DATA_USE_CASE_GEN_PROMPT": "Inspire has started generating document-based use cases",
+    "DOMAIN_FINDER_PROMPT": "Inspire has started organizing use cases into business domains",
+    "SUBDOMAIN_DETECTOR_PROMPT": "Inspire has started refining domains into subdomains",
+    "DOMAINS_MERGER_PROMPT": "Inspire has started consolidating overlapping domains",
+    "USE_CASE_VALUE_SCORE_PROMPT": "Inspire has started evaluating business value for each use case",
+    "USE_CASE_QUALITY_SCORE_PROMPT": "Inspire has started evaluating quality and feasibility for each use case",
+    "COMBINED_VALUE_QUALITY_SCORE_PROMPT": "Inspire has started ranking use cases by combined value and quality",
+    "REVIEW_USE_CASES_PROMPT": "Inspire has started reviewing use cases to remove overlap and improve quality",
+    "USE_CASE_SQL_GEN_PROMPT": "Inspire has started preparing implementation plans for selected use cases",
+    "USE_CASE_SQL_FIX_PROMPT": "Inspire has started improving implementation readiness",
+    "INTERPRET_USER_SQL_REGENERATION_PROMPT": "Inspire has started interpreting your revision request",
+    "SUMMARY_GEN_PROMPT": "Inspire has started creating the executive summary",
+    "DASHBOARDS_GEN_PROMPT": "Inspire has started preparing dashboard recommendations",
+    "KEYWORDS_TRANSLATE_PROMPT": "Inspire has started translating business terminology",
+    "USE_CASE_TRANSLATE_PROMPT": "Inspire has started translating use case outcomes",
+}
+
+def _validate_runtime_config():
+    _rt = TECHNICAL_CONTEXT["runtime"]
+    _bounds = {
+        "llm_timeout_seconds": (30, 1800),
+        "sql_generation_base_timeout": (30, 600),
+        "sql_generation_per_cte_timeout": (5, 120),
+        "sql_generation_max_timeout": (60, 1200),
+        "max_retry_attempts": (0, 5),
+        "scan_parallelism": (1, 20),
+        "metadata_parallelism": (1, 20),
+        "global_min_parallelism": (1, 20),
+        "global_max_parallelism": (2, 50),
+        "default_max_parallelism": (1, 50),
+        "cluster_memory_gb": (4, 512),
+        "cluster_worker_count": (1, 64),
+        "quality_scoring_batch_size": (5, 200),
+        "quality_scoring_max_workers": (1, 20),
+        "value_scoring_retry_batch_size": (5, 100),
+        "value_scoring_max_retry_rounds": (0, 5),
+        "batch_processing_timeout": (60, 3600),
+        "batch_processing_max_attempts": (1, 10),
+        "table_election_threshold": (1, 500),
+        "table_election_transactional_tables_min": (1, 100),
+    }
+    for key, (lo, hi) in _bounds.items():
+        val = _rt.get(key)
+        if val is None:
+            raise ValueError(f"TECHNICAL_CONTEXT.runtime missing required key: '{key}'")
+        if not isinstance(val, (int, float)):
+            raise TypeError(f"TECHNICAL_CONTEXT.runtime['{key}'] must be numeric, got {type(val).__name__}")
+        if val < lo or val > hi:
+            raise ValueError(f"TECHNICAL_CONTEXT.runtime['{key}']={val} out of bounds [{lo}, {hi}]")
+
+_validate_runtime_config()
+
+
+def get_models_by_type(model_type: str) -> list:
     """
-    Get the LLM endpoint name for a given prompt using TECHNICAL_CONTEXT.
-    
-    Args:
-        prompt_name: Name of the prompt (e.g., "BUSINESS_CONTEXT_WORKER_PROMPT")
-    
-    Returns:
-        The LLM endpoint name (e.g., "databricks-gpt-oss-20b")
+    Get all models of a given type (thinker/worker) sorted by order (ascending).
+    The lowest-order model is tried first; on failure, the next one is used.
     """
-    models_lookup = {m["name"]: m["llm_endpoint_name"] for m in TECHNICAL_CONTEXT["models"]}
+    return sorted(
+        [m for m in TECHNICAL_CONTEXT["models"] if m.get("type") == model_type],
+        key=lambda m: m.get("order", 999)
+    )
+
+def get_model_cascade_for_prompt(prompt_name: str) -> list:
+    """
+    Get the ordered list of model configs for a prompt's model_type.
+    Used for cascade fallback: try model[0], on failure try model[1], etc.
     
+    Falls back to all worker models if prompt_name is not in prompts_models
+    (e.g., dynamic prompt names like 'Assign_User_Domains_English').
+    """
     for pm in TECHNICAL_CONTEXT["prompts_models"]:
         if pm["prompt_name"] == prompt_name:
-            model_name = pm["model"]
-            return models_lookup.get(model_name, "databricks-gpt-oss-20b")
-    
-    return "databricks-gpt-oss-20b"
+            model_type = pm.get("model_type", "worker")
+            return get_models_by_type(model_type)
+    return get_models_by_type("worker")
+
+def get_model_endpoint_for_prompt(prompt_name: str) -> str:
+    """
+    Get the primary LLM endpoint name for a given prompt using model_type cascade.
+    Returns the endpoint of the lowest-order model matching the prompt's model_type.
+    """
+    cascade = get_model_cascade_for_prompt(prompt_name)
+    if cascade:
+        return cascade[0]["llm_endpoint_name"]
+    all_models = sorted(TECHNICAL_CONTEXT["models"], key=lambda m: m.get("order", 999))
+    return all_models[0]["llm_endpoint_name"] if all_models else "databricks-gpt-oss-20b"
 
 def get_model_config_for_prompt(prompt_name: str) -> dict:
     """
-    Get the full model configuration for a given prompt using TECHNICAL_CONTEXT.
-    
-    Args:
-        prompt_name: Name of the prompt (e.g., "BUSINESS_CONTEXT_WORKER_PROMPT")
-    
-    Returns:
-        Dictionary with model configuration including endpoint, input/output token limits
+    Get the primary model configuration for a given prompt using model_type cascade.
+    Returns the config of the lowest-order model matching the prompt's model_type.
     """
-    models_lookup = {m["name"]: m for m in TECHNICAL_CONTEXT["models"]}
-    
-    for pm in TECHNICAL_CONTEXT["prompts_models"]:
-        if pm["prompt_name"] == prompt_name:
-            model_name = pm["model"]
-            return models_lookup.get(model_name, models_lookup.get("claude-sonnet-4-5", {}))
-    
-    return models_lookup.get("claude-sonnet-4-5", {})
+    cascade = get_model_cascade_for_prompt(prompt_name)
+    if cascade:
+        return cascade[0]
+    all_models = sorted(TECHNICAL_CONTEXT["models"], key=lambda m: m.get("order", 999))
+    return all_models[0] if all_models else {}
+
+PROMPT_TRACKING_CONFIG = {}
+for _pm in TECHNICAL_CONTEXT.get("prompts_models", []):
+    _prompt_name = _pm.get("prompt_name")
+    if not _prompt_name:
+        continue
+    PROMPT_TRACKING_CONFIG[_prompt_name] = {
+        "stage_name": _pm.get("stage_name", "Prompt Execution"),
+        "step_name": _pm.get("step_name", _prompt_name),
+        "progress_increment": float(_pm.get("progress_increment", 0.5)),
+    }
 
 def log_print(message: str, level: str = "INFO", flush: bool = True):
     """Print a message with timestamp in logger format for immediate console output.
@@ -217,34 +315,66 @@ def log_print(message: str, level: str = "INFO", flush: bool = True):
     if level_upper in ("ERROR", "CRITICAL"):
         print(formatted_msg, file=_sys.stderr, flush=True)
 
-def get_clean_error_message(exception: Exception, max_lines: int = 1) -> str:
+
+class DuplicateMessageFilter(logging.Filter):
+    def __init__(self, window_seconds: float = 1.5):
+        super().__init__()
+        import threading as _threading
+        self.window_seconds = float(window_seconds)
+        self._last_seen = {}
+        self._lock = _threading.Lock()
+
+    def filter(self, record):
+        import time
+        msg = record.getMessage()
+        key = f"{record.name}|{record.levelno}|{msg}"
+        now = time.time()
+        with self._lock:
+            last = self._last_seen.get(key)
+            self._last_seen[key] = now
+        if last is None:
+            return True
+        return (now - last) > self.window_seconds
+
+def get_clean_error_message(exception: Exception, max_lines: int = 3, max_chars: int = 600) -> str:
     """
-    Extract clean error message from exception without ugly stack traces.
-    
-    Args:
-        exception: The exception object
-        max_lines: Maximum number of lines to include (default: 1 for first line only)
-    
-    Returns:
-        Clean error message string
+    Extract clean error message from exception without stack traces or embedded SQL.
+    Strips JVM stack traces, '== SQL ==' blocks, and Spark internal frames.
     """
     error_str = str(exception)
-    if '\n' in error_str and 'JVM stacktrace' not in error_str:
-        # Multi-line error but no JVM trace - take first meaningful line
-        lines = [line.strip() for line in error_str.split('\n') if line.strip()]
-        return ' '.join(lines[:max_lines])
-    elif 'JVM stacktrace' in error_str or len(error_str) > 500:
-        # Has JVM stack trace or very long - extract just first line
-        first_line = error_str.split('\n')[0].strip()
-        # If first line mentions table/view not found, keep that
-        if 'TABLE_OR_VIEW_NOT_FOUND' in first_line or 'cannot be found' in first_line:
-            return first_line
-        # Otherwise extract the main error message
-        if ']:' in first_line:
-            return first_line.split(']:')[-1].strip()
-        return first_line[:500]  # Truncate to 500 chars
-    return error_str
 
+    if '== SQL ==' in error_str:
+        error_str = error_str.split('== SQL ==')[0].strip()
+
+    if 'JVM stacktrace:' in error_str:
+        error_str = error_str.split('JVM stacktrace:')[0].strip()
+
+    lines = []
+    for line in error_str.split('\n'):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith('at org.apache') or stripped.startswith('at com.databricks') or stripped.startswith('at scala.'):
+            continue
+        if stripped.startswith("'") and ('+- ' in stripped or '   ' in stripped):
+            continue
+        lines.append(stripped)
+
+    result = ' '.join(lines[:max_lines])
+    if len(result) > max_chars:
+        result = result[:max_chars]
+    return result
+
+
+COMPACT_OUTPUT_PROMPTS = frozenset({
+    "USE_CASE_QUALITY_SCORE_PROMPT",
+    "USE_CASE_VALUE_SCORE_PROMPT",
+    "REVIEW_USE_CASES_PROMPT",
+    "FILTER_BUSINESS_TABLES_PROMPT",
+    "BUSINESS_CONTEXT_WORKER_PROMPT",
+    "SUBDOMAIN_DETECTOR_PROMPT",
+    "DOMAIN_FINDER_PROMPT",
+})
 
 # ==============================================================================
 # TRULY ADAPTIVE PARALLELISM CALCULATOR
@@ -259,8 +389,7 @@ def get_clean_error_message(exception: Exception, max_lines: int = 1) -> str:
 # METADATA QUERIES: FIXED at 5 (no LLM, but too many connections can hang)
 # ==============================================================================
 
-# Fixed parallelism for metadata operations (no LLM, but DB connections can saturate)
-METADATA_PARALLELISM = 5
+METADATA_PARALLELISM = TECHNICAL_CONTEXT["runtime"]["metadata_parallelism"]
 
 def calculate_adaptive_parallelism(
     step_name: str,
@@ -270,10 +399,12 @@ def calculate_adaptive_parallelism(
     avg_prompt_chars: int = 0,
     num_domains: int = 0,
     is_llm_operation: bool = True,
-    logger=None
+    logger=None,
+    estimated_mb_per_worker: float = 5.0
 ) -> tuple:
     """
-    Calculate truly adaptive parallelism based on actual data characteristics.
+    Calculate truly adaptive parallelism based on actual data characteristics
+    and available memory on the cluster.
     
     Args:
         step_name: Name of the step (for logging)
@@ -284,12 +415,19 @@ def calculate_adaptive_parallelism(
         num_domains: Number of business domains
         is_llm_operation: Whether this step makes LLM calls
         logger: Optional logger
+        estimated_mb_per_worker: Estimated MB each worker thread needs (callers
+            that hold large data like schema markdown should pass higher values,
+            e.g. 20 for quality scoring, 10 for SQL gen)
     
     Returns:
         Tuple of (parallelism: int, reason: str)
     """
-    GLOBAL_MIN_PARALLELISM = 4
-    GLOBAL_MAX_PARALLELISM = 10
+    GLOBAL_MIN_PARALLELISM = TECHNICAL_CONTEXT["runtime"]["global_min_parallelism"]
+    GLOBAL_MAX_PARALLELISM = TECHNICAL_CONTEXT["runtime"]["global_max_parallelism"]
+    CLUSTER_MEMORY_GB = TECHNICAL_CONTEXT["runtime"].get("cluster_memory_gb", 32)
+    _SPARK_AND_OS_OVERHEAD_MB = 17500
+    available_app_mb = max(1024, (CLUSTER_MEMORY_GB * 1024) - _SPARK_AND_OS_OVERHEAD_MB)
+    memory_ceiling = max(GLOBAL_MIN_PARALLELISM, int(available_app_mb / max(1.0, estimated_mb_per_worker)))
     
     effective_max = min(max(1, max_parallelism), GLOBAL_MAX_PARALLELISM)
     effective_min = min(GLOBAL_MIN_PARALLELISM, effective_max)
@@ -391,7 +529,7 @@ def calculate_adaptive_parallelism(
     
     step_severities = {
         "scoring": (0.25, "scoring is rate-limit sensitive"),
-        "deduplication": (0.15, "dedup needs LLM per domain"),
+        "deduplication": (0.15, "dedup: global one-shot (thinker), fallback per-domain (worker)"),
         "sql_generation": (0.2, "SQL gen is complex"),
         "use_case_generation": (0.3, "LLM-intensive, 2-pass for transactional tables"),
         "domain_clustering": (0.3, "domain detection is heavy"),
@@ -425,12 +563,16 @@ def calculate_adaptive_parallelism(
         result = max(effective_min, min(4, base))
         factors.append("LLM operation, conservative default")
     
-    # Build reason string
+    pre_mem_result = result
+    result = min(result, memory_ceiling)
+    if result < pre_mem_result:
+        factors.append(f"memory-capped={result} ({CLUSTER_MEMORY_GB}GB, ~{estimated_mb_per_worker:.0f}MB/worker, ceiling={memory_ceiling})")
+    
     reason = " + ".join(factors) if factors else "default calculation"
     reason = f"calculated={result} based on: {reason}"
     
     if logger:
-        logger.info(f"🔧 [{step_name.upper()}] Parallelism = {result} (from max={max_parallelism}) | {reason}")
+        logger.info(f"🔧 [{step_name.upper()}] Parallelism = {result} (from max={max_parallelism}, mem_ceil={memory_ceiling}) | {reason}")
     
     return (result, reason)
 
@@ -446,48 +588,37 @@ def log_adaptive_parallelism_decision(step_name: str, parallelism: int, max_para
 def get_model_token_limit(prompt_name: str = None) -> int:
     """
     Get the input token limit for a model based on TECHNICAL_CONTEXT.
-    
-    Args:
-        prompt_name: Name of the prompt to lookup model for. If None, returns default model limit.
-    
-    Returns:
-        Input token limit for the model assigned to this prompt
+    Uses the primary model (lowest-order) from the prompt's model_type cascade.
     """
     if prompt_name:
         model_config = get_model_config_for_prompt(prompt_name)
         if model_config:
             return model_config.get("llm_input_context_tokens_count", 200000)
     
-    default_model = next((m for m in TECHNICAL_CONTEXT["models"] if m["name"] == "claude-sonnet-4-5"), None)
-    return default_model.get("llm_input_context_tokens_count", 200000) if default_model else 200000
+    first_worker = get_models_by_type("worker")
+    return first_worker[0].get("llm_input_context_tokens_count", 200000) if first_worker else 200000
 
 def get_model_output_token_limit(prompt_name: str = None) -> int:
     """
     Get the OUTPUT token limit for a model based on TECHNICAL_CONTEXT.
-    This is critical to prevent LLM output truncation (Claude defaults to only 1000 tokens without max_tokens).
-    
-    Args:
-        prompt_name: Name of the prompt to lookup model for. If None, returns default model limit.
-    
-    Returns:
-        Output token limit for the model assigned to this prompt
+    Uses the primary model (lowest-order) from the prompt's model_type cascade.
     """
+    _safe_default = min(m.get("llm_output_context_tokens_count", 25000) for m in TECHNICAL_CONTEXT["models"])
     if prompt_name:
         model_config = get_model_config_for_prompt(prompt_name)
         if model_config:
-            return model_config.get("llm_output_context_tokens_count", 32000)
+            return model_config.get("llm_output_context_tokens_count", _safe_default)
     
-    default_model = next((m for m in TECHNICAL_CONTEXT["models"] if m["name"] == "claude-sonnet-4-5"), None)
-    return default_model.get("llm_output_context_tokens_count", 32000) if default_model else 32000
-
-# Token-to-character ratios (moved here so they're available before first use)
-TOKEN_TO_CHAR_RATIO_ENGLISH = 4
-TOKEN_TO_CHAR_RATIO_NON_ENGLISH = 2
+    first_worker = get_models_by_type("worker")
+    return first_worker[0].get("llm_output_context_tokens_count", _safe_default) if first_worker else _safe_default
 
 def get_max_context_chars(language: str = "English", prompt_name: str = None) -> int:
     """
     Calculate the maximum character limit based on language and model's token limit.
     Uses TECHNICAL_CONTEXT to determine model-specific token limits.
+    
+    Applies the same conservative limit (tokens * 3.2) used by the actual LLM call
+    pre-flight check, ensuring the pre-check here matches the runtime check.
     
     Args:
         language: Target language (default: "English")
@@ -499,9 +630,23 @@ def get_max_context_chars(language: str = "English", prompt_name: str = None) ->
     max_tokens = get_model_token_limit(prompt_name)
     
     if language.lower() == "english":
-        return max_tokens * TOKEN_TO_CHAR_RATIO_ENGLISH
+        char_limit = max_tokens * TOKEN_TO_CHAR_RATIO_ENGLISH
     else:
-        return max_tokens * TOKEN_TO_CHAR_RATIO_NON_ENGLISH
+        char_limit = max_tokens * TOKEN_TO_CHAR_RATIO_NON_ENGLISH
+    
+    conservative_limit = int(max_tokens * 3.2)
+    return min(char_limit, conservative_limit)
+
+def get_context_limit_chars_for_model(model_config: dict, language: str = "English") -> int:
+    """
+    Calculate the effective character limit for a specific model config.
+    Mirrors the pre-flight logic in _call_ai_query for consistency.
+    """
+    input_tokens = model_config.get("llm_input_context_tokens_count", 131000)
+    char_ratio = TOKEN_TO_CHAR_RATIO_NON_ENGLISH if language.lower() != "english" else TOKEN_TO_CHAR_RATIO_ENGLISH
+    max_context_chars = input_tokens * char_ratio
+    conservative_limit = int(input_tokens * 3.2)
+    return min(max_context_chars, conservative_limit)
 
 def get_safe_context_limit(language: str = "English", buffer_percent: float = 0.9, prompt_name: str = None) -> int:
     """
@@ -524,7 +669,7 @@ def get_safe_context_limit(language: str = "English", buffer_percent: float = 0.
 
 # Legacy constants for backward compatibility (uses default model's English ratio)
 MAX_CONTEXT_TOKENS = get_model_token_limit()
-MAX_CONTEXT_CHARS = MAX_CONTEXT_TOKENS * TOKEN_TO_CHAR_RATIO_ENGLISH
+MAX_CONTEXT_CHARS = min(MAX_CONTEXT_TOKENS * TOKEN_TO_CHAR_RATIO_ENGLISH, int(MAX_CONTEXT_TOKENS * 3.2))
 
 # ==============================================================================
 # IDENTIFIER NORMALIZATION UTILITIES
@@ -593,9 +738,7 @@ def compute_result_table_name(use_case_id: str, use_case_name: str, tables_invol
         table_name = table_name[:200]
     if inspire_database:
         return f"{inspire_database}.{table_name}"
-    first_table = tables_involved.split(',')[0].strip().strip('`') if tables_involved else ''
-    catalog = first_table.split('.')[0] if '.' in first_table else 'default_catalog'
-    return f"{catalog}.default.{table_name}"
+    return f"main._inspire.{table_name}"
 
 def parse_three_level_name(name: str) -> tuple:
     """
@@ -696,17 +839,205 @@ def build_fqn(catalog: str, schema: str, table: str = None) -> str:
         return f"{cat_quoted}.{schema_quoted}.{table_quoted}"
     return f"{cat_quoted}.{schema_quoted}"
 
-# --- LLM Model Configuration for Each Prompt (Derived from TECHNICAL_CONTEXT) ---
-# This dict is auto-generated from TECHNICAL_CONTEXT for backward compatibility.
-# To change model assignments, modify TECHNICAL_CONTEXT at the top of the file.
-LLM_MODEL_CONFIG = {
-    pm["prompt_name"]: get_model_endpoint_for_prompt(pm["prompt_name"])
-    for pm in TECHNICAL_CONTEXT["prompts_models"]
-}
+# --- LLM Model Resolution ---
+# Model resolution is now handled dynamically via model_type cascade.
+# Each prompt's model_type (thinker/worker) is resolved at runtime to an ordered
+# list of models. On failure, the next model in the cascade is tried automatically.
+# See: get_model_cascade_for_prompt(), _call_ai_query()
 
 # DBTITLE 1,Prompts
 # --- 1. Main Prompt Templates Dictionary ---
 PROMPT_TEMPLATES = {}
+
+QUALITY_GATE_RULES = """
+**D1 - CAUSAL SIGNAL STRENGTH** (Critical):
+Does the data contain fields that DIRECTLY CAUSE or INDICATE the outcome being predicted/analyzed?
+If you cannot trace a logical cause-effect chain from available columns to the outcome, the use case is INVALID.
+No causal signals = No use case.
+
+**D2 - CAUSE-EFFECT VALIDITY** (Critical):
+Does the technical design use variables with a LOGICAL, PROVEN, INDUSTRY-RECOGNIZED cause-effect relationship with the outcome?
+Correlation is NOT causation. If the relationship is speculative, the use case is INVALID.
+
+**D3 - DATA GRANULARITY**:
+Does the data exist at the RIGHT LEVEL OF DETAIL for the analysis?
+If the analysis requires per-customer data but only per-store aggregates exist, the use case is INVALID.
+
+**D4 - CRITICAL DIMENSIONS PRESENT**:
+Are ALL critical dimensions (columns) required for the analysis present in the schema?
+If even ONE critical column is missing, the use case is INVALID. Do NOT assume derived data can compensate.
+
+**D5 - LOGICAL POSSIBILITY**:
+Is the technical design logically possible with the given data types and structure?
+If operations cannot be performed on available data, the use case is INVALID.
+
+**D6 - METRIC VALIDITY**:
+Can the claimed business metrics ACTUALLY be calculated from available fields?
+If the key metric requires fabrication or heavy approximation, the use case is INVALID.
+
+**D7 - TECHNICAL DESIGN MATCH**:
+Does the technical design match what the data can actually support?
+If the design assumes columns, tables, or relationships that do not exist in the schema, the use case is INVALID.
+
+**D8 - SEMANTIC UNIQUENESS** (Critical — ZERO TOLERANCE):
+Does this use case address a FUNDAMENTALLY DIFFERENT business question than all others? Apply ALL 5 layers of duplicate detection — a match on ANY layer means DUPLICATE:
+
+**LAYER 1 — VERB NORMALIZATION + SUFFIX STRIP**:
+Normalize verb (Forecast/Predict/Anticipate/Envision = PREDICT; Detect/Identify/Reveal/Find/Discover/Uncover/Expose = DETECT; Classify/Segment/Categorize/Tier/Rank = CLASSIFY; Simulate/Model/Project = SIMULATE; Optimize/Maximize/Minimize = OPTIMIZE; Assess/Evaluate/Measure/Gauge/Quantify = ASSESS). Strip "with [...]" activation suffix. If remaining core phrase matches another use case → DUPLICATE.
+
+**LAYER 2 — NOUN SYNONYM DETECTION**:
+Treat these nouns as IDENTICAL: Revenue=Income=Sales=Earnings; Cost=Expense=Spend=Expenditure; Churn=Attrition=Turnover=Defection; Leakage=Loss=Erosion=Slippage; Demand=Consumption=Usage=Volume; Risk=Exposure=Vulnerability=Threat; Delay=Latency=Bottleneck=Slowdown; Fraud=Anomaly=Irregularity; Customer=Client=Account=Subscriber; Employee=Staff=Worker=Personnel; Supplier=Vendor=Provider; Inventory=Stock=Supply.
+If after replacing synonyms the core phrases match → DUPLICATE.
+
+**LAYER 3 — ENTITY-METRIC PAIR OVERLAP**:
+Extract the BUSINESS ENTITY (what is being analyzed: customers, orders, suppliers, products, etc.) and the BUSINESS METRIC (what is being measured: revenue, churn, cost, risk, etc.). If two use cases operate on the SAME entity + SAME metric → DUPLICATE regardless of wording.
+Example: "Forecast Customer Churn Rate" and "Predict Client Attrition Probability" → same entity (customer), same metric (churn) → DUPLICATE.
+
+**LAYER 4 — TECHNIQUE SWAP ON SAME PROBLEM**:
+If two use cases address the same business problem but use different techniques, they are DUPLICATES. "Forecast X", "Detect X Anomalies", "Classify X Risk Tiers", and "Segment X by Behavior" on the SAME X → all duplicates of each other. Keep ONLY the one with the most complex, highest-value analysis.
+
+**LAYER 5 — TABLE OVERLAP + SIMILAR INTENT**:
+If two use cases use the SAME primary tables AND address a SIMILAR business question (even with different wording) → DUPLICATE. Different tables = potentially different use case. Same tables + same intent = definitely DUPLICATE.
+
+**D9 - ANALYTICAL DEPTH** (Critical — RUTHLESS STANDARD):
+Apply the "STRIP TEST": mentally remove all AI function calls (ai_query, ai_forecast, ai_classify, etc.) from the Technical Design. What remains? If what remains is a trivial SQL query, the AI functions are DECORATION, not substance.
+
+TRIVIAL (D9 ≤ 1.5 — AUTOMATIC REJECTION):
+- Date arithmetic: WHERE date_col < CURRENT_DATE + N → trivial calendar logic
+- Threshold checks: WHERE metric > X → trivial filter
+- Basic aggregation: SELECT col, COUNT/SUM/AVG GROUP BY col → any junior analyst can do this
+- Single-column Z-score: (value - mean) / stddev → basic statistics, not AI
+- Ratio computation: column_a / column_b → arithmetic, not intelligence
+- Sorting/ranking: ORDER BY metric DESC LIMIT N → trivial
+
+WEAK (D9 = 2.0-2.5 — NOT ACCEPTABLE FOR EXTREME QUALITY):
+- Two-column correlation without cross-table context
+- Simple moving averages or period-over-period comparisons
+- Grouping by one dimension with a threshold overlay
+
+GENUINE AI DEPTH (D9 ≥ 3.5 — MINIMUM FOR ACCEPTANCE):
+- Multi-dimensional pattern detection across 3+ variables
+- Cross-table correlation requiring JOINs on 2+ tables with derived features
+- Time-series forecasting with external factor integration
+- Multi-step classification with contextual enrichment
+- Network/graph analysis of entity relationships
+
+**D10 - ACTIVATION QUALITY** (Critical — ZERO TOLERANCE FOR TECHNICAL METHOD SUFFIXES):
+Apply the "DELIVERABLE TEST": the "with [...]" suffix must describe a business DELIVERABLE — the actionable output the user receives (recommendation, action plan, priority queue, strategy, intervention, escalation brief). It must NEVER describe a technical method, data source, statistical technique, or analytical approach.
+
+BANNED CATEGORIES (D10 = 1.0 — AUTOMATIC REJECTION):
+- Technical method suffixes: "with Z-Score Deviation", "with Correlation Analysis", "with Rolling STDDEV", "with Regression Slope"
+- Data source suffixes: "with Payment History Cross-Reference", "with Invoice-to-Payment Date Gap Analysis", "with RFM Scoring and Cohort Aging"
+- Technique suffixes: "with Seasonal Decomposition", "with Anomaly Profiling", "with Monte Carlo Simulation", "with Trend Analysis"
+- Buzzword suffixes: "with Intelligence", "with Insights", "with Analytics", "with Context"
+- Circular suffixes: where the suffix merely restates the verb/name (e.g., "Segment Customers with Customer Segmentation")
+- Domain jargon in action part: Any technical acronym (RASK, PNR, AWB, MEL, CDL, ULD, GDS, MTOW) or statistical term (Z-score, variance, coefficient, kurtosis) appearing ANYWHERE in the name
+
+ACCEPTABLE (D10 ≥ 3.5 — MINIMUM FOR EXTREME QUALITY):
+- Describes a specific business deliverable: "with Pricing Recalibration Recommendations", "with Pre-Invoice Correction Actions"
+- Describes an actionable intervention: "with Prioritized Outreach Queue", "with Audit Escalation Brief", "with Collection Escalation Actions"
+- Describes a decision-support artifact: "with Dynamic Overbooking Strategy", "with Budget Reallocation Strategy"
+- The activation suffix answers "What does the business user DO with this?" not "How was this analyzed?"
+
+**D11 - DOMAIN & TECHNIQUE BALANCE**:
+Is the portfolio diverse across business domains and analytics techniques?
+- No single domain should exceed 25% of all use cases
+- No single analytics technique should exceed 30% of all use cases
+- If generating into an over-represented area, produce use cases in under-represented areas instead.
+"""
+
+QUALITY_GATE_GENERATION_BLOCK = f"""
+### 🚨🚨🚨 MANDATORY DATA QUALITY GATE (Apply BEFORE generating EACH use case) 🚨🚨🚨
+
+**🚨 QUALITY IS ABSOLUTE — QUANTITY IS IRRELEVANT 🚨**: Generate ONLY use cases that pass ALL 11 quality dimensions AND all 5 duplicate detection layers.
+A use case that fails ANY dimension or ANY duplicate layer MUST NOT be generated. It is VASTLY better to produce 10 exceptional use cases than 100 mediocre ones. Your output will be scored by a ruthless quality assessor that will reject anything below "Very High" quality. Every mediocre use case you generate WASTES resources and DAMAGES the portfolio.
+
+**SELF-CHECK PROCEDURE**: Before writing each CSV row, mentally verify all 11 dimensions. If ANY fails, SKIP that use case entirely.
+
+**🚨 CRITICAL CHECKS D8-D11 (EXTREME — ZERO TOLERANCE) 🚨**:
+- **D8 (5-LAYER DUPLICATE DETECTION)**: Apply ALL 5 layers before generating EACH use case:
+  Layer 1: Normalize verb + strip suffix → compare core phrase
+  Layer 2: Replace noun synonyms (Revenue=Income=Sales, Churn=Attrition, etc.) → compare
+  Layer 3: Extract entity + metric → same entity + same metric = DUPLICATE
+  Layer 4: Technique swap on same business problem = DUPLICATE
+  Layer 5: Same tables + similar intent = DUPLICATE
+  Match on ANY layer → DO NOT GENERATE.
+- **D9 (STRIP TEST)**: Remove all AI function calls mentally. If what remains is just a WHERE clause, threshold, GROUP BY, date check, ratio, or single-column Z-score → DO NOT GENERATE. It must REQUIRE multi-dimensional analysis.
+- **D10 (DELIVERABLE TEST)**: Your "with [...]" suffix must describe a business DELIVERABLE (recommendation, action plan, queue, strategy, intervention), NOT a technical method, data source, or analytical technique. If the suffix describes HOW the analysis works instead of WHAT the user gets → REWRITE or DO NOT GENERATE.
+- **D11**: Count use cases per domain and per technique. If one domain >20% or one technique >25%, STOP and move to under-represented areas.
+{QUALITY_GATE_RULES}
+**FINAL GATE**: For each use case ask ALL of these:
+1. "Can a data engineer implement this SQL using ONLY the columns in the schema, with PROVEN cause-effect logic, producing a REAL calculable metric?" If NO → DO NOT GENERATE IT.
+2. "Is this substantially different from every other use case I have generated so far?" If NO → DO NOT GENERATE IT.
+3. "Would a junior analyst need more than 10 lines of basic SQL to replicate this without AI?" If NO → DO NOT GENERATE IT.
+4. "Does the 'with [activation]' part describe a business DELIVERABLE (recommendation, action plan, queue, strategy) rather than a technical method?" If it describes HOW the analysis works → REWRITE the activation or DO NOT GENERATE IT.
+5. "Does the action part (before 'with') contain ANY technical jargon, domain acronyms, or statistical terms?" If YES → REWRITE using plain business language or DO NOT GENERATE IT.
+"""
+
+QUALITY_GATE_SCORING_BLOCK = f"""
+## QUALITY SCORING DIMENSIONS
+
+For EACH use case, evaluate the following 11 dimensions. These are the SAME quality gates applied during generation — your job is to VERIFY they were followed correctly.
+
+**🚨 D8-D11 SCORING PROCEDURE (MANDATORY — follow step by step) 🚨**
+
+**D8 — SEMANTIC UNIQUENESS SCORING PROCEDURE (5-LAYER DETECTION — apply ALL layers):**
+
+**LAYER 1 — VERB NORMALIZATION + SUFFIX STRIP**:
+1. Normalize the leading verb using the EXPANDED synonym map: Forecast/Predict/Anticipate/Envision → PREDICT; Detect/Identify/Reveal/Find/Discover/Uncover/Expose → DETECT; Classify/Segment/Categorize/Tier/Rank → CLASSIFY; Simulate/Model/Project → SIMULATE; Optimize/Maximize/Minimize → OPTIMIZE; Assess/Evaluate/Measure/Gauge/Quantify → ASSESS
+2. Strip "with [...]" activation suffix entirely
+3. Compare the remaining core phrase against ALL other use cases in this batch
+4. Match on LAYER 1 → D8 = 1.0 for the later use case
+
+**LAYER 2 — NOUN SYNONYM DETECTION**:
+After LAYER 1, also replace noun synonyms: Revenue=Income=Sales=Earnings; Cost=Expense=Spend; Churn=Attrition=Turnover=Defection; Leakage=Loss=Erosion=Slippage; Demand=Consumption=Usage=Volume; Risk=Exposure=Vulnerability; Delay=Latency=Bottleneck; Customer=Client=Account; Employee=Staff=Worker; Supplier=Vendor=Provider; Inventory=Stock=Supply.
+Match after noun replacement → D8 = 1.0
+
+**LAYER 3 — ENTITY-METRIC PAIR**:
+Extract the business ENTITY (what?) and METRIC (measuring what?). If two use cases share the same entity + same metric → D8 = 1.0.
+Example: "Forecast Customer Churn Rate" and "Predict Client Attrition Probability" → entity=Customer, metric=Churn → D8 = 1.0 for the later one.
+
+**LAYER 4 — TECHNIQUE SWAP**:
+"Forecast X", "Detect X Anomalies", "Classify X Risk Tiers" on the same X → D8 = 1.0 for all but the first/best one.
+
+**LAYER 5 — TABLE + INTENT OVERLAP**:
+Same primary tables AND similar business question → D8 = 1.0.
+
+**SCORING**: D8 = 5.0 means ZERO overlap on ALL 5 layers. D8 = 3.0 means minor similarity detected but different business question. D8 ≤ 2.0 = DUPLICATE on any layer → triggers VETO.
+
+**D9 — ANALYTICAL DEPTH SCORING PROCEDURE (apply the "STRIP TEST"):**
+Mentally REMOVE all AI function calls from the Technical Design. What SQL remains? Score based on what's LEFT:
+
+D9 = 1.0 (TRIVIAL — VETO): Date arithmetic, threshold checks, basic aggregation, simple filtering, sorting, ratio computation. "Could a junior analyst write this in 10 lines?"
+D9 = 1.5 (TRIVIAL — VETO): Single-column Z-score, one-dimensional anomaly detection, basic period-over-period comparison.
+D9 = 2.0 (WEAK — VETO): Two-column correlation without cross-table context, simple moving average, one-dimensional grouping + threshold.
+D9 = 3.0 (MODERATE): Multiple statistical operations on 2-3 variables, but no genuine multi-dimensional reasoning. NOT acceptable for Extreme Quality.
+D9 = 3.5 (ACCEPTABLE MINIMUM): Multi-dimensional analysis across 3+ variables with derived features.
+D9 = 4.0-4.5 (STRONG): Cross-table correlation with 2+ JOINs, multi-step predictive pipeline, contextual classification with external enrichment.
+D9 = 5.0 (EXCEPTIONAL): Novel analytical approach combining multiple techniques, graph/network analysis, sophisticated time-series with multiple external factors.
+
+**DEFAULT IS 3.0**. The use case must EARN its way above 3.0 with concrete evidence of analytical complexity.
+
+**D10 — ACTIVATION QUALITY SCORING PROCEDURE (apply the "DELIVERABLE TEST"):**
+The "with [...]" suffix must describe a business DELIVERABLE — the actionable output the user receives. Score based on whether the activation describes WHAT THE USER GETS (high score) vs HOW THE ANALYSIS WORKS (low score).
+
+D10 = 1.0 (TECHNICAL METHOD — VETO): Activation describes an analytical technique or statistical method — "with Z-Score Deviation", "with Correlation Analysis", "with Rolling STDDEV", "with Regression Slope", "with Seasonal Decomposition", "with RFM Scoring", "with Cross-Reference"
+D10 = 1.0 (GENERIC FILLER — VETO): "with Intelligence", "with Insights", "with Analytics", "with Context", "with Pattern Recognition", "with Anomaly Profiling", "with Trend Analysis"
+D10 = 1.0 (DATA SOURCE — VETO): Activation describes where data comes from, not what user gets — "with Payment History and Contract Term Signals", "with Invoice Date Gap Analysis", "with Load Factor Variance"
+D10 = 2.0 (CIRCULAR): The suffix restates the analysis verb or name — "Segment Customers with Customer Segmentation", "Detect Anomalies with Anomaly Detection"
+D10 = 3.0 (VAGUE DELIVERABLE): Mentions an output but too generic — "with Recommendations", "with Action Plan", "with Strategy"
+D10 = 4.0-5.0 (SPECIFIC DELIVERABLE): Names a concrete, role-appropriate business deliverable — "with Pricing Recalibration Recommendations", "with Prioritized Outreach Queue", "with Pre-Invoice Correction Actions", "with Audit Escalation Brief", "with Collection Escalation Actions", "with Dynamic Overbooking Strategy"
+
+Also check the ACTION PART (before "with"):
+D10 = 1.0 (JARGON — VETO): Action part contains domain-specific technical acronyms (RASK, PNR, AWB, MEL, CDL, ULD, GDS, MTOW, ASK, AD) or statistical terms (Z-score, variance, coefficient, kurtosis, regression, STDDEV, deviation, correlation, decomposition, cross-reference).
+A C-suite executive must be able to read the FULL name in 3 seconds and understand both the problem AND the deliverable.
+
+**DEFAULT IS 3.0**. The activation must EARN its way above 3.0 by describing a specific, actionable business deliverable.
+
+**D11 — DOMAIN BALANCE SCORING:**
+Count how many use cases in this batch share the same Business Domain and the same Analytics Technique. If this batch is heavily concentrated in one area, reduce scores for excess use cases.
+{QUALITY_GATE_RULES}
+"""
 
 HONESTY_CHECK_CSV = """
 
@@ -785,7 +1116,7 @@ Leverage your deep industry knowledge of `{industry}` to understand the {type_la
 
 **Step 2: Information Gathering**
 For each of the 6 required fields, identify comprehensive and specific details:
-1. **Business Context**: A rich, executive-level description of the organization. MUST include ALL of the following when available: what the business does (core products/services), its industry standing and market position (e.g., "the largest retailer in the Middle East"), approximate market size or annual revenue (e.g., "revenue exceeding $4B per year"), global presence and scale (e.g., "200+ branches and stores across 22 countries"), notable achievements and global recognitions (e.g., "Fortune 500 company", "ISO certified"), key competitive advantages, and number of employees or customers served. This should read like a compelling executive brief — NOT a generic placeholder like "General business operations". Example: "A leading multinational retail conglomerate operating 350+ hypermarkets, supermarkets, and convenience stores across 17 countries in the Middle East, Africa, and Asia, with annual revenue exceeding $4.5B, serving over 750,000 customers daily, recognized as the region's largest food retailer and a Fortune Global 500 company."
+1. **Business Context**: A rich, executive-level description of the organization. MUST include ALL of the following when available: what the business does (core products/services), its industry standing and market position (e.g., "the largest provider in its sector"), approximate market size or annual revenue (e.g., "revenue exceeding $4B per year"), global presence and scale (e.g., "200+ locations across 22 countries"), notable achievements and global recognitions (e.g., "Fortune 500 company", "ISO certified"), key competitive advantages, and number of employees or customers served. This should read like a compelling executive brief — NOT a generic placeholder like "General business operations". Example: "A leading multinational conglomerate operating 350+ locations across 17 countries with annual revenue exceeding $4.5B, serving over 750,000 customers daily, recognized as a sector leader and a Fortune Global 500 company."
 2. **Strategic Goals**: The high-level long-term strategic objectives. You MUST select 3-7 goals from this standard list that are MOST relevant to this business:
    - "Reduce Cost" (automation, efficiency, waste reduction)
    - "Boost Productivity" (faster processes, better tools, streamlined workflows)
@@ -807,7 +1138,7 @@ Format all information as a single JSON object with 6 keys. Values should be des
 
 1. **Descriptive Strings**: Clear, concise, comprehensive descriptions. No generic placeholders — use specific, real-world, industry-relevant terminology.
 2. **Strategic Goals Format**: Comma-separated list of 3-7 goals from the standard list above with brief elaboration. Example: "Reduce Cost (automate manual processes), Increase Revenue (expand digital channels), Mitigate Risk (enhance fraud detection)"
-3. **Business Context Richness**: MUST be a rich executive-level description — NOT generic. Include: core operations, market position, scale (locations/countries), approximate revenue, recognitions, competitive advantages. REJECTED examples: "General business operations", "Retail company in the Middle East". REQUIRED example: "A leading multinational retail conglomerate operating 350+ stores across 17 countries with $4.5B annual revenue, recognized as the region's largest food retailer."
+3. **Business Context Richness**: MUST be a rich executive-level description — NOT generic. Include: core operations, market position, scale (locations/countries), approximate revenue, recognitions, competitive advantages. REJECTED examples: "General business operations", "A company in a region". REQUIRED example: "A leading multinational conglomerate operating 350+ locations across 17 countries with $4.5B annual revenue, recognized as a sector leader."
 
 ### OUTPUT FORMAT
 
@@ -1029,7 +1360,7 @@ STATISTICAL_FUNCTIONS = {
     "COVAR_POP(col1, col2)": {
         "function": "COVAR_POP(col1, col2)",
         "business_value": "Measures joint variability across population",
-        "use_cases": "Systemic Risk: Sector A vs Sector B movement • Supply Chain: Fuel Price vs Shipping Cost linkage",
+        "use_cases": "Systemic Risk: Sector A vs Sector B movement • Supply Chain: Input Price vs Delivery Cost linkage",
         "category": "Correlation"
     },
 
@@ -1226,6 +1557,10 @@ The CSV MUST have EXACTLY the following 11 columns (no more, no less):
 
 ---
 
+""" + QUALITY_GATE_GENERATION_BLOCK + """
+
+---
+
 ### 2. USE CASE GENERATION RULES
 
 You must follow these rules to generate the content for the use cases. All text output must be in **English**.
@@ -1238,31 +1573,66 @@ You MUST ONLY generate use cases that meet at least one of these criteria:
 3.  **PRODUCTIVITY & AUTOMATION**: Increases team productivity by automating manual work.
 
 **❌ STRICTLY PROHIBITED**:
+-   **NO MASTER/REFERENCE-CENTERED USE CASES**: EVERY use case MUST derive its analytical question from TRANSACTIONAL events — things that HAPPENED over time. You may JOIN master and reference tables for enrichment, but the CORE BUSINESS QUESTION must be about patterns in EVENTS (transactions, movements, interactions, measurements), NOT about static entity attributes. Ask: "Does this use case analyze WHAT HAPPENED or WHAT EXISTS?" If it only describes entity attributes without analyzing event patterns → REJECT.
 -   **NO MARGINAL BENEFIT**: Do not generate trivial use cases.
 -   **NO "NICE TO HAVE"**: Focus only on "MUST HAVE" with DIRECT IMPACT on Revenue or Operating Income.
 -   **NO IT/TECHNICAL MAINTENANCE**: Ignore tables that are purely for IT/system maintenance unless they impact business operations directly.
+-   **NO SEMANTIC DUPLICATES**: Do not generate two use cases that address the same core business problem with different wording, different verbs, or different "with [activation]" suffixes.
+-   **NO TRIVIAL AI WRAPPERS**: Do not generate use cases where the core analysis is a simple date comparison, threshold check, or basic aggregation — even if you wrap it in AI function calls.
+-   **NO TECHNICAL ACTIVATION**: The "with [activation]" part must describe a SPECIFIC business DELIVERABLE (recommendation, action plan, priority queue, strategy, intervention) — NEVER a technical method, data source, or analytical technique. Ban: "with Correlation Analysis", "with Z-Score Deviation", "with RFM Scoring", "with Cross-Reference".
+-   **NO TECHNIQUE MONOCULTURE**: Do not generate more than 25% of use cases using any single analytics technique. Actively diversify across Forecasting, Classification, Anomaly Detection, Segmentation, Correlation Analysis, Trend Analysis, Pareto Analysis, etc.
+-   **NO DOMAIN FLOODING**: Do not generate more than 20% of use cases in any single business domain. If you have generated 3+ in one domain, move to under-represented domains.
 
 **COLUMN INSTRUCTIONS:**
 
   - **`No`**: Sequential number (e.g., 1, 2, 3...).
   
-  - **`Name`**: A short, clear name that emphasizes BUSINESS VALUE, not technical implementation.
-    *   **Use exciting business-oriented verbs**: Anticipate, Predict, Envision, Segment, Identify, Detect, Reveal.
-    *   **🚨🚨🚨 MANDATORY "with" PATTERN 🚨🚨🚨**: EVERY use case name MUST follow the pattern: **"[Verb] [Business Topic] with [Context/Enrichment/Intelligence/Strategy]"**. The "with [...]" suffix is NON-NEGOTIABLE and adds the analytical enrichment, external context, or strategic dimension that makes the use case actionable.
-    *   **✅ CORRECT Examples**:
-        - "Anticipate Monthly Revenue Trends with Action Plans"
-        - "Predict Customer Churn Risk with Economic Context"
-        - "Detect Non-Billable Register Revenue Leakage with Pattern Recognition"
-        - "Identify High-Value Account Expansion with Competitive Intelligence"
-        - "Forecast Invoice Volume by Customer Segment with Resource Planning Optimization"
-        - "Classify Supplier Risk Tiers with Payment Behavior Clustering"
-        - "Segment Buyers by Invoice Dispute Propensity with Relationship Management Insights"
-    *   **❌ REJECTED Examples (missing "with" part)**:
+  - **`Name`**: A short, clear name that emphasizes BUSINESS VALUE and ACTIONABLE OUTCOMES, not technical implementation.
+    *   **🚨🚨🚨 MANDATORY "ACTION + ACTIVATION" PATTERN 🚨🚨🚨**: EVERY use case name MUST follow this two-part pattern:
+        **"[Action Part] with [Activation Part]"**
+        - **ACTION PART** (before "with"): A business-oriented verb + the business problem or opportunity being surfaced. This conveys URGENCY and tells the user WHAT needs attention. Maximum 6-8 words.
+        - **ACTIVATION PART** (after "with"): The DELIVERABLE — what the use case produces as an actionable output for the business user. This is the resolution, recommendation, or decision-support artifact. Maximum 3-5 words.
+    *   **Use business-oriented ACTION verbs**: Anticipate, Predict, Detect, Identify, Reveal, Classify, Segment, Forecast, Simulate, Extract.
+    *   **🚨 CRITICAL RULES FOR THE ACTIVATION PART (after "with") 🚨**:
+        - The "with" suffix MUST describe what the USER GETS — a recommendation, action plan, priority queue, intervention, strategy, or decision tool.
+        - The "with" suffix must NEVER describe a technical method, statistical technique, data source, column name, or analytical approach.
+        - **BOARD ROOM TEST**: If a C-suite executive cannot read the full name in 3 seconds and immediately understand both the problem AND the deliverable, the name FAILS.
+    *   **🚨 CRITICAL RULES FOR THE ACTION PART (before "with") 🚨**:
+        - ZERO technical jargon: No acronyms (RASK, ASK, PNR, AWB, MEL, CDL, ULD, GDS, MTOW, AD, RFM), no statistical terms (Z-score, correlation, STDDEV, regression, variance, coefficient, decomposition), no implementation language (rolling, partitioned, cross-reference).
+        - Only use acronyms that a CEO in ANY industry would understand (ROI, SLA, KPI).
+        - Name the BUSINESS PROBLEM, not the DATA OBJECT. "Revenue Underperformance" not "RASK Deviation". "Booking Fraud" not "PNR Anomaly Patterns".
+    *   **✅ CORRECT Examples (Action = business problem, Activation = deliverable)**:
+        - "Detect Revenue Underperformance on High-Demand Products with Pricing Recalibration Recommendations"
+        - "Forecast Cancellation Rates by Channel with Dynamic Overbooking Strategy"
+        - "Classify Booking Fraud Risk with Automated Hold Recommendations"
+        - "Anticipate Fleet Grounding Risk with Pre-Emptive Maintenance Scheduling"
+        - "Segment Partners by Profitability with Differentiated Commercial Strategies"
+        - "Detect Cargo Billing Leakage with Pre-Invoice Correction Actions"
+        - "Reveal Unauthorized Discount Erosion with Audit Escalation Brief"
+        - "Simulate Fuel Cost Savings with Strategic Procurement Scenarios"
+        - "Predict Customs Clearance Delays with Pre-Clearance Documentation Actions"
+        - "Classify Partner Credit Risk with Collection Escalation Actions"
+    *   **❌ REJECTED Examples (activation describes technical METHOD instead of business DELIVERABLE)**:
+        - "Detect Revenue Anomalies with Z-Score Deviation and Correlation Breakdown" → REJECTED (activation = technical method)
+        - "Predict Churn with Purchase Recency and Contract Tenure Signals" → REJECTED (activation = data signals, not deliverable)
+        - "Forecast Demand with Seasonal Decomposition and Holiday Calendar" → REJECTED (activation = analytical technique)
+        - "Classify Risk Tiers with Payment History Cross-Reference" → REJECTED (activation = data source, not deliverable)
+        - "Segment Buyers with RFM Scoring and Cohort Aging" → REJECTED (activation = statistical technique)
+    *   **❌ REJECTED Examples (generic/hollow activation — BANNED)**:
+        - "Detect Fraud with Pattern Recognition" → REJECTED ("Pattern Recognition" is a method, not a deliverable)
+        - "Identify Issues with Intelligence" → REJECTED ("Intelligence" is meaningless filler)
+        - "Classify Risk with Risk Scoring" → REJECTED (circular — activation restates the action)
+        - "Forecast Revenue with Trend Analysis" → REJECTED (activation = technique, not deliverable)
+    *   **❌ REJECTED Examples (action contains technical jargon — BANNED)**:
+        - "Detect Route-Level RASK Deviation with Pricing Recommendations" → REJECTED (action contains "RASK" — domain jargon)
+        - "Identify PNR Booking Anomalies with Investigation Queue" → REJECTED (action contains "PNR" — technical acronym)
+        - "Forecast AWB Weight Variance with Audit Actions" → REJECTED (action contains "AWB" — domain jargon)
+    *   **❌ REJECTED Examples (missing "with" entirely)**:
         - "Detect Invoice Fraud Patterns Using Anomaly Detection" → REJECTED (uses "Using" instead of "with")
         - "Identify High-Value Overdue Invoices for Executive Escalation" → REJECTED (uses "for" instead of "with")
         - "Correlation Analysis Between Payment Terms and Overdue Risk" → REJECTED (no "with" at all)
-        - "Classify Tax Exemption Claims for Compliance Audit Readiness" → REJECTED (uses "for" instead of "with")
-    *   **YOUR RESPONSE WILL BE REJECTED if ANY use case name does NOT contain the word "with" followed by a meaningful enrichment/context phrase.**
+    *   **ACTIVATION QUALITY TEST**: The "with [...]" phrase must answer: "What actionable DELIVERABLE does the business user receive from this use case?" If the suffix describes HOW the analysis works rather than WHAT the user gets to DO, it is TECHNICAL and REJECTED.
+    *   **YOUR RESPONSE WILL BE REJECTED if ANY use case name has a technical method as the activation suffix, or if the action part contains domain-specific jargon or statistical terminology.**
 
   - **`type`**: One of "Problem", "Risk", "Opportunity", "Improvement".
 
@@ -1288,7 +1658,7 @@ You MUST ONLY generate use cases that meet at least one of these criteria:
   - **`Business Value`**: **CRITICAL**. Articulate the tangible business impact (Revenue, Cost, Efficiency).
     *   **Focus on WHY this matters**.
     *   **IMPORTANT CONSTRAINT**: Refrain from mentioning any specific values (e.g. "10% more revenue", "reduce cost by 20%"). Deliver the business value statement WITHOUT committing on any number.
-    *   **GOOD**: "Reduces fuel costs and extends aircraft lifespan..."
+    *   **GOOD**: "Reduces operational costs and extends asset lifespan..."
     *   **BAD**: "Optimizes performance..." (Too generic).
 
   - **`Beneficiary`**: The primary person/role (e.g., "Loan Officer").
@@ -1303,18 +1673,60 @@ You MUST ONLY generate use cases that meet at least one of these criteria:
     *   **MANDATORY COLUMN LISTING**: List EXACT column names from the schema: "Using columns: [col1], [col2], [col3]"
     *   **CTE1 RULES**: First CTE MUST use `SELECT DISTINCT` or `GROUP BY` to deduplicate. Add `LIMIT 10` at END of first CTE only (no LIMIT in other CTEs).
     *   **JOIN PRIORITY**: CHECK FK Relationships section. If related tables exist, include JOINs. Multi-table > single-table for business value.
-    *   **EXTERNAL DATA ENRICHMENT (≥50% of use cases)**: Include `external_api_for_*` CTE when external factor has DIRECT, PROVABLE, INDUSTRY-RECOGNIZED cause-and-effect with the business metric. Use persona-based ai_query prompts (e.g., "You are a Chief Economist at IMF..."). Include confidence scores, as_of_date, source_note, is_estimate fields.
+    *   **EXTERNAL DATA ENRICHMENT (≥50% of use cases)**: Include `simulated_external_data_for_*` CTE when external factor has DIRECT, PROVABLE, INDUSTRY-RECOGNIZED cause-and-effect with the business metric. Use persona-based ai_query prompts (e.g., "You are a Chief Economist at IMF..."). Include confidence scores, as_of_date, source_note, is_estimate fields.
     *   Only use columns that EXIST in the schema. No assumptions.
 
 **FOCUS AREAS:**
 {focus_areas_instruction}
 
 **GENERATION PRINCIPLES:**
-  - **EXHAUSTIVE + HIGH-VALUE**: Enumerate every use case supported by the schema that delivers significant business value. No omissions, no filler.
+  - **QUALITY OVER QUANTITY**: Generate ONLY use cases with STRONG data support and PROVEN cause-effect logic. 10 excellent use cases >>> 100 mediocre ones.
+  - **EVERY USE CASE MUST PASS THE DATA QUALITY GATE ABOVE**: If a use case fails ANY of the 11 quality dimensions, DO NOT GENERATE IT.
   - **PRIORITIZE**: Revenue impact > Cost reduction > Risk mitigation > Strategic alignment.
-  - **EXPLORE**: All AI/statistical techniques, all business angles (ops, finance, sales, risk), all table relationships, all time horizons.
-  - **QUALITY GATE**: Would a CFO approve budget? Does it move the revenue needle? If no, SKIP it.
+  - **NO TRIVIAL USE CASES**: Skip basic reporting, simple aggregations, or use cases any analyst could do with a GROUP BY.
+  - **NO SPECULATIVE USE CASES**: If the data doesn't contain the causal signals to support the analysis, don't generate it.
   - **NO REDUNDANT EXTRACTION**: Do not use AI to extract data that already exists in structured columns.
+
+**🚨🚨🚨 ANTI-PATTERN RULES (MANDATORY — violations cause AUTOMATIC REJECTION) 🚨🚨🚨**
+
+**AP1 - NO SEMANTIC DUPLICATES (5-LAYER DETECTION — ZERO TOLERANCE)**:
+Before generating each use case, apply ALL 5 layers. A match on ANY layer = DUPLICATE = DO NOT GENERATE:
+
+**LAYER 1 — VERB + SUFFIX**: Normalize verb (Forecast/Predict/Anticipate/Envision → PREDICT; Detect/Identify/Reveal/Find/Discover/Uncover → DETECT; Classify/Segment/Categorize/Tier/Rank → CLASSIFY; Optimize/Maximize → OPTIMIZE; Assess/Evaluate/Measure → ASSESS). Strip "with [...]" activation suffix. Compare core phrase to all previous use cases. Match → DO NOT GENERATE.
+
+**LAYER 2 — NOUN SYNONYMS**: Also replace: Revenue=Income=Sales=Earnings; Cost=Expense=Spend; Churn=Attrition=Turnover=Defection; Leakage=Loss=Erosion=Slippage; Demand=Consumption=Usage=Volume; Risk=Exposure=Vulnerability; Customer=Client=Account; Supplier=Vendor=Provider; Inventory=Stock=Supply. Match after replacement → DO NOT GENERATE.
+
+**LAYER 3 — ENTITY + METRIC**: Extract business ENTITY and METRIC. If any previous use case has the SAME entity + SAME metric → DO NOT GENERATE. Example: if you generated "Forecast Customer Churn", you CANNOT generate "Predict Client Attrition" (same entity=Customer, same metric=Churn).
+
+**LAYER 4 — TECHNIQUE SWAP**: "Forecast X" and "Detect X Anomalies" on the same X = SAME USE CASE. Keep only one.
+
+**LAYER 5 — TABLE + INTENT**: If you're about to use the SAME tables as a previous use case for a SIMILAR business question → DO NOT GENERATE.
+
+**AP2 - NO TRIVIAL AI WRAPPERS**: Do NOT wrap simple SQL operations in AI terminology. These are AUTOMATICALLY REJECTED:
+  - Date expiry/deadline checks (e.g., "Detect Expiry Risk" = just a WHERE clause on dates)
+  - Simple threshold violations (e.g., "Detect Overdue X" = just `WHERE date > limit`)
+  - Basic count/sum aggregations dressed up as "AI Analysis"
+  - One-dimensional anomaly detection that is just a Z-score on a single column
+  **TEST**: If removing all AI functions from the SQL still produces the same business insight, it is TRIVIAL and INVALID.
+
+**AP3 - ACTIVATION MUST BE A BUSINESS DELIVERABLE**: The "with [activation]" part MUST describe the actionable DELIVERABLE the business user receives — NOT a technical method, data source, or analytical technique. These categories are BANNED:
+  - Technical methods: "with Z-Score Deviation", "with Correlation Analysis", "with Rolling STDDEV", "with Seasonal Decomposition"
+  - Data sources: "with Payment History Cross-Reference", "with Contract Term Signals", "with Invoice Date Gap Analysis"
+  - Generic filler: "with Intelligence", "with Insights", "with Analytics", "with Context", "with Pattern Recognition"
+  - Domain jargon in action part: ANY technical acronym or statistical term ANYWHERE in the name
+  Instead, describe WHAT the business user RECEIVES: "with Pricing Recalibration Recommendations", "with Prioritized Intervention Queue", "with Audit Escalation Brief", "with Collection Escalation Actions"
+
+**AP4 - DOMAIN AND TECHNIQUE DIVERSITY (EXTREME BALANCE)**:
+  - No single domain may exceed 20% of generated use cases
+  - No single analytics technique may exceed 25% of generated use cases
+  - After generating 3 use cases in one domain, STOP and move to an under-represented domain
+  - Count techniques as you go. If ANY technique hits 25%, SWITCH immediately to the least-used technique
+  - The top 2 domains combined must not exceed 40% of the total
+  - AIM for 5+ distinct techniques across the portfolio
+
+**AP5 - NO SUBDOMAIN DRIFT**: Each subdomain MUST belong to exactly ONE parent domain. A subdomain cannot appear under multiple parent domains. Pick the MOST natural parent domain and be consistent.
+
+**AP6 - NO IDENTICAL USE CASES**: Two use cases with the EXACT same name are ABSOLUTELY FORBIDDEN. This indicates a generation loop. If you detect this, immediately stop and reassess.
 
 **🚨 BUSINESS REALISM GATE (every use case must pass) 🚨**
 Before generating, verify: (1) DIRECT, PROVABLE cause-and-effect between variables, (2) Industry-recognized analysis, (3) A 20-year veteran and a skeptical CFO would both approve. If ANY test fails, DO NOT generate. Do NOT correlate unrelated variables, invent relationships from temporal patterns, or add external data without clear cause-and-effect.
@@ -1351,9 +1763,9 @@ Before generating, verify: (1) DIRECT, PROVABLE cause-and-effect between variabl
 
 SQL will be generated separately. Replace all [PLACEHOLDERS] with actual values.
 
-`"1","Forecast Monthly [METRIC] with Economic Context","Risk","Forecasting","[Statement]","[Solution using Databricks Agent Bricks]","[Business Value]","[Role]","[Executive]","[catalog.schema.table]","CTE1: SELECT DISTINCT + LIMIT 10 to deduplicate. CTE2: external_api_for_economic_context (ai_query with persona). CTE3: Parse JSON + join. CTE4: Aggregate by period. CTE5: ai_forecast. CTE6: ai_query recommendations."`
+`"1","Forecast Monthly [METRIC] with Economic Context","Risk","Forecasting","[Statement]","[Solution using Databricks Agent Bricks]","[Business Value]","[Role]","[Executive]","[catalog.schema.table]","CTE1: SELECT DISTINCT + LIMIT 10 to deduplicate. CTE2: simulated_external_data_for_economic_context (ai_query with persona). CTE3: Parse JSON + join. CTE4: Aggregate by period. CTE5: ai_forecast. CTE6: ai_query recommendations."`
 
-`"2","Classify [ENTITY] by [CATEGORY] with Market Benchmarks","Improvement","Classification","[Statement]","[Solution using Databricks Agent Bricks]","[Business Value]","[Role]","[Executive]","[catalog.schema.table]","CTE1: SELECT DISTINCT + LIMIT 10. CTE2: external_api_for_benchmarks (ai_query with persona). CTE3: Parse JSON. CTE4: ai_classify. CTE5: ai_query strategies."`
+`"2","Classify [ENTITY] by [CATEGORY] with Market Benchmarks","Improvement","Classification","[Statement]","[Solution using Databricks Agent Bricks]","[Business Value]","[Role]","[Executive]","[catalog.schema.table]","CTE1: SELECT DISTINCT + LIMIT 10. CTE2: simulated_external_data_for_benchmarks (ai_query with persona). CTE3: Parse JSON. CTE4: ai_classify. CTE5: ai_query strategies."`
 
 ---
 
@@ -1457,7 +1869,7 @@ You are a highly experienced **Principal Enterprise Data Architect** and **Fraud
 **🔥 EXPANDED ANALYTICS SCOPE (MIX THESE APPROACHES) 🔥**:
 
 A. **SIMULATION & WHAT-IF ANALYSIS (HIGH PRIORITY)**:
-   - **What-If Analysis**: Test outcomes with simulated inputs (e.g., "What if fuel cost rises 10%?").
+   - **What-If Analysis**: Test outcomes with simulated inputs (e.g., "What if input cost rises 10%?").
    - **Scenario Modeling**: Compare multiple hypothetical situations simultaneously (Optimistic, Neutral, Pessimistic).
    - **Monte Carlo Simulation**: Model risk by generating realistic synthetic data distributions using AI.
    - **Sensitivity Analysis**: Measure how sensitive an output is to changes in specific inputs.
@@ -1481,7 +1893,7 @@ Refer to the **AVAILABLE STATISTICAL FUNCTIONS** section below. You MUST use fun
 - Ranking, Time Series
 
 **GUIDANCE**:
-- **Business Terms**: Make the use case Name reflect the approach (e.g., "Simulate Impact of Pricing Changes", "Geospatial Hotspot Analysis").
+- **Business Terms**: Make the use case Name reflect the business OUTCOME and DELIVERABLE, not the technical approach (e.g., "Detect Revenue Underperformance with Pricing Recalibration Recommendations", "Classify Booking Fraud Risk with Automated Hold Recommendations").
 - **Technical Design Column**: Reference specific statistical functions from the registry (e.g., "Use SKEWNESS, KURTOSIS for anomaly detection, then ai_query for root cause analysis").
 """
 ) + HONESTY_CHECK_CSV
@@ -1684,7 +2096,7 @@ You are an expert business analyst specializing in BALANCED domain taxonomy desi
    - "Customer Service" + "Customer Support" → "Customers"; "Risk Management" + "Risk Analysis" → "Risk"
 4. **BALANCED DISTRIBUTION**: 6-80 UCs per domain. Do NOT consolidate into 1-5 mega-domains. Split domains >80 UCs.
 5. **INDUSTRY-SPECIFIC NAMING**: Infer industry from the actual data. Use business-specific terms, NOT generic ("Management", "Services").
-   - Patterns by industry: Transport→"Fleet","Routes","Cargo"; Finance→"Risk","Credit","Fraud"; Retail→"Inventory","Sales","Pricing"
+   - Infer domain names from the actual tables and columns in the schema. Use the most specific business noun that describes the domain.
 6. **NO TWO DOMAINS share the same core business name**.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -1736,12 +2148,13 @@ You are an expert business analyst specializing in subdomain taxonomy design wit
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 1. **SUBDOMAIN COUNT**: 2-10 per domain (HARD LIMITS on both ends).
 2. **NAMING**: EXACTLY 2 WORDS per subdomain. 1 word → REJECTED. 3+ words → REJECTED.
-   - ✅ "Crew Planning", "Revenue Pricing", "Quality Control", "Fleet Management"
+   - ✅ "Revenue Pricing", "Quality Control", "Risk Management", "Supply Planning"
    - ❌ "Scheduling" (1 word), "Quality Control Management" (3 words)
 3. **MIN 2 USE CASES per subdomain**: If a subdomain has only 1 UC, MERGE it with a related subdomain.
 4. **NO OVERLAPPING WORDS**: No two subdomains within this domain may share any word. If overlap, merge (keep 2 words).
 5. **BUSINESS-FOCUSED**: Use business terms, NOT technical terms.
 6. **BALANCED DISTRIBUTION**: Distribute use cases evenly across subdomains.
+7. **NO PLACEHOLDER NAMES**: NEVER use generic or sequential names like "Sub Domain1", "Domain 1", "Category 1", "Group A", "Area 1", "N/A", "Other", "General", "Miscellaneous", or "Uncategorized". Every subdomain name must be a MEANINGFUL 2-word business term that describes the actual functional area. If you cannot find a meaningful name, merge those use cases into an existing subdomain.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 **BUSINESS CONTEXT**:
@@ -2110,7 +2523,7 @@ PROMPT_TEMPLATES["USE_CASE_SQL_FIX_PROMPT"] = """You are a **Senior Databricks S
 | 1 | `PARSE_SYNTAX_ERROR at 'Unknown'/'Material'/etc.` | COALESCE text default missing quotes | `COALESCE(col, 'Unknown Material')` — ALL text defaults need `'single quotes'`. Numbers/booleans do not. |
 | 2 | `UNRESOLVED_COLUMN 'ds'` in AI_FORECAST | Column name not quoted | `time_col => 'ds'`, `value_col => 'revenue'`, `group_col => ARRAY('id','type')` |
 | 3 | `PARSE_SYNTAX_ERROR at '=>'` | date_add unit quoted or wrong `=>` syntax | `date_add(MONTH, 3, date)` (unquoted unit). `time_col => 'ds'` (correct `=>`). |
-| 4 | `INVALID_PARAMETER_VALUE.DATETIME_UNIT` | Quoted datetime unit | Remove quotes: `date_add(QUARTER, 4, d)`. DATEDIFF takes 2 args only. |
+| 4 | `INVALID_PARAMETER_VALUE.DATETIME_UNIT` | Quoted datetime unit | Remove quotes: `date_add(QUARTER, 4, d)` — UNQUOTED keyword, not `'QUARTER'`. DATEDIFF takes 2 args only. Note: `date_trunc('month', d)` DOES use quoted string. See Anti-Pattern #23. |
 | 5 | `PYTHON_TVF_COLUMN_VALUES_MUST_BE_UNIQUE` | Duplicate time values | Add `GROUP BY time_col` in input CTE. |
 | 6 | `PYTHON_TVF_INCOMPATIBLE_COLUMN_TYPE` | value_col not DOUBLE | `CAST(col AS DOUBLE)` before AI_FORECAST. |
 | 7 | `INTERNAL_ERROR corr(...)` | Aggregate window + ROWS BETWEEN | Remove ROWS BETWEEN: `CORR(a,b) OVER (PARTITION BY g)`. Applies to AVG/STDDEV/CORR/COVAR/PERCENTILE in windows. CAST DECIMAL→DOUBLE. |
@@ -2123,8 +2536,15 @@ PROMPT_TEMPLATES["USE_CASE_SQL_FIX_PROMPT"] = """You are a **Senior Databricks S
 | 14 | `SCALAR_SUBQUERY_TOO_MANY_ROWS` | OVER() in scalar subquery | Remove OVER(): `MAX(ds)` not `MAX(ds) OVER()` |
 | 15 | `Format specifier '%s'` / `MissingFormatArgumentException` | format_string has more `%s` placeholders than arguments | Count ALL `%s` in the template and ALL arguments after it — they MUST match exactly. **ROOT CAUSE**: `%s` in non-data text (Remarks example patterns, Output descriptions, Narrative field instructions) — these are instruction text for the AI, NOT data injection points. Replace with bracket placeholders: `[rate]`, `[amount]`, `[value]` or literal X/Y/Z. See Anti-Pattern #10. |
 | 16 | `Conversion = 'X'` / `UnknownFormatConversionException` | Unescaped `%` followed by non-format character in format_string | Find EVERY `%` in the format_string template that is NOT `%s`, `%d`, `%f`, `%e`, `%g`, or `%%`. Escape ALL literal `%` as `%%`. **SNEAKIEST TRAP**: `90%+ lower` → `%+` then `l` → `Conversion = 'l'`. Also `50%+ faster` → `%+f` silently eats an argument! Fix: `90%%+ lower`, `50%%+ faster`. See Anti-Pattern #16. |
+| 17 | `UNRECOGNIZED_PARAMETER_NAME` | ai_query called with invalid named parameter (e.g., `systemPrompt`, `temperature`) | ai_query ONLY accepts: `(endpoint, request, modelParameters => named_struct(...), responseFormat => '...')`. **COMMON HALLUCINATIONS**: `systemPrompt` / `system_prompt` (embed in prompt text), `temperature` (put inside modelParameters), `max_tokens` (put inside modelParameters), `responseFormat => 'JSON'` (instruct JSON output in prompt text instead). See Anti-Pattern #21. |
+| 18 | `UNEXPECTED_INPUT_TYPE` / Parameter Nth requires BOOLEAN but got STRUCT | ai_query named parameter passed as positional string: `'modelParameters', named_struct(...)` instead of `modelParameters => named_struct(...)` | Named params in ai_query use `=>` syntax, NOT positional string args. The string `'modelParameters'` becomes returnType (arg 3), and `named_struct(...)` becomes failOnError (arg 4, expects BOOLEAN). **FIX**: Change `'modelParameters', named_struct(...)` → `modelParameters => named_struct(...)`. See Anti-Pattern #22. |
+| 19 | `DIVIDE_BY_ZERO` | Aggregate window function (CORR, REGR_SLOPE, REGR_R2, COVAR_SAMP) internally divides by stddev or variance which is 0 when all values in the window are identical | Cannot protect with NULLIF — division is inside the function. **FIX**: Prepend `SET ansi_mode = false;` before the CREATE statement. This makes division-by-zero return NULL; the existing `COALESCE(..., 0.0)` wrapper handles the rest. Very common with `LIMIT 10` (small sample → identical values). See Anti-Pattern #24. |
 
-**OUTPUT**: Return ONLY corrected SQL. Start with `-- HONESTY_SCORE:` and `-- HONESTY_JUSTIFICATION:`, then `-- Error fixed: [description]`. No fences, no explanations.
+**OUTPUT**: Return ONLY corrected SQL code. Do NOT include any analysis, explanation, or error description text.
+🚨 Your response MUST start with `-- HONESTY_SCORE:` followed by `-- HONESTY_JUSTIFICATION:`, then the full corrected SQL.
+❌ DO NOT output: "# ANALYSIS OF ERRORS", explanations, bullet points, markdown headers, or any non-SQL text.
+❌ DO NOT include "-- Error fixed:" comments — these are internal metadata that pollute the user-facing SQL.
+✅ DO output: SQL comments (--) and SQL statements ONLY. No explanatory comments about what was fixed.
 
 Begin your corrected SQL now:
 """ + HONESTY_CHECK_SQL
@@ -2203,15 +2623,77 @@ Begin your JSON response now:
 """
 
 # --- 1f. Use Case Review Prompt (RENAMED, ENHANCED) ---
-PROMPT_TEMPLATES["REVIEW_USE_CASES_PROMPT"] = """You are an expert business analyst. Your task: identify and remove semantic duplicates AND reject useless/technical use cases.
+PROMPT_TEMPLATES["REVIEW_USE_CASES_PROMPT"] = """You are the **Chief Quality Officer** for an analytics use case portfolio. Your task: RUTHLESSLY and MERCILESSLY eliminate duplicates, trivial use cases, formulaic patterns, and domain imbalances. You are the LAST LINE OF DEFENSE. Every weak use case you let through damages the portfolio's credibility. When in doubt, REMOVE.
 
-**REMOVAL CRITERIA (be EXTREMELY AGGRESSIVE — target 20-30% removal):**
-1. **Semantic duplicates** (keep FIRST occurrence only): Same action on same object with different wording.
-   - Patterns: "Forecast X" = "Predict X" = "X Forecasting"; "Classify X" = "Categorize X"; "Detect Fraud" = "Identify Fraud" = "Find Fraud"
-2. **Trivial/technical** use cases: "count rows", "list tables", pipeline monitoring, DevOps telemetry — no business outcome.
-3. **Irrelevant correlations**: Variables with no provable cause-and-effect. If a CFO would question the logic, REMOVE.
+**🚨🚨🚨 TARGET: 40-60% REMOVAL — be EXTREME. It is better to deliver 50 exceptional use cases than 150 mediocre ones. 🚨🚨🚨**
 
-**NON-DUPLICATES (KEEP both):** Different objects ("Forecast Revenue" vs "Forecast Demand"), different operations ("Extract Name" vs "Classify Segment").
+**REMOVAL CRITERIA (apply ALL of these — a use case failing ANY criterion is REMOVED):**
+
+**1. SEMANTIC DUPLICATES — 5-LAYER DETECTION (keep BEST occurrence only, remove ALL others):**
+
+Apply ALL 5 layers. A match on ANY single layer = DUPLICATE = REMOVE.
+
+**LAYER 1 — VERB + SUFFIX NORMALIZATION:**
+a. Normalize leading verb: Forecast/Predict/Anticipate/Envision → PREDICT; Detect/Identify/Reveal/Find/Discover/Uncover/Expose → DETECT; Classify/Segment/Categorize/Tier/Rank → CLASSIFY; Simulate/Model/Project → SIMULATE; Optimize/Maximize/Minimize → OPTIMIZE; Assess/Evaluate/Measure/Gauge/Quantify → ASSESS
+b. Strip "with [...]" activation suffix entirely
+c. If remaining core phrase matches → DUPLICATE → REMOVE the weaker one
+
+**LAYER 2 — NOUN SYNONYM MATCHING:**
+After Layer 1, also replace: Revenue=Income=Sales=Earnings; Cost=Expense=Spend=Expenditure; Churn=Attrition=Turnover=Defection; Leakage=Loss=Erosion=Slippage; Demand=Consumption=Usage=Volume; Risk=Exposure=Vulnerability=Threat; Delay=Latency=Bottleneck=Slowdown; Fraud=Anomaly=Irregularity; Customer=Client=Account=Subscriber; Employee=Staff=Worker=Personnel; Supplier=Vendor=Provider; Inventory=Stock=Supply.
+If cores match after noun replacement → DUPLICATE
+
+**LAYER 3 — ENTITY-METRIC PAIR:**
+Extract the business ENTITY (what's being analyzed) and METRIC (what's being measured). Same entity + same metric = DUPLICATE.
+Examples: "Forecast Customer Churn Rate" and "Predict Client Attrition Probability" → entity=Customer, metric=Churn → DUPLICATE
+
+**LAYER 4 — TECHNIQUE SWAP:**
+"Forecast X", "Detect X Anomalies", "Classify X Risk Tiers", "Segment X by Behavior" on the SAME X → ALL are duplicates. Keep ONLY the one with the deepest, most complex analysis.
+
+**LAYER 5 — TABLE + INTENT OVERLAP:**
+Two use cases using the SAME primary tables with a SIMILAR business question → DUPLICATE. Different tables accessing different data dimensions = potentially unique. Same tables + similar intent = REMOVE one.
+
+**DUPLICATE RESOLUTION — TABLE-BASED VIABILITY (MANDATORY when choosing which duplicate to KEEP):**
+When two or more use cases are identified as duplicates on ANY layer above, you MUST keep the one whose involved tables are most likely to contain the actual data that supports the claimed business value. Apply this reasoning:
+a. **Data Richness**: Which use case's tables have columns (evidenced by table name and context) that would realistically store the metrics, dimensions, and history needed for the analysis?
+b. **Transactional vs Reference**: Prefer use cases anchored on TRANSACTIONAL tables (orders, transactions, events, logs) over those relying solely on REFERENCE/MASTER tables (lookups, configs) — transactional data enables time-series, trend, and anomaly analysis.
+c. **Multi-Table Joins**: Prefer use cases that JOIN multiple complementary tables over single-table use cases — cross-table analysis yields richer, harder-to-replicate insights.
+d. **Specificity of Claim**: If a use case claims high business value but its tables are unlikely to contain the supporting data (e.g., "Predict Customer Churn" using only a product catalog table), REMOVE it in favor of the duplicate whose tables actually contain customer behavior data.
+
+**NOT DUPLICATES**: Genuinely different business ENTITIES ("Revenue by Route" vs "Revenue by Customer" — different analytical dimensions), or genuinely different METRICS on the same entity ("Customer Churn" vs "Customer Lifetime Value").
+
+**2. TRIVIAL AI WRAPPERS (REMOVE entirely):**
+Use cases where the analytical core is a simple SQL operation disguised as AI/ML:
+  - Date expiry/deadline checks ("Detect Expiry Risk", "Forecast Compliance Deadline Breach") = just `WHERE date < threshold`
+  - Simple threshold violations ("Detect Overdue X", "Identify Overrun Risk") = just `WHERE value > limit`
+  - One-dimensional anomaly detection = just Z-score on a single metric with no multi-dimensional analysis
+  - Basic count/sum aggregation presented as "AI Analysis"
+  **TEST**: Would a junior SQL developer implement this in under 10 lines without ANY AI functions? If yes → REMOVE.
+
+**3. TECHNICAL METHOD OR HOLLOW ACTIVATION (REMOVE entirely):**
+Use cases where the "with [activation]" suffix describes a technical method instead of a business deliverable, OR is meaningless filler:
+  - Technical methods as activation: "with Z-Score Deviation", "with Correlation Analysis", "with Seasonal Decomposition", "with Cross-Reference", "with Rolling STDDEV", "with RFM Scoring"
+  - Data sources as activation: "with Payment History and Contract Signals", "with Invoice Date Gap Analysis", "with Load Factor Variance"
+  - Generic filler: "with Intelligence", "with Insights", "with Analytics", "with Context", "with Pattern Recognition"
+  - Circular: The activation merely restates the analysis technique (e.g., "Detect Anomalies with Anomaly Profiling")
+  - Domain jargon in action part: RASK, PNR, AWB, MEL, CDL, ULD, GDS, MTOW or any statistical term (Z-score, variance, coefficient, kurtosis, regression) ANYWHERE in the name
+  The activation MUST describe a business DELIVERABLE: recommendation, action plan, priority queue, intervention, strategy, escalation brief
+
+**4. DOMAIN OVERCONCENTRATION (REMOVE excess aggressively):**
+If any single domain exceeds 20% of the portfolio, remove the WEAKEST use cases from that domain until it's at or below 20%.
+If any single analytics technique exceeds 25%, remove the weakest use cases using that technique until it's at or below 25%.
+Count each domain and technique. If the top 2 domains hold >50% combined, the portfolio lacks diversity — remove more from over-represented areas.
+
+**5. SUBDOMAIN ISSUES (REMOVE or FLAG):**
+a. If the same subdomain appears under multiple parent domains, keep only the assignment under the most natural parent domain. Remove the others.
+b. Flag any use case whose subdomain is a PLACEHOLDER (e.g., "Sub Domain1", "Domain 1", "Category 1", "N/A", "Other", "General", "Miscellaneous", "Uncategorized") — these indicate generation failures and should be removed unless the use case itself is high-value, in which case note "NEEDS_SUBDOMAIN_REASSIGNMENT" in the justification.
+
+**6. IDENTICAL NAMES (REMOVE all but first):**
+If two or more use cases have the EXACT same name, keep only the first by ID. This is an obvious generation defect.
+
+**7. IRRELEVANT CORRELATIONS (REMOVE):**
+Variables with no provable cause-and-effect. If a CFO would question the logic, REMOVE.
+
+**NON-DUPLICATES (KEEP both):** Genuinely different business objects, different analytical questions, or different data dimensions.
 
 **RULES**: Keep earliest ID on duplicates. Reviewing ALL {total_count} use cases in one pass.
 
@@ -2507,98 +2989,78 @@ You are a **Chief Data Scientist** and **Domain Expert** responsible for assessi
 
 ---
 
-## QUALITY SCORING FRAMEWORK
+""" + QUALITY_GATE_SCORING_BLOCK + """
 
-For EACH use case, evaluate the following 7 dimensions and assign a QUALITY SCORE.
+### SCORING GUIDE — ANTI-LENIENCY CALIBRATION (apply to EACH dimension)
 
-### DIMENSION 1: CAUSAL SIGNAL STRENGTH (Weight: 20%)
-**Question**: "Does the data contain fields that DIRECTLY CAUSE or INDICATE the outcome being predicted/analyzed?"
+**🚨 CRITICAL: You are known to over-score. Consciously resist the urge to give 4.0+. The DEFAULT score is 3.0. A use case must EARN every point above 3.0 with CONCRETE EVIDENCE. 🚨**
 
-**SCORING GUIDE**:
-- **5.0**: Strong causal signals present - historical outcomes, leading indicators, behavioral patterns all exist
-- **4.0**: Good causal signals - most required signals present with minor gaps
-- **3.0**: Moderate signals - some relevant data exists but causal link is indirect
-- **2.0**: Weak signals - data exists but connection to outcome is tenuous
-- **1.0**: No causal signals - data cannot logically support the analysis
+- **5.0** (EXCEPTIONAL — rare, <5% of use cases): Flawless execution with zero gaps, novel approach, multi-dimensional depth, would impress a skeptical CTO. Reserve this for truly outstanding use cases.
+- **4.5** (EXCELLENT — uncommon, <10%): Nearly flawless, demonstrates sophisticated analytical thinking, strong cross-table integration.
+- **4.0** (STRONG — selective, ~15%): Clearly above average with evidence of depth. NOT just "looks good" — must demonstrate concrete analytical value beyond standard patterns.
+- **3.5** (ABOVE AVERAGE — common): Solid but with clear room for improvement. This is the MINIMUM for "High" quality label.
+- **3.0** (AVERAGE — the DEFAULT starting point): Acceptable but unremarkable. Standard patterns without differentiation. If you cannot articulate WHY a dimension deserves above 3.0, it IS 3.0.
+- **2.5** (BELOW AVERAGE): Notable weaknesses or gaps. Triggers soft veto on critical dimensions.
+- **2.0** (WEAK): Significant failures. Triggers hard veto on critical dimensions.
+- **1.5** (POOR): Major failures across the dimension.
+- **1.0** (FAILED): Dimension completely not satisfied.
 
----
+**DISTRIBUTION EXPECTATION**: In a well-calibrated scoring run, ~20% of use cases should score below 3.0 overall, ~40% should score 3.0-3.5, ~25% should score 3.5-4.0, and only ~15% should score 4.0+. If your scores skew higher, you are being lenient.
 
-### DIMENSION 2: CAUSE-EFFECT VALIDITY (Weight: 20%)
-**Question**: "Does the technical design use variables that have a LOGICAL cause-effect relationship with the outcome?"
+### CALIBRATION ANCHORS — what each score LOOKS LIKE in practice:
 
-**SCORING GUIDE**:
-- **5.0**: Strong cause-effect logic - variables directly influence outcome through proven mechanisms
-- **4.0**: Good logic - clear causal pathway with minor assumptions
-- **3.0**: Moderate - some causal logic but includes correlational elements
-- **2.0**: Weak - primarily correlational, causal mechanism unclear
-- **1.0**: No cause-effect logic - relies on spurious correlations
+**D8 (Uniqueness) = 1.0**: "Forecast Customer Churn with Retention Campaign Prioritization" when "Predict Client Attrition with Proactive Outreach Queue" already exists. Same entity (customer), same metric (churn/attrition), just synonyms.
+**D8 = 5.0**: A use case analyzing supplier delivery reliability when no other use case touches supplier operations. Completely novel business question.
 
----
+**D9 (Depth) = 1.0**: "Detect Overdue Invoice Risk" — this is just WHERE due_date < CURRENT_DATE. No AI required.
+**D9 = 3.0**: Multi-column aggregation with a statistical comparison — requires some effort but no genuine predictive modeling.
+**D9 = 5.0**: Multi-step pipeline: cross-table feature engineering → time-series decomposition → predictive model → counterfactual scenario analysis.
 
-### DIMENSION 3: DATA GRANULARITY (Weight: 15%)
-**Question**: "Does the data exist at the RIGHT LEVEL OF DETAIL to support the analysis?"
+**D10 (Activation Quality) = 1.0**: "with Correlation Analysis" — describes a technical method, not a business deliverable. Also 1.0: "with Competitive Intelligence" — meaningless buzzword.
+**D10 = 1.0**: "with Payment History and Contract Term Signals" — describes a data source, not a deliverable. "with RFM Scoring" — describes a technique.
+**D10 = 3.0**: "with Recommendations" — too vague, no specificity about what kind of recommendation.
+**D10 = 5.0**: "with Pricing Recalibration Recommendations" — specific business deliverable. "with Pre-Invoice Correction Actions" — concrete, role-appropriate action. "with Audit Escalation Brief" — names the exact artifact the user receives.
+**D10 = 1.0 (JARGON)**: Any name containing domain acronyms (RASK, PNR, AWB, MEL, ULD, GDS, MTOW) or statistical terms (Z-score, variance, coefficient, kurtosis, regression, STDDEV) ANYWHERE in the name.
 
-**SCORING GUIDE**:
-- **5.0**: Perfect granularity - data exists at exactly the level needed
-- **4.0**: Good granularity - minor aggregation/disaggregation needed
-- **3.0**: Acceptable - analysis possible but with some compromises
-- **2.0**: Poor granularity - significant mismatch between data level and analysis needs
-- **1.0**: Wrong granularity - analysis cannot be performed at this data level
+**Overall quality = 2.0**: A use case that is a date check dressed as AI, or a duplicate of another, or uses hallucinated columns.
+**Overall quality = 3.0**: Legitimate analysis but unremarkable — standard pattern, single table, moderate depth.
+**Overall quality = 4.5**: Multi-table analysis with genuine predictive modeling, specific business deliverable activation, novel business insight, zero hallucination.
 
----
-
-### DIMENSION 4: CRITICAL DIMENSIONS PRESENT (Weight: 15%)
-**Question**: "Are ALL critical dimensions required for the analysis present in the data?"
-
-**SCORING GUIDE**:
-- **5.0**: All critical dimensions present with good coverage
-- **4.0**: Most dimensions present - one minor dimension could be improved
-- **3.0**: Key dimensions present but some important ones missing
-- **2.0**: Only basic dimensions present - several critical ones missing
-- **1.0**: Critical dimensions missing - analysis fundamentally compromised
-
----
-
-### DIMENSION 5: LOGICAL POSSIBILITY (Weight: 10%)
-**Question**: "Is the technical design logically possible with the given data?"
-
-**SCORING GUIDE**:
-- **5.0**: Fully possible - all operations can be performed on available data
-- **4.0**: Mostly possible - minor adaptations needed
-- **3.0**: Partially possible - significant modifications required
-- **2.0**: Barely possible - major redesign needed
-- **1.0**: Impossible - operations cannot be performed on this data type
-
----
-
-### DIMENSION 6: METRIC VALIDITY (Weight: 10%)
-**Question**: "Can the claimed metrics actually be derived from the available fields?"
-
-**SCORING GUIDE**:
-- **5.0**: All metrics directly calculable from available data
-- **4.0**: Most metrics calculable - minor proxy calculations needed
-- **3.0**: Some metrics calculable - others require approximations
-- **2.0**: Few metrics calculable - heavy approximation needed
-- **1.0**: Metrics fabricated - cannot be calculated from available data
-
----
-
-### DIMENSION 7: TECHNICAL DESIGN MATCH (Weight: 10%)
-**Question**: "Does the technical design match what the data can actually support?"
-
-**SCORING GUIDE**:
-- **5.0**: Perfect match - all tables, columns, joins exist as described
-- **4.0**: Good match - minor column name discrepancies
-- **3.0**: Partial match - some elements exist, others need substitution
-- **2.0**: Poor match - technical design assumes data that doesn't exist
-- **1.0**: No match - technical design is completely disconnected from schema
+### DIMENSION WEIGHTS (11 dimensions)
+- D1 Causal Signal Strength: 15%
+- D2 Cause-Effect Validity: 15%
+- D3 Data Granularity: 10%
+- D4 Critical Dimensions Present: 10%
+- D5 Logical Possibility: 5%
+- D6 Metric Validity: 5%
+- D7 Technical Design Match: 5%
+- D8 Semantic Uniqueness: 15%
+- D9 Analytical Depth: 10%
+- D10 Activation Quality: 5%
+- D11 Domain Balance: 5%
 
 ---
 
 ## QUALITY SCORE CALCULATION
 
-**Formula**: 
-Quality Score = (D1 × 0.20) + (D2 × 0.20) + (D3 × 0.15) + (D4 × 0.15) + (D5 × 0.10) + (D6 × 0.10) + (D7 × 0.10)
+**Step 1 - Weighted Average**: 
+Quality Score = (D1*0.15) + (D2*0.15) + (D3*0.10) + (D4*0.10) + (D5*0.05) + (D6*0.05) + (D7*0.05) + (D8*0.15) + (D9*0.10) + (D10*0.05) + (D11*0.05)
+
+**Step 2 - VETO RULES (override weighted average — ZERO TOLERANCE for fatal flaws):**
+If ANY of these are true, cap quality_score at 2.0 and set quality_label = "Low" or lower:
+- **D1 ≤ 2.5** (Weak or no causal signal) → quality_score = min(weighted_avg, 2.0)
+- **D2 ≤ 2.5** (Weak or no cause-effect validity) → quality_score = min(weighted_avg, 2.0)
+- **D8 ≤ 2.5** (Semantic duplicate on ANY of the 5 layers) → quality_score = min(weighted_avg, 2.0)
+- **D9 ≤ 2.5** (Trivial or weak analytical depth) → quality_score = min(weighted_avg, 2.0)
+- **D10 ≤ 2.0** (Technical method/data source as activation, domain jargon in name, or generic filler suffix) → quality_score = min(weighted_avg, 2.0)
+- **COLUMN HALLUCINATION detected** → quality_score = min(weighted_avg, 2.0)
+
+**Step 2b - SOFT VETO (cap at 3.0 = Medium):**
+If ANY of these are true, cap quality_score at 3.0:
+- **D9 = 2.5-3.0** (Moderate but not deep enough for Extreme Quality)
+- **D10 = 2.5-3.0** (Vague activation deliverable, or technical jargon detected in name)
+- **D3 ≤ 2.5** (Data granularity insufficient)
+- **D7 ≤ 2.5** (Technical design doesn't match schema)
 
 **Quality Label Mapping**:
 - **4.5 - 5.0**: Ultra High
@@ -2608,6 +3070,31 @@ Quality Score = (D1 × 0.20) + (D2 × 0.20) + (D3 × 0.15) + (D4 × 0.15) + (D5 
 - **2.0 - 2.49**: Low
 - **1.5 - 1.99**: Very Low
 - **1.0 - 1.49**: Ultra Low
+
+**🔥 QUALITY REASONS (quality_summary field) — DATA-TO-VALUE CHAIN EXPLANATION 🔥**
+
+The `quality_summary` field is NOT a hallucination check report. It MUST be a detailed, step-by-step explanation of HOW the available data columns will deliver the promised business value. The reader should finish reading this field and think: "Yes, this data is clearly sufficient to produce that outcome."
+
+**MANDATORY STRUCTURE for quality_summary (follow this pattern):**
+1. **Identify the signal columns**: Name the specific columns that carry the analytical signal (e.g., "Column `order_date` and `ship_date` provide the temporal gap signal")
+2. **Describe the analytical operation**: Explain what aggregation, comparison, or transformation will be performed (e.g., "by computing DATEDIFF(ship_date, order_date) we get fulfillment latency per order")
+3. **Derive the metric/KPI**: Show what measurable metric emerges (e.g., "this produces an avg_fulfillment_days KPI per warehouse")
+4. **Connect to business value**: Explain how that metric delivers the promised use case outcome (e.g., "comparing this KPI across warehouses reveals bottleneck locations, directly enabling the promised 15% logistics cost reduction")
+
+**EXAMPLE of a GOOD quality_summary:**
+"Gap analysis signal detected via columns `order_date` and `ship_date` in orders table; computing DATEDIFF yields per-order fulfillment latency. Aggregating by `warehouse_id` with AVG and PERCENTILE produces warehouse-level fulfillment KPI. Joining with `warehouse_costs.operational_cost` enables cost-per-day-delayed calculation. Combining fulfillment KPI with cost data surfaces the top bottleneck warehouses driving excess logistics spend — directly delivering the promised supply chain cost optimization. Column `product_category` adds dimensional richness for category-level drill-down."
+
+**EXAMPLE of a BAD quality_summary (DO NOT produce this):**
+"NO HALLUCINATION: All columns verified. Strong causal signals. Unique business problem."
+↑ This tells the reader NOTHING about HOW the data delivers value. REJECTED.
+
+**RULES for quality_summary:**
+- MUST reference at least 2-3 specific column names from the schema
+- MUST describe at least one concrete analytical operation (aggregation, join, comparison, statistical function)
+- MUST name at least one derived metric or KPI
+- MUST connect the metric back to the specific business outcome promised by the use case
+- Length: 150-400 characters. Be specific and dense, not verbose.
+- Do NOT start with "NO HALLUCINATION" — that check goes in `hallucination_check` field only
 
 ---
 
@@ -2628,7 +3115,7 @@ Return a JSON array with the quality score for EACH use case.
     "use_case_name": "Predict Customer Churn",
     "quality_score": 4.2,
     "quality_label": "Very High",
-    "quality_summary": "Brief summary - all columns verified to exist. Strong causal signals present.",
+    "quality_summary": "Churn signal derived from `last_login_date` and `transaction_date` — computing days-since-last-activity per customer yields engagement_decay metric. Joining with `subscription.plan_type` and `billing.monthly_amount` enables revenue-at-risk quantification per churn tier. Aggregating by `customer_segment` produces segment-level churn KPIs that directly power prioritized retention targeting on highest-value accounts.",
     "hallucination_check": "NO HALLUCINATION: All columns verified to exist in schema",
     "strengths": "Strong historical data, direct causal indicators present",
     "weaknesses": "Minor granularity limitations",
@@ -2638,7 +3125,11 @@ Return a JSON array with the quality score for EACH use case.
     "d4_dimensions": 4.0,
     "d5_logical": 4.5,
     "d6_metric": 4.0,
-    "d7_design_match": 3.5
+    "d7_design_match": 3.5,
+    "d8_semantic_uniqueness": 5.0,
+    "d9_analytical_depth": 4.5,
+    "d10_activation_quality": 4.0,
+    "d11_domain_balance": 4.5
   }}
 ]
 ```
@@ -2700,9 +3191,10 @@ Return a JSON array with the quality score for EACH use case.
 3. Verify EACH column exists in the schema (exact name match)
 4. If ANY column is missing → Use case has HALLUCINATION → Low Score
 
-**IN YOUR QUALITY SUMMARY, YOU MUST STATE:**
+**IN YOUR hallucination_check FIELD, YOU MUST STATE:**
 - "HALLUCINATION DETECTED: Column [X] referenced but does not exist in schema" OR
 - "NO HALLUCINATION: All columns verified to exist in schema"
+(Note: The `quality_summary` field is for data-to-value chain explanation, NOT hallucination status. Put hallucination status in `hallucination_check` only.)
 
 ---
 
@@ -2714,9 +3206,11 @@ For EACH use case:
 2. **IDENTIFY** all tables and columns referenced in "Tables Involved"
 3. **VERIFY** each table and column exists in the provided schema
 4. **ANALYZE** the technical design step by step
-5. **CHECK** each of the 7 Fatal Flaws
-6. **DECIDE**: APPROVE only if ALL checks pass, otherwise REJECT
-7. **DOCUMENT**: Provide detailed reasoning for your decision
+5. **CHECK** each of the 11 quality dimensions (D1-D11)
+6. **CHECK D8 specifically**: Strip the verb and "with..." activation suffix from the name. Compare the core phrase against ALL other use cases. Flag duplicates.
+7. **CHECK D9 specifically**: Could this analysis be done in <10 lines of basic SQL without AI? If yes, it's trivial.
+8. **DECIDE**: APPROVE only if ALL checks pass, otherwise REJECT
+9. **DOCUMENT**: Provide detailed reasoning for your decision
 
 ---
 
@@ -2725,6 +3219,199 @@ For EACH use case:
 Analyze each use case against the schema and return your validation results as JSON.
 
 🚨 REMEMBER: You are the LAST DEFENSE against invalid analytics. When in doubt, REJECT. 🚨
+"""
+
+# --- 1g-2. COMBINED VALUE + QUALITY SCORING PROMPT (SINGLE PASS) ---
+PROMPT_TEMPLATES["COMBINED_VALUE_QUALITY_SCORE_PROMPT"] = """# COMBINED VALUE & QUALITY SCORER
+
+## YOUR ROLE
+
+You are BOTH a **Chief Investment Officer** (scoring business value, ROI, strategic alignment) AND a **Chief Data Scientist** (scoring data quality, schema validity, hallucination detection). You will produce BOTH value scores AND quality scores for each use case in a SINGLE pass.
+
+---
+
+## CONTEXT & INPUTS
+
+**Business Context:** {business_context}
+**Industry:** {industry}
+**Strategic Goals:** {strategic_goals}
+**Business Priorities:** {business_priorities}
+**Strategic Initiative:** {strategic_initiative}
+**Value Chain:** {value_chain}
+**Revenue Model:** {revenue_model}
+
+---
+
+## AVAILABLE SCHEMA (THE ONLY DATA THAT EXISTS)
+
+{schema_details}
+
+---
+
+## USE CASES TO SCORE
+
+{use_cases_to_validate}
+
+---
+
+## PART A: VALUE SCORING
+
+For each use case, score these factors (1.0 - 5.0):
+
+**VALUE FACTORS:**
+1. **Return on Investment (ROI)** [Weight: 60% of Value]: Compare against Revenue Model. 4.8-5.0=Exponential (>10x), 4.0-4.7=High (5-10x), 3.0-3.9=Moderate (2-5x), 1.0-2.9=Low/Soft.
+2. **Strategic Alignment** [Weight: 25% of Value]: Check against Business Priorities and Strategic Goals. 4.8-5.0=Direct Hit, 3.5-4.7=Strong Link, 1.0-3.4=Weak/None.
+3. **Time to Value** [Weight: 7.5%]: 4.8-5.0=<4 weeks, 3.0-4.7=1-3 months, 1.0-2.9=>6 months.
+4. **Reusability** [Weight: 7.5%]: 4.8-5.0=Platform Asset, 3.0-4.7=Modular, 1.0-2.9=One-Off.
+
+**FEASIBILITY FACTORS** (average of all 8):
+5. Data Availability, 6. Data Accessibility, 7. Architecture Fitness, 8. Team Skills,
+9. Domain Knowledge, 10. People Allocation, 11. Budget Allocation, 12. Time to Production.
+
+**FORMULAS:**
+- Value = (ROI * 0.60) + (Strategic Alignment * 0.25) + (TTV * 0.075) + (Reusability * 0.075)
+- Feasibility = Average of factors 5-12
+- Priority = (Value * 1.5) + (Feasibility * 0.5)
+
+**VALUE SCORING RULES:**
+- NO CURVE / NO DISTRIBUTION: Score based on Absolute Merit.
+- ZERO-BASED SCORING: Start every score at 1.0, earn points by evidence.
+- IRRELEVANT CORRELATIONS = LOW SCORE (ROI <= 2.0, Alignment <= 2.0).
+- BOARDROOM TEST: Would a senior executive approve budget for this?
+
+---
+
+## PART B: QUALITY SCORING
+
+""" + QUALITY_GATE_SCORING_BLOCK + """
+
+**🚨 ANTI-LENIENCY SCORING (1.0-5.0) — DEFAULT IS 3.0, EARN EVERY POINT ABOVE IT 🚨:**
+5.0=EXCEPTIONAL (rare <5%), 4.5=EXCELLENT (<10%), 4.0=STRONG (must justify with evidence, ~15%), 3.5=ABOVE AVERAGE (minimum for "High"), 3.0=AVERAGE (default starting point), 2.5=BELOW AVERAGE, 2.0=WEAK (triggers veto), 1.0=FAILED.
+**DISTRIBUTION CHECK**: ~20% below 3.0, ~40% at 3.0-3.5, ~25% at 3.5-4.0, only ~15% at 4.0+. If you're scoring most use cases 4.0+, you are being lenient.
+
+**DIMENSION WEIGHTS (11 dimensions):**
+- D1 Causal Signal (15%), D2 Cause-Effect (15%), D3 Granularity (10%), D4 Dimensions (10%)
+- D5 Logical (5%), D6 Metric (5%), D7 Design Match (5%)
+- D8 Semantic Uniqueness (15%), D9 Analytical Depth (10%), D10 Activation Quality (5%), D11 Domain Balance (5%)
+
+**Quality Score CALCULATION:**
+Step 1: Compute weighted average = (D1*0.15) + (D2*0.15) + (D3*0.10) + (D4*0.10) + (D5*0.05) + (D6*0.05) + (D7*0.05) + (D8*0.15) + (D9*0.10) + (D10*0.05) + (D11*0.05)
+Step 2: Apply VETO RULES — if ANY veto condition is true, cap the final quality_score at 2.0 (Low) regardless of the weighted average:
+
+**🚨 HARD VETO — cap quality_score at 2.0 (Low) if ANY of these are true 🚨:**
+- **D1 ≤ 2.5** (Weak/no causal signal) → quality_score = min(weighted_avg, 2.0), quality_label = "Low"
+- **D2 ≤ 2.5** (Weak/no cause-effect validity) → quality_score = min(weighted_avg, 2.0), quality_label = "Low"
+- **D8 ≤ 2.5** (Semantic duplicate on ANY of the 5 detection layers) → quality_score = min(weighted_avg, 2.0), quality_label = "Low"
+- **D9 ≤ 2.5** (Trivial/weak analytical depth — fails STRIP TEST) → quality_score = min(weighted_avg, 2.0), quality_label = "Low"
+- **D10 ≤ 2.0** (Technical method/data source as activation, domain jargon in name, or generic filler — fails DELIVERABLE TEST) → quality_score = min(weighted_avg, 2.0), quality_label = "Low"
+- **COLUMN HALLUCINATION detected** → quality_score = min(weighted_avg, 2.0), quality_label = "Low"
+
+**SOFT VETO — cap quality_score at 3.0 (Medium) if ANY of these are true:**
+- **D9 = 2.5-3.0** (Not deep enough for Extreme Quality)
+- **D10 = 2.5-3.0** (Vague activation deliverable or technical jargon in name)
+- **D3 ≤ 2.5** (Insufficient data granularity)
+- **D7 ≤ 2.5** (Technical design mismatch)
+
+A use case CANNOT compensate for fatal flaws by scoring well on other dimensions. The veto system ensures that duplication, triviality, technical method activation, domain jargon in names, hallucination, or weak causal logic ALWAYS results in rejection under Extreme Quality mode.
+
+**Quality Labels:** 4.5-5.0=Ultra High, 4.0-4.49=Very High, 3.5-3.99=High, 2.5-3.49=Medium, 2.0-2.49=Low, 1.5-1.99=Very Low, 1.0-1.49=Ultra Low.
+
+**COLUMN HALLUCINATION DETECTION (MANDATORY):**
+- VERIFY every column referenced in the Technical Design exists in the schema.
+- AUTOMATIC LOW quality score (<=2.0) if ANY column is hallucinated.
+- State "HALLUCINATION DETECTED: Column [X] missing" or "NO HALLUCINATION: All columns verified."
+
+**🔥 QUALITY REASONS (quality_summary field) — DATA-TO-VALUE CHAIN EXPLANATION 🔥**
+
+The `quality_summary` field is NOT a hallucination check report. It MUST be a detailed, step-by-step explanation of HOW the available data columns will deliver the promised business value. The reader should finish reading this field and think: "Yes, this data is clearly sufficient to produce that outcome."
+
+**MANDATORY STRUCTURE for quality_summary (follow this pattern):**
+1. **Identify the signal columns**: Name the specific columns that carry the analytical signal (e.g., "Column `order_date` and `ship_date` provide the temporal gap signal")
+2. **Describe the analytical operation**: Explain what aggregation, comparison, or transformation will be performed (e.g., "by computing DATEDIFF(ship_date, order_date) we get fulfillment latency per order")
+3. **Derive the metric/KPI**: Show what measurable metric emerges (e.g., "this produces an avg_fulfillment_days KPI per warehouse")
+4. **Connect to business value**: Explain how that metric delivers the promised use case outcome (e.g., "comparing this KPI across warehouses reveals bottleneck locations, directly enabling the promised 15% logistics cost reduction")
+
+**EXAMPLE of a GOOD quality_summary:**
+"Gap analysis signal detected via columns `order_date` and `ship_date` in orders table; computing DATEDIFF yields per-order fulfillment latency. Aggregating by `warehouse_id` with AVG and PERCENTILE produces warehouse-level fulfillment KPI. Joining with `warehouse_costs.operational_cost` enables cost-per-day-delayed calculation. Combining fulfillment KPI with cost data surfaces the top bottleneck warehouses driving excess logistics spend — directly delivering the promised supply chain cost optimization. Column `product_category` adds dimensional richness for category-level drill-down."
+
+**EXAMPLE of a BAD quality_summary (DO NOT produce this):**
+"NO HALLUCINATION: All columns verified. Strong causal signals. Unique business problem."
+↑ This tells the reader NOTHING about HOW the data delivers value. REJECTED.
+
+**RULES for quality_summary:**
+- MUST reference at least 2-3 specific column names from the schema
+- MUST describe at least one concrete analytical operation (aggregation, join, comparison, statistical function)
+- MUST name at least one derived metric or KPI
+- MUST connect the metric back to the specific business outcome promised by the use case
+- Length: 150-400 characters. Be specific and dense, not verbose.
+- Do NOT start with "NO HALLUCINATION" — that check goes in `hallucination_check` field only
+
+---
+
+## OUTPUT FORMAT
+
+Return a **JSON array** with one object per use case. Each object MUST contain ALL these fields:
+
+```json
+[
+  {{
+    "use_case_id": "N01-AI01",
+    "use_case_name": "Predict Customer Churn",
+
+    "strategic_alignment": 4.5,
+    "roi": 4.8,
+    "reusability": 4.0,
+    "time_to_value": 3.5,
+    "data_availability": 4.0,
+    "data_accessibility": 4.0,
+    "architecture_fitness": 4.5,
+    "team_skills": 4.0,
+    "domain_knowledge": 4.0,
+    "people_allocation": 4.5,
+    "budget_allocation": 4.0,
+    "time_to_production": 3.5,
+    "value_score": 4.58,
+    "feasibility_score": 4.06,
+    "priority_score": 8.90,
+    "business_priority_alignment": "Protect Revenue, Reduce Cost",
+    "strategic_goals_alignment": "Improve customer retention",
+    "justification": "Directly prevents churn in top-tier accounts, protecting recurring revenue.",
+
+    "quality_score": 4.2,
+    "quality_label": "Very High",
+    "quality_summary": "Churn signal derived from `last_login_date` and `transaction_date` columns — computing days-since-last-activity per customer yields an engagement_decay metric. Joining with `subscription.plan_type` and `billing.monthly_amount` enables revenue-at-risk quantification per churn-probability tier. Aggregating by `customer_segment` produces segment-level churn-risk KPIs. Combining engagement_decay with revenue-at-risk directly powers the promised churn prediction, prioritizing retention efforts on highest-value accounts.",
+    "hallucination_check": "NO HALLUCINATION: All columns verified to exist in schema",
+    "strengths": "Rich historical data, direct causal indicators present.",
+    "weaknesses": "Minor granularity limitations in time-series data.",
+    "d1_causal_signal": 4.5,
+    "d2_cause_effect": 4.0,
+    "d3_granularity": 4.5,
+    "d4_dimensions": 4.0,
+    "d5_logical": 4.5,
+    "d6_metric": 4.0,
+    "d7_design_match": 3.5,
+    "d8_semantic_uniqueness": 5.0,
+    "d9_analytical_depth": 4.5,
+    "d10_activation_quality": 4.0,
+    "d11_domain_balance": 4.5
+  }}
+]
+```
+
+---
+
+## CRITICAL RULES
+
+1. **SCORE EVERY SINGLE USE CASE** - output one JSON object per input use case. Missing = CRITICAL FAILURE.
+2. **OBJECTIVE QUALITY SCORING**: Score quality based on DATA REALITY, not appeal. If a column is not in the schema, it DOES NOT EXIST.
+3. **NO ASSUMPTIONS**: Do not assume data exists that is not in the schema.
+4. **VALUE-FIRST PRIORITY**: The Priority formula mathematically forces high-value cases to outrank high-feasibility-only cases.
+5. **JUSTIFICATION must be SPECIFIC to the use case** - no generic buzzwords.
+6. **JSON FORMATTING**: Double quotes only, no trailing commas, no line breaks inside strings.
+7. **HONEST D8-D11 SCORING**: Do NOT inflate D8-D11 scores. If you see semantic duplicates, trivial analyses, technical method suffixes, or domain jargon in names, score them LOW (1.0-2.0). These dimensions exist specifically because previous scoring inflated quality scores on use cases that should have been rejected. D10 specifically checks that the "with" suffix is a business DELIVERABLE (recommendation, action plan, queue, strategy) — NOT a technical method, data source, or analytical technique.
+8. **DUPLICATE DETECTION IS MANDATORY**: For D8, you MUST compare each use case against ALL others in the batch. Strip verb and "with..." activation suffix. If the core matches another use case, D8 ≤ 2.0.
+
+Begin your JSON response now:
 """
 
 # --- 1h. SQL Generation Prompt (ENHANCED - DATABRICKS SQL EXPERT) ---
@@ -2777,7 +3464,7 @@ PROMPT_TEMPLATES["USE_CASE_SQL_GEN_PROMPT"] = """You are a **Principal Databrick
 - **Revenue Model**: {enriched_revenue_model}
 - **Result Table Name**: {result_table}
 - This analysis is being generated FOR {business_name}
-- When generating external_api CTEs, get information ABOUT the entities in your data (customers, suppliers, locations), NOT about {business_name} itself
+- When generating simulated_external_data CTEs, get information ABOUT the entities in your data (customers, suppliers, locations), NOT about {business_name} itself
 - **MANDATORY**: Use `{result_table}` as the table name in your `CREATE OR REPLACE TABLE` statement and in the post-creation SELECT query
 - Example: If {business_name} is "Databricks" and you're analyzing Databricks' customers, get competitor info for THOSE CUSTOMERS, not for Databricks
 
@@ -2798,7 +3485,7 @@ ai_query('{sql_model_serving}',
 -- ✅ CORRECT - Persona enriched with ALL business context (NONE can be empty):
 ai_query('{sql_model_serving}',
   format_string(
-    '''# Persona
+    '# Persona
     You are a Chief Revenue Officer working for {business_name}, which is {enriched_business_context}. The organization''s strategic goals include: {enriched_strategic_goals}. Business priorities are: {enriched_business_priorities}. You have 20 years of experience in enterprise software sales strategy, revenue forecasting, and go-to-market planning. Your expertise in [relevant expertise] aligns with the strategic initiative: [relevant initiative from goals].
 
     # Task
@@ -2820,13 +3507,13 @@ ai_query('{sql_model_serving}',
     # Constraints
     1. ZERO HALLUCINATION POLICY: You must strictly rely on the provided input data. If specific information is missing, ambiguous, or if you cannot determine an answer based ONLY on the provided context, you MUST explicitly state "I do not know" or flag it in ai_sys_missing_data. Never invent metrics, entity names, events, or analytical conclusions.
     2. Output ONLY a JSON object with NO markdown fences, NO extra text, NO preamble or postscript. JUST the raw JSON.
-    3. NARRATIVE RULE: For ALL ai_txt_ fields, ALWAYS start by identifying the specific entity with its key attributes before providing analysis.
+    3. NARRATIVE RULE: For ALL ai_txt_ fields, ALWAYS start by identifying the specific entity with key attributes before providing analysis. ⛔ NEVER use %s in the example — use bracket placeholders: "[Name] (Category: [Category], Region: [Region]) exhibits..." NOT "Entity %s (Category: %s) exhibits...". Any %s in NARRATIVE FIELDS instruction text or example text is a format_string bug that causes `Format specifier '%s'` error (see Anti-Pattern #10).
 
     # Remarks
     You MUST be AGGRESSIVE in using data evidence. Every claim MUST be backed by specific numbers from the input data. PUT THE DATA TO WORK: Quantify every insight using the specific numbers provided. Do NOT make generic statements like "too high" — instead write "X is higher than Y by Z%%".
     CRITICAL: ai_sys_importance and ai_sys_urgency are INDEPENDENT dimensions — do NOT automatically set them to the same value. Evaluate each on its own merits.
     BE 100%%%% HONEST — your feedback and confidence score will be evaluated by a more intelligent AI system, so complete honesty is mandatory.
-    Output ONLY the JSON object, nothing else.'''))
+    Output ONLY the JSON object, nothing else.'))
 ```
 
 **🚨 PERSONA CONTEXT VALIDATION (ALL fields MUST have non-empty values):**
@@ -2857,7 +3544,7 @@ ai_query('{sql_model_serving}',
 **[STANDARD_CONSTRAINTS]** — MANDATORY in every # Constraints section (copy verbatim into generated SQL):
     1. ZERO HALLUCINATION POLICY: You must strictly rely on the provided input data. If specific information is missing, ambiguous, or if you cannot determine an answer based ONLY on the provided context, you MUST explicitly state "I do not know" or flag it in ai_sys_missing_data. Never invent metrics, entity names, events, or analytical conclusions.
     2. Output ONLY a JSON object with NO markdown fences, NO extra text, NO preamble or postscript. JUST the raw JSON.
-    3. NARRATIVE RULE: For ALL ai_txt_ fields, ALWAYS start by identifying the specific entity with its key attributes before providing analysis.
+    3. NARRATIVE RULE: For ALL ai_txt_ fields, ALWAYS start by identifying the specific entity with key attributes before providing analysis. ⛔ NEVER use %s in the example — use bracket placeholders: "[Name] (Category: [Category], Region: [Region]) exhibits..." NOT "Entity %s (Category: %s) exhibits...". Any %s in NARRATIVE FIELDS instruction text or example text is a format_string bug that causes `Format specifier '%s'` error (see Anti-Pattern #10).
 
 **[STANDARD_REMARKS]** — MANDATORY in every # Remarks section (copy verbatim into generated SQL):
     You MUST be AGGRESSIVE in using data evidence. Every claim MUST be backed by specific numbers from the input data. PUT THE DATA TO WORK: Quantify every insight using the specific numbers provided. Do NOT make generic statements like "too high" — instead write "X is higher than Y by Z%%".
@@ -2865,6 +3552,8 @@ ai_query('{sql_model_serving}',
     BE 100%%%% HONEST — your feedback and confidence score will be evaluated by a more intelligent AI system, so complete honesty is mandatory.
     Output ONLY the JSON object, nothing else.
 **⛔ STANDARD_REMARKS %s BAN**: When embedding [STANDARD_REMARKS] inside a format_string template, the example pattern "X is higher than Y by Z%%" uses LITERAL X, Y, Z — NOT %s. NEVER replace X/Y/Z with %s in the Remarks section. If you want to show the AI how to use actual column values in its output, reference the column NAMES in bracket notation: "[overdue_rate] is higher than [portfolio_avg] by [diff]%%". See Anti-Pattern #10.
+
+**⛔ NARRATIVE FIELDS EXAMPLE %s BAN**: When writing the NARRATIVE FIELDS instruction inside a format_string template (the text that tells the AI model how to format its ai_txt_ output), NEVER use %s in the example pattern. Use bracket placeholders instead. Example: `For ALL narrative fields, START by identifying the entity. Example: "[Name] ([Category], [Region], [Risk Tier]) exhibits..." NOT "The entity exhibits..."` — NOT `"Entity %s (Category: %s, Region: %s, Risk Tier: %s) exhibits..."`. Every `%s` inside instruction/example text is consumed as a format_string placeholder and causes `Format specifier '%s'` error when no matching argument exists. See Anti-Pattern #10.
 
 **🚨🚨🚨 MANDATORY: ai_sys_prompt COLUMN - CAPTURE THE EXACT PROMPT 🚨🚨🚨**
 
@@ -2878,7 +3567,7 @@ prompt_generation AS (
   SELECT 
     *,
     format_string(
-      '''# Persona
+      '# Persona
       You are a [ROLE] working for {business_name}, which is {enriched_business_context}. The organization''s strategic goals include: {enriched_strategic_goals}. Business priorities are: {enriched_business_priorities}. You have [X] years of experience in [domain]. Your expertise in [specific expertise] aligns with the strategic initiative: [initiative].
 
       # Task
@@ -2900,13 +3589,13 @@ prompt_generation AS (
       # Constraints
       1. ZERO HALLUCINATION POLICY: You must strictly rely on the provided input data. If specific information is missing, ambiguous, or if you cannot determine an answer based ONLY on the provided context, you MUST explicitly state "I do not know" or flag it in ai_sys_missing_data. Never invent metrics, entity names, events, or analytical conclusions.
       2. Output ONLY a JSON object with NO markdown fences, NO extra text, NO preamble or postscript. JUST the raw JSON.
-      3. NARRATIVE RULE: For ALL ai_txt_ fields, ALWAYS start by identifying the specific entity with its key attributes before providing analysis.
+      3. NARRATIVE RULE: For ALL ai_txt_ fields, ALWAYS start by identifying the specific entity with key attributes before providing analysis. ⛔ NEVER use %s in the example — use bracket placeholders: "[Name] (Category: [Category], Region: [Region]) exhibits..." NOT "Entity %s (Category: %s) exhibits...". Any %s in NARRATIVE FIELDS instruction text or example text is a format_string bug that causes `Format specifier '%s'` error (see Anti-Pattern #10).
 
       # Remarks
       You MUST be AGGRESSIVE in using data evidence. Every claim MUST be backed by specific numbers from the input data. PUT THE DATA TO WORK: Quantify every insight using the specific numbers provided. Do NOT make generic statements like "too high" — instead write "X is higher than Y by Z%%".
       CRITICAL: ai_sys_importance and ai_sys_urgency are INDEPENDENT dimensions — do NOT automatically set them to the same value. Evaluate each on its own merits.
       BE 100%%%% HONEST — your feedback and confidence score will be evaluated by a more intelligent AI system, so complete honesty is mandatory.
-      Output ONLY the JSON object, nothing else.''') AS ai_sys_prompt  -- MUST be named ai_sys_prompt
+      Output ONLY the JSON object, nothing else.') AS ai_sys_prompt  -- MUST be named ai_sys_prompt
   FROM previous_cte
 ),
 -- Step N+1: Call ai_query using the prompt column
@@ -2972,7 +3661,7 @@ You MUST implement EVERY step described in the Technical Design. Do NOT skip AI 
 {use_case_columns}
 - If blank, derive columns only from the provided schema context.
 - Every column you use must appear here and must belong to the tables above.
-- Exception: columns derived in `external_api_for_<scenario>` via ai_query are allowed and must be explicitly passed forward.
+- Exception: columns derived in `simulated_external_data_for_<scenario>` via ai_query are allowed and must be explicitly passed forward.
 
 **YOUR TASK**: Analyze the Technical Design above and the use case information to implement the COMPLETE SQL pipeline with:
 1. **AI Functions** - Choose the best Databricks AI functions for the task
@@ -3003,13 +3692,14 @@ Refer to the **AVAILABLE STATISTICAL FUNCTIONS** section below for the complete 
 **📝 DOCUMENTATION REQUIREMENTS:**
 1.  **First CTE Filtering Guidance**: In the first CTE's WHERE clause, you MUST add a commented-out TODO line suggesting how to filter the data slice (e.g., `-- AND status = 'Active'`).
 2.  **Statistical CTE Documentation**: If you use complex statistical functions (REGR_SLOPE, CORR, etc.) or AI functions, you MUST add a comment block before the CTE explaining what the statistics represent and how they are calculated.
+3.  **SET ansi_mode = false**: If your SQL uses CORR, REGR_SLOPE, REGR_R2, REGR_INTERCEPT, or COVAR_SAMP, you MUST prepend `SET ansi_mode = false;` BEFORE the `CREATE DATABASE` statement (see Anti-Pattern #24). These functions divide by zero when all values in the window are identical. **NEVER add `SET ansi_mode = true` anywhere — especially NOT after the final SELECT. The session resets naturally.**
 
 **🌐🌐🌐 REQUIRED FOR ACCURACY: EXTERNAL PUBLIC DATA ENRICHMENT CTE 🌐🌐🌐**
 
-**The `external_api_for_<scenario>` CTE is REQUIRED for generating accurate ai_txt_business_outcome calculations. This CTE provides market rates, benchmarks, and external factors that transform internal data into actionable business intelligence with measurable ROI.**
+**The `simulated_external_data_for_<scenario>` CTE is REQUIRED for generating accurate ai_txt_business_outcome calculations. This CTE provides market rates, benchmarks, and external factors that transform internal data into actionable business intelligence with measurable ROI.**
 
-**⚠️ WITHOUT external_api: Your analysis will lack market context, making ai_txt_business_outcome calculations less accurate and less credible.**
-**✅ WITH external_api: Your analysis includes verified market rates (fuel prices, labor costs, industry benchmarks) enabling precise ROI calculations.**
+**⚠️ WITHOUT simulated_external_data: Your analysis will lack market context, making ai_txt_business_outcome calculations less accurate and less credible.**
+**✅ WITH simulated_external_data: Your analysis includes verified market rates (commodity prices, labor costs, industry benchmarks) enabling precise ROI calculations.**
 
 **🚨 EXTERNAL DATA ENRICHMENT — RELEVANCY GATE (MANDATORY) 🚨**
 
@@ -3049,18 +3739,30 @@ ai_query(
 ) AS result
 ```
 
+⛔⛔⛔ ai_query BANNED PARAMETERS — WILL CAUSE UNRECOGNIZED_PARAMETER_NAME ERROR ⛔⛔⛔
+ai_query ONLY has 2 optional named parameters: modelParameters and responseFormat.
+The following are NOT ai_query parameters and MUST NEVER be used:
+  ❌ systemPrompt => '...'       — embed in format_string text (# Persona section)
+  ❌ system_prompt => '...'      — embed in format_string text (# Persona section)
+  ❌ temperature => 0.4          — use modelParameters => named_struct('temperature', 0.4)
+  ❌ max_tokens => 1000          — use modelParameters => named_struct('max_tokens', 1000)
+  ❌ top_p => 0.9                — use modelParameters => named_struct('top_p', 0.9)
+  ❌ responseFormat => 'JSON'    — instruct JSON output in prompt text, NOT via responseFormat
+  ❌ stop => '...'               — NOT supported as ai_query parameter
+See Anti-Pattern #21 for full examples.
+
 **PERSONA TEMPLATE:**
 ```sql
 -- Step X: Fetch external public data for contextual enrichment
 -- NOTE: For production, connect to verified data sources (weather APIs, market data feeds, etc.). 
 -- LLM estimates are suitable for prototyping but require verification before business decisions.
-external_api_for_<scenario> AS (
+simulated_external_data_for_<scenario> AS (
   SELECT 
     *,  -- Keep all columns from previous CTE
     ai_query(
       '{sql_model_serving}',  -- User-configured model endpoint
       format_string(
-        '''# Persona
+        '# Persona
         You are a [SPECIALIST_ROLE] at [AUTHORITATIVE_ORGANIZATION] with [X] years of expertise in [DOMAIN], providing authoritative intelligence for {business_name}, which is {enriched_business_context}.
 
         # Task
@@ -3086,7 +3788,7 @@ external_api_for_<scenario> AS (
         [STANDARD_CONSTRAINTS — see above]
 
         # Remarks
-        [STANDARD_REMARKS — see above]'''),
+        [STANDARD_REMARKS — see above]'),
       modelParameters => named_struct('temperature', 0.3)  -- Low temperature for factual data
     ) AS external_data_json
   FROM base_data  -- ✅ MANDATORY: Must reference previous CTE!
@@ -3101,13 +3803,13 @@ external_api_for_<scenario> AS (
 
 ```sql
 -- CORRECT: Get info about the CUSTOMER being analyzed, using data from the query
-external_api_for_customer_market_intelligence AS (
+simulated_external_data_for_customer_market_intelligence AS (
   SELECT 
     c.*,  -- ✅ SELECT * carries ALL upstream columns
     ai_query(
       '{sql_model_serving}',  -- User-configured model endpoint
       format_string(
-        '''# Persona
+        '# Persona
         You are a Senior Market Intelligence Analyst at Gartner with 15 years of expertise in competitive analysis. Your analysis is being conducted to support strategic decision-making for {business_name}, which is {enriched_business_context}.
 
         # Task
@@ -3132,7 +3834,7 @@ external_api_for_customer_market_intelligence AS (
         [STANDARD_CONSTRAINTS — see above]
 
         # Remarks
-        [STANDARD_REMARKS — see above]''', CONCAT(LEFT(c.customer_name, 2), '****'), c.industry),
+        [STANDARD_REMARKS — see above]', CONCAT(LEFT(c.customer_name, 2), '****'), c.industry),
       modelParameters => named_struct('temperature', 0.3)  -- Balanced for market analysis
     ) AS customer_intel_json
   FROM customer_base AS c  -- Use data from your query!
@@ -3153,7 +3855,7 @@ All output fields MUST include `<field>_confidence` (0.0-1.0), `as_of_date`, `so
 
 **🌟 BEST PRACTICES FOR EXTERNAL DATA ENRICHMENT 🌟**
 
-When including an `external_api_for_<scenario>` CTE, follow these practices:
+When including a `simulated_external_data_for_<scenario>` CTE, follow these practices:
 
 1. **Use PERSONA-BASED prompts** with specific role, organization, and expertise (e.g., "You are a Principal Meteorologist at NOAA...")
 2. **Include CONFIDENCE SCORES** for every field: `<field>_confidence` (0.0-1.0) - this helps users understand data reliability
@@ -3167,14 +3869,14 @@ When including an `external_api_for_<scenario>` CTE, follow these practices:
 10. **🚨 USE SELECT * IN ALL INTERMEDIATE CTEs 🚨**: ALL intermediate CTEs (between first CTE and final_output) MUST use `SELECT *` or `SELECT alias.*` to carry ALL upstream columns forward. When parsing JSON, use `SELECT *, get_json_object(...) AS parsed_field`. When joining, use `SELECT left.*, COALESCE(right.col, default) AS col`. Explicit column lists in intermediate CTEs are BANNED (see Anti-Pattern #20).
 11. **VERIFY COLUMN CHAIN**: Before finalizing SQL, trace every column referenced in format_string arguments back through the CTE chain to ensure it exists in every CTE it passes through. Using `SELECT *` in intermediate CTEs prevents this class of bug entirely.
 
-**🚨🚨🚨 CRITICAL: USE ACTUAL DATA CONTEXT IN EXTERNAL_API CTEs 🚨🚨🚨**
+**🚨🚨🚨 CRITICAL: USE ACTUAL DATA CONTEXT IN SIMULATED_EXTERNAL_DATA CTEs 🚨🚨🚨**
 
-**The external_api CTE MUST use actual data values from your query (customer_name, company_name, location, dates, etc.) to fetch RELEVANT external information!**
+**The simulated_external_data CTE MUST use actual data values from your query (customer_name, company_name, location, dates, etc.) to fetch RELEVANT external information!**
 
 **❌ WRONG - Generic context without using actual data:**
 ```sql
 -- ❌ WRONG: No entity-specific context + explicit SELECT (BANNED!) instead of SELECT *
-external_api_for_competitor_intelligence AS (
+simulated_external_data_for_competitor_intelligence AS (
   SELECT 
     customer_id,  -- ❌❌❌ BANNED! Must use SELECT * or alias.* here!
     ai_query('{sql_model_serving}',
@@ -3199,12 +3901,12 @@ WITH customer_base AS (
   LIMIT 10  -- ✅ LIMIT 10 at the END of first CTE only
 ),
 -- Then, use that entity's data to fetch RELEVANT external info
-external_api_for_customer_intelligence AS (
+simulated_external_data_for_customer_intelligence AS (
   SELECT 
     b.*,  -- ✅ SELECT * carries ALL upstream columns
     ai_query('{sql_model_serving}',
       format_string(
-        '''# Persona
+        '# Persona
         You are a Senior Market Intelligence Analyst at Gartner with 15 years of expertise in competitive analysis. Your analysis is being conducted to support strategic decision-making for {business_name}, which is {enriched_business_context}.
 
         # Task
@@ -3229,7 +3931,7 @@ external_api_for_customer_intelligence AS (
         [STANDARD_CONSTRAINTS — see above]
 
         # Remarks
-        [STANDARD_REMARKS — see above]''', CONCAT(LEFT(b.customer_name, 2), '****'), b.industry)
+        [STANDARD_REMARKS — see above]', CONCAT(LEFT(b.customer_name, 2), '****'), b.industry)
     ) AS company_intel_json
   FROM customer_base AS b
 )
@@ -3238,10 +3940,10 @@ external_api_for_customer_intelligence AS (
 **🚨 CRITICAL RULE: CONTEXT AWARENESS 🚨**
 - **DO NOT** generate insights about the company you are working for (e.g., if analyzing Databricks customers, don't generate Databricks competitor insights)
 - **DO** generate insights about the ENTITIES IN YOUR DATA (customers, suppliers, partners, locations)
-- **ALWAYS** pass entity identifiers (customer_name, company_name, location, etc.) from your base CTE into the external_api prompt
+- **ALWAYS** pass entity identifiers (customer_name, company_name, location, etc.) from your base CTE into the simulated_external_data prompt
 - **ASK**: "What would I want to know about THIS SPECIFIC customer/entity to make better recommendations?"
 
-**KEY RULE**: Always pass entity identifiers (customer_name, company_name, location, etc.) from your base CTE into the external_api prompt. Ask: "What would I want to know about THIS SPECIFIC entity to make better recommendations?"
+**KEY RULE**: Always pass entity identifiers (customer_name, company_name, location, etc.) from your base CTE into the simulated_external_data prompt. Ask: "What would I want to know about THIS SPECIFIC entity to make better recommendations?"
 
 **EXAMPLE: INTEGRATING EXTERNAL DATA INTO ANALYSIS (CONTEXT-AWARE):**
 ```sql
@@ -3262,12 +3964,12 @@ WITH customer_metrics AS (
 
 -- Step 2: Fetch external context FOR EACH CUSTOMER (using their data!)
 -- NOTE: For production, connect to verified data sources. LLM estimates are for prototyping.
-external_api_for_customer_intelligence AS (
+simulated_external_data_for_customer_intelligence AS (
   SELECT 
     cm.*,  -- ✅ SELECT * carries ALL upstream columns
     ai_query('{sql_model_serving}',
       format_string(
-        '''# Persona
+        '# Persona
         You are a Business Intelligence Analyst at D&B with 15 years expertise in company research and market analysis. Your analysis is being conducted to support strategic decision-making for {business_name}, which is {enriched_business_context}.
 
         # Task
@@ -3291,13 +3993,13 @@ external_api_for_customer_intelligence AS (
         [STANDARD_CONSTRAINTS — see above]
 
         # Remarks
-        [STANDARD_REMARKS — see above]''', CONCAT(LEFT(cm.customer_name, 2), '****'), cm.industry)
+        [STANDARD_REMARKS — see above]', CONCAT(LEFT(cm.customer_name, 2), '****'), cm.industry)
     ) AS customer_intel_json
   FROM customer_metrics AS cm  -- ✅ Uses actual customer data from the query!
 ),
 
 -- Step 3: Parse external data
--- 🚨🚨🚨 CRITICAL: Parse EVERY field from the JSON that was requested in the external_api prompt! 🚨🚨🚨
+-- 🚨🚨🚨 CRITICAL: Parse EVERY field from the JSON that was requested in the simulated_external_data prompt! 🚨🚨🚨
 -- If the JSON format specifies N fields, you MUST extract ALL N fields here. Do NOT skip any!
 customer_intel_parsed AS (
   SELECT 
@@ -3312,7 +4014,7 @@ customer_intel_parsed AS (
     COALESCE(TRY_CAST(get_json_object(customer_intel_json, '$.priorities_confidence') AS DECIMAL(3,2)), 0.0) AS priorities_confidence,
     COALESCE(get_json_object(customer_intel_json, '$.market_position'), 'Unknown') AS market_position,
     COALESCE(TRY_CAST(get_json_object(customer_intel_json, '$.position_confidence') AS DECIMAL(3,2)), 0.0) AS position_confidence
-  FROM external_api_for_customer_intelligence
+  FROM simulated_external_data_for_customer_intelligence
 ),
 
 -- Step 4: Combine internal data with external context and generate ai_sys_prompt
@@ -3332,7 +4034,7 @@ analysis_prompts AS (
     COALESCE(p.market_position, 'Unknown') AS market_position,
     COALESCE(p.position_confidence, 0.0) AS position_confidence,
     format_string(
-      '''# Persona
+      '# Persona
       You are a Strategic Account Director working for {business_name}, which is {enriched_business_context}. The organization''s strategic goals include: {enriched_strategic_goals}. Business priorities are: {enriched_business_priorities}. With 18 years of experience in enterprise account strategy and customer success, your expertise in strategic account planning and competitive positioning aligns with the strategic initiative: Customer growth.
 
       # Task
@@ -3361,7 +4063,7 @@ analysis_prompts AS (
       [STANDARD_CONSTRAINTS — see above]
 
       # Remarks
-      [STANDARD_REMARKS — see above]''',
+      [STANDARD_REMARKS — see above]',
       CONCAT(LEFT(c.customer_name, 2), '****'), p.customer_market_cap, p.market_cap_confidence, p.customer_competitors, p.competitors_confidence, p.customer_priorities, p.priorities_confidence, p.market_position, p.position_confidence, c.total_revenue, c.region
     ) AS ai_sys_prompt
   FROM customer_metrics AS c
@@ -3405,7 +4107,7 @@ FROM analysis_with_insights;  -- ✅ NO LIMIT - data already sampled
 - "What would make the LLM's recommendations MORE ACCURATE and ACTIONABLE?"
 - "What would a 20-year industry veteran want to know before making a decision?"
 
-**If the answer to any of these questions points to external data, YOU MUST include an `external_api_for_<scenario>` CTE to ensure accurate ai_txt_business_outcome calculations!**
+**If the answer to any of these questions points to external data, YOU MUST include a `simulated_external_data_for_<scenario>` CTE to ensure accurate ai_txt_business_outcome calculations!**
 
 **🏢🏢🏢 REQUIRED FOR COMPREHENSIVE ANALYSIS: INTERNAL DATA ENRICHMENT CTE 🏢🏢🏢**
 
@@ -3432,7 +4134,7 @@ internal_data_for_<scenario> AS (
     ai_query(
       '{sql_model_serving}',  -- User-configured model endpoint
       format_string(
-        '''# Persona
+        '# Persona
         You are an Internal Knowledge Manager working for {business_name}, which is {enriched_business_context}. The organization is focused on strategic goals: {enriched_strategic_goals}.
 
         # Task
@@ -3457,7 +4159,7 @@ internal_data_for_<scenario> AS (
         [STANDARD_CONSTRAINTS — see above]
 
         # Remarks
-        [STANDARD_REMARKS — see above]'''),
+        [STANDARD_REMARKS — see above]'),
       modelParameters => named_struct('temperature', 0.3)
     ) AS internal_context_json
   FROM base_data  -- ✅ MANDATORY: Must reference previous CTE!
@@ -3475,10 +4177,10 @@ internal_data_for_<scenario> AS (
 **BEST PRACTICES:**
 - Use these when analysis would benefit from company policies, SLAs, playbooks, or historical institutional knowledge
 - Temperature: 0.3 (grounded in organizational reality)
-- Combine with external_api CTE for complete context (internal = company knowledge, external = market context)
+- Combine with simulated_external_data CTE for complete context (internal = company knowledge, external = market context)
 
 **DECISION GUIDE:**
-- Need market rates, benchmarks, external factors? -> `external_api_for_<scenario>` CTE
+- Need market rates, benchmarks, external factors? -> `simulated_external_data_for_<scenario>` CTE
 - Need company policies, SLAs, playbooks, history? -> `internal_data_for_<scenario>` CTE
 - Need both? -> Include BOTH CTEs for maximum context
 
@@ -3486,7 +4188,7 @@ internal_data_for_<scenario> AS (
 **🎯 AVAILABLE TABLES AND COLUMNS (USE ONLY THESE - NO OTHER TABLES OR COLUMNS EXIST):**
 {directly_involved_schema}
 
-**🚨 CRITICAL: The tables and columns listed above are the ONLY ones available. Do NOT use any other table or column names. If you need a column that is not listed above, you CANNOT generate the query - add a comment explaining what is missing (exception: columns generated inside `external_api_for_<scenario>` via ai_query).**
+**🚨 CRITICAL: The tables and columns listed above are the ONLY ones available. Do NOT use any other table or column names. If you need a column that is not listed above, you CANNOT generate the query - add a comment explaining what is missing (exception: columns generated inside `simulated_external_data_for_<scenario>` via ai_query).**
 
 **📋 TABLES INCLUDED IN THIS CONTEXT:**
 The tables listed above include:
@@ -3671,6 +4373,7 @@ AI_FORECAST(
   * ❌ WRONG: `MEDIAN(col1) OVER (RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)`
   * **FIX**: Remove the `ROWS BETWEEN` and `RANGE BETWEEN` clauses entirely for aggregate window functions - use simple `OVER ()` or `OVER (PARTITION BY col)`
 - **DECIMAL WINDOW AGGREGATES**: When using AVG/STDDEV/CORR/COVAR on DECIMAL columns in a window, CAST the inputs to DOUBLE (e.g., `AVG(CAST(dec_col AS DOUBLE)) OVER (...)`) to avoid internal decimal evaluation errors.
+- **DIVIDE_BY_ZERO IN CORR/REGR/COVAR_SAMP**: When SQL uses `CORR()`, `REGR_SLOPE()`, `REGR_R2()`, `REGR_INTERCEPT()`, or `COVAR_SAMP()`, you MUST prepend `SET ansi_mode = false;` BEFORE the `CREATE DATABASE` statement. These functions internally divide by stddev/variance which is 0 when all values are identical (common with LIMIT 10). `COALESCE` alone does NOT help — the error fires before COALESCE can catch NULL. **NEVER add `SET ansi_mode = true` after the final SELECT — the session resets naturally.** See Anti-Pattern #24.
 - **NO DISTINCT IN WINDOW FUNCTIONS**: `COUNT(DISTINCT col) OVER (...)` is NOT supported.
   * ❌ WRONG: `COUNT(DISTINCT user_id) OVER (PARTITION BY region)`
   * ✅ CORRECT: Aggregation in a CTE/Subquery first, then join back or window over the aggregated results.
@@ -3829,7 +4532,7 @@ WHERE workspaceId IS NOT NULL
 
 **CRITICAL COLUMNS** - Use IS NOT NULL and TRIM() checks:
 - Primary keys and foreign keys (customer_id, product_id, route_id, etc.)
-- Required business identifiers (order_number, transaction_id, flight_number, etc.)
+- Required business identifiers (order_number, transaction_id, invoice_number, etc.)
 - Essential dimensions for grouping (category, region, store_id, etc.)
 - Date/time columns used for time_col in AI_FORECAST
 - Columns used in group_col for AI_FORECAST
@@ -3860,28 +4563,28 @@ COALESCE(CAST(created_date AS STRING), 'Unknown') AS created_date_str  -- ✅ Fo
 ```sql
 WITH clean_data AS (
   SELECT 
-    route_id,                    -- CRITICAL: primary key
-    flight_number,               -- CRITICAL: required identifier
-    departure_airport_iata,      -- CRITICAL: required for business logic
-    arrival_airport_iata,        -- CRITICAL: required for business logic
-    flight_date,                 -- CRITICAL: time dimension
+    order_id,                    -- CRITICAL: primary key
+    customer_id,                 -- CRITICAL: required identifier
+    product_code,                -- CRITICAL: required for business logic
+    region_code,                 -- CRITICAL: required for business logic
+    order_date,                  -- CRITICAL: time dimension
     -- CRITICAL columns checked with IS NOT NULL
-    COALESCE(aircraft_type, 'Unknown Aircraft') AS aircraft_type,     -- OPTIONAL: can default
-    COALESCE(passenger_count, 0) AS passenger_count,                   -- OPTIONAL: keep as INT
-    COALESCE(delay_minutes, 0) AS delay_minutes,                       -- OPTIONAL: keep as INT
-    COALESCE(on_time_indicator, 'Unknown') AS on_time_indicator,       -- OPTIONAL: can default
-    COALESCE(weather_condition, 'CLEAR') AS weather_condition          -- OPTIONAL: can default
-  FROM `catalog`.`schema`.`flights` AS f
-  WHERE route_id IS NOT NULL                          -- CRITICAL
-    AND flight_number IS NOT NULL                      -- CRITICAL
-    AND TRIM(flight_number) <> ''                      -- CRITICAL: not empty string
-    AND departure_airport_iata IS NOT NULL             -- CRITICAL
-    AND TRIM(departure_airport_iata) <> ''             -- CRITICAL
-    AND arrival_airport_iata IS NOT NULL               -- CRITICAL
-    AND TRIM(arrival_airport_iata) <> ''               -- CRITICAL
-    AND flight_date IS NOT NULL                        -- CRITICAL
+    COALESCE(category_name, 'Unknown Category') AS category_name,     -- OPTIONAL: can default
+    COALESCE(quantity, 0) AS quantity,                                  -- OPTIONAL: keep as INT
+    COALESCE(discount_pct, 0) AS discount_pct,                         -- OPTIONAL: keep as INT
+    COALESCE(fulfillment_status, 'Unknown') AS fulfillment_status,     -- OPTIONAL: can default
+    COALESCE(channel, 'DIRECT') AS channel                             -- OPTIONAL: can default
+  FROM `catalog`.`schema`.`orders` AS o
+  WHERE order_id IS NOT NULL                            -- CRITICAL
+    AND customer_id IS NOT NULL                          -- CRITICAL
+    AND TRIM(customer_id) <> ''                          -- CRITICAL: not empty string
+    AND product_code IS NOT NULL                         -- CRITICAL
+    AND TRIM(product_code) <> ''                         -- CRITICAL
+    AND region_code IS NOT NULL                          -- CRITICAL
+    AND TRIM(region_code) <> ''                          -- CRITICAL
+    AND order_date IS NOT NULL                           -- CRITICAL
     -- TODO: Add suitable filtering to load data that matches the intended slice for this use case (keep commented until confirmed)
-    -- AND lower(trim(route_status)) = 'running'  -- Example placeholder; adjust column/value
+    -- AND lower(trim(order_status)) = 'completed'  -- Example placeholder; adjust column/value
   LIMIT 10  -- ✅ LIMIT 10 at the END of first CTE only
 )
 SELECT * FROM clean_data;  -- ✅ NO LIMIT in final SELECT
@@ -4048,8 +4751,10 @@ Rule: Inside a format_string template, `%s` is ALWAYS a format specifier that co
 - `# Remarks` section: example patterns like "overdue rate of X%% is Y percentage points above..."
 - `# Output` section: field descriptions and example formats
 - Narrative field instructions (ai_txt_*): descriptions like "compare to segment peers (segment with N customers)"
+- **🚨 NARRATIVE FIELDS example text**: the "Example:" pattern that shows how to start ai_txt_ fields — e.g., "Entity %s (Category: %s) exhibits..." is WRONG. Must use bracket placeholders: "[Name] ([Category]) exhibits..."
+- **🚨 # Constraints NARRATIVE RULE example**: if you expand the NARRATIVE RULE with an example, NEVER use %s in the example
 - Any example/template text showing the AI how to format its output
-**BLANKET BAN**: NEVER use bare `%s` in Remarks, Output descriptions, or Narrative field instructions inside format_string. Use `[placeholder_name]` or literal text (X, Y, Z) instead.
+**BLANKET BAN**: NEVER use bare `%s` in Remarks, Output descriptions, Narrative field instructions, or NARRATIVE FIELDS example patterns inside format_string. Use `[placeholder_name]` or literal text (X, Y, Z) instead.
 ```sql
 -- ❌❌❌ WRONG: %s in Remarks example text — consumed as format specifier ❌❌❌
 format_string('...
@@ -4062,6 +4767,12 @@ format_string('...
 - ai_txt_segment_insights: compare to peers (%s segment with %s customers)
 ...', col1, col2, ...) -- ❌ 2 extra %s in instructions!
 
+-- ❌❌❌ WRONG: %s in NARRATIVE FIELDS example text — THE #1 SNEAKIEST TRAP ❌❌❌
+format_string('...
+NARRATIVE FIELDS (ai_txt_ prefix, detailed free text with principal context):
+For ALL narrative fields, START by identifying the specific entity with key attributes. Example: "Entity %s (Category: %s, Region: %s, Risk Tier: %s) exhibits..."
+...', col1, col2, ...) -- ❌ 4 extra %s in example text = Format specifier error!
+
 -- ✅✅✅ CORRECT: Use [bracket placeholders] or literal X/Y/Z in instruction text ✅✅✅
 format_string('...
 # Remarks
@@ -4071,6 +4782,12 @@ PUT THE DATA TO WORK: write "overdue rate of [rate]%%%% is [diff] points above p
 -- ✅✅✅ CORRECT: Narrative field descriptions use bracket placeholders ✅✅✅
 format_string('...
 - ai_txt_segment_insights: compare to peers ([channel] segment with [N] customers)
+...', col1, col2, ...)
+
+-- ✅✅✅ CORRECT: NARRATIVE FIELDS example uses bracket placeholders ✅✅✅
+format_string('...
+NARRATIVE FIELDS (ai_txt_ prefix, detailed free text with principal context):
+For ALL narrative fields, START by identifying the specific entity with key attributes. Example: "[Name] (Position: [Position], Base: [Base], Risk Tier: [Tier]) exhibits..."
 ...', col1, col2, ...)
 ```
 
@@ -4087,7 +4804,7 @@ Rule: Scalar subqueries need plain aggregates: `MAX(ds)` not `MAX(ds) OVER()`. O
 Rule: Parameters JSON must use single quotes: `parameters => '{{"global_floor": 0}}'`. Double quotes = identifier.
 
 **#15 — COLUMNS DROPPED IN MULTI-BRANCH CTE PIPELINE**
-Rule: ALL intermediate CTEs MUST use `SELECT *` to preserve columns. The join CTE must use `SELECT left_alias.*` from the WIDEST CTE. Narrow branches (simulation, external API) join IN via LEFT JOIN. Never use a narrow CTE as base.
+Rule: ALL intermediate CTEs MUST use `SELECT *` to preserve columns. The join CTE must use `SELECT left_alias.*` from the WIDEST CTE. Narrow branches (simulation, simulated_external_data) join IN via LEFT JOIN. Never use a narrow CTE as base.
 
 **#16 — INVALID % IN format_string (UnknownFormatConversionException / `Conversion = 'X'`)**
 Rule: Every literal `%` MUST be escaped as `%%`. Valid conversion characters after `%`: s, d, f, e, g, %. Anything else crashes with `UnknownFormatConversionException`.
@@ -4149,6 +4866,141 @@ step4_parsed AS (
 - **Adding ai_classify**: `SELECT *, ai_classify(text, ARRAY('A','B')) AS category FROM previous_cte`
 - **JOIN with enrichment**: `SELECT left_alias.*, COALESCE(right.col, default) AS col FROM left_cte AS left_alias LEFT JOIN right_cte AS right ON ...`
 
+**#21 — INVALID ai_query NAMED PARAMETERS (UNRECOGNIZED_PARAMETER_NAME)**
+Rule: ai_query ONLY accepts these named parameters: `modelParameters`, `responseFormat`. LLMs commonly hallucinate OpenAI-style parameters like `systemPrompt`, `system_prompt`, `temperature`, `max_tokens`, `top_p`, `stop` as direct ai_query named arguments. These DO NOT EXIST and will crash with `UNRECOGNIZED_PARAMETER_NAME`.
+```sql
+-- ❌❌❌ WRONG: systemPrompt is NOT a valid ai_query parameter ❌❌❌
+ai_query('endpoint', prompt, systemPrompt => 'You are an expert...', responseFormat => 'JSON')
+-- ❌ Error: UNRECOGNIZED_PARAMETER_NAME for systemPrompt
+-- ❌ Error: responseFormat => 'JSON' is also wrong (it expects a JSON schema, not the string 'JSON')
+
+-- ❌❌❌ WRONG: temperature as direct ai_query parameter ❌❌❌
+ai_query('endpoint', prompt, temperature => 0.4)
+-- ❌ Error: UNRECOGNIZED_PARAMETER_NAME for temperature
+
+-- ✅✅✅ CORRECT: Embed persona in format_string, use modelParameters for settings ✅✅✅
+prompt_generation AS (
+  SELECT *,
+    format_string(
+      '# Persona
+      You are a [SPECIALIST]...
+      # Task
+      Analyze [X] for [business purpose]...
+      # Output
+      Output ONLY a JSON object with keys: ...',
+      data_col1, data_col2
+    ) AS ai_sys_prompt
+  FROM previous_cte
+),
+ai_analysis AS (
+  SELECT *,
+    ai_query('{sql_model_serving}', ai_sys_prompt,
+      modelParameters => named_struct('temperature', 0.4)) AS insights_json
+  FROM prompt_generation
+)
+```
+**KEY RULES**:
+1. System prompt / persona → embed in format_string template text (# Persona section)
+2. Temperature → `modelParameters => named_struct('temperature', 0.4)`
+3. JSON output → instruct in prompt text ("Output ONLY a JSON object"), NOT via responseFormat
+4. Model endpoint → always use `'{sql_model_serving}'`, never hardcode model names
+
+**#22 — POSITIONAL STRING PARAMS IN ai_query (UNEXPECTED_INPUT_TYPE)**
+Rule: Named parameters in ai_query use `=>` arrow syntax, NOT positional string arguments. LLMs sometimes generate `'modelParameters', named_struct(...)` which passes the string `'modelParameters'` as the 3rd positional arg (returnType) and `named_struct(...)` as the 4th positional arg (failOnError). Databricks expects failOnError to be BOOLEAN, so it crashes with `UNEXPECTED_INPUT_TYPE`.
+```sql
+-- ❌❌❌ WRONG: Named params as positional strings ❌❌❌
+ai_query('endpoint', prompt, 'modelParameters', named_struct('temperature', 0.3))
+-- ❌ 'modelParameters' becomes returnType (arg 3), named_struct becomes failOnError (arg 4, expects BOOLEAN)
+-- ❌ Error: UNEXPECTED_INPUT_TYPE - Parameter 4th requires BOOLEAN but got STRUCT
+
+-- ❌❌❌ ALSO WRONG: responseFormat as positional string ❌❌❌
+ai_query('endpoint', prompt, 'responseFormat', '{{"type": "json_object"}}')
+-- ❌ 'responseFormat' becomes returnType (arg 3), JSON schema becomes failOnError (arg 4, expects BOOLEAN)
+
+-- ✅✅✅ CORRECT: Use => arrow syntax for named parameters ✅✅✅
+ai_query('endpoint', prompt, modelParameters => named_struct('temperature', 0.3))
+ai_query('endpoint', prompt, responseFormat => '{{"type": "json_schema", ...}}')
+ai_query('endpoint', prompt, modelParameters => named_struct('temperature', 0.4), failOnError => false)
+```
+
+**#23 — QUOTED DATETIME UNIT IN date_add / timestampadd (INVALID_PARAMETER_VALUE.DATETIME_UNIT)**
+Rule: Databricks SQL functions `date_add`, `date_sub`, `timestampadd`, `timestampdiff` require UNQUOTED datetime unit keywords. LLMs frequently quote the unit as a string literal, which crashes with `INVALID_PARAMETER_VALUE.DATETIME_UNIT`.
+Note: `date_trunc('month', ...)` and `date_part('month', ...)` DO take quoted strings — only the add/sub/diff family requires unquoted.
+```sql
+-- ❌❌❌ WRONG: Quoted datetime unit ❌❌❌
+date_add('MONTH', -36, CURRENT_DATE())      -- ❌ 'MONTH' is a string literal, not a keyword
+date_add('WEEK', -52, d)                     -- ❌ Same error
+timestampadd('HOUR', 5, ts)                  -- ❌ Same error
+
+-- ✅✅✅ CORRECT: Unquoted datetime unit keyword ✅✅✅
+date_add(MONTH, -36, CURRENT_DATE())         -- ✅ MONTH is an unquoted keyword
+date_add(WEEK, -52, d)                       -- ✅
+timestampadd(HOUR, 5, ts)                    -- ✅
+
+-- ✅ These functions CORRECTLY use quoted strings (leave them alone):
+DATE_TRUNC('month', date_col)                -- ✅ date_trunc takes quoted string
+DATE_PART('year', date_col)                  -- ✅ date_part takes quoted string
+```
+
+**#24 — DIVIDE_BY_ZERO IN CORR / REGR_SLOPE / REGR_R2 / COVAR_SAMP WINDOW FUNCTIONS**
+Rule: Aggregate window functions `CORR`, `REGR_SLOPE`, `REGR_R2`, `REGR_INTERCEPT`, `COVAR_SAMP` internally divide by standard deviation or variance. When ALL values in the window are identical (stddev = 0), this causes `DIVIDE_BY_ZERO`. This is VERY common with `LIMIT 10` because a small sample can easily have all-identical values.
+
+You CANNOT protect against this with `NULLIF` — the division is internal to the function.
+
+**FIX**: When SQL uses CORR, REGR_SLOPE, REGR_R2, REGR_INTERCEPT, or COVAR_SAMP, prepend `SET ansi_mode = false;` BEFORE the CREATE statement. This makes division-by-zero return NULL instead of throwing an error. The existing `COALESCE(..., 0.0)` wrapper then coerces NULL to a safe default. **NEVER add `SET ansi_mode = true` anywhere — especially NOT after the final SELECT. The SELECT from the result table MUST be the absolute LAST statement. The session resets naturally when the cell finishes.**
+
+```sql
+-- ❌❌❌ WRONG: No ansi_mode protection — crashes on identical values ❌❌❌
+CREATE OR REPLACE TABLE ... AS
+WITH data AS (SELECT ... LIMIT 10),
+stats AS (
+  SELECT *, COALESCE(ROUND(CORR(x, y) OVER (), 4), 0.0) AS corr_xy
+  FROM data
+)
+-- DIVIDE_BY_ZERO when all x or y values are the same!
+
+-- ✅✅✅ CORRECT: SET ansi_mode = false before CREATE ✅✅✅
+SET ansi_mode = false;
+
+CREATE DATABASE IF NOT EXISTS catalog._inspire;
+CREATE OR REPLACE TABLE ... AS
+WITH data AS (SELECT ... LIMIT 10),
+stats AS (
+  SELECT *, COALESCE(ROUND(CORR(x, y) OVER (), 4), 0.0) AS corr_xy
+  FROM data
+)
+-- CORR returns NULL when stddev = 0, COALESCE converts to 0.0 ✅
+
+-- NOTE: STDDEV_POP, VAR_POP, AVG, SUM etc. are SAFE — they don't divide by stddev.
+-- Only CORR, REGR_*, and COVAR_SAMP have internal division.
+-- COALESCE alone is NOT sufficient — the error fires BEFORE COALESCE can catch NULL.
+```
+
+**#25 — OVER-ESCAPED SINGLE QUOTES IN format_string (APOSTROPHE / POSSESSIVE CORRUPTION)**
+Rule: Inside a format_string template string, apostrophes (possessives like Moody's, Carrefour's, organization's, don't, it's) MUST be escaped as EXACTLY TWO single quotes (`''`). NEVER use FOUR quotes (`''''`) or any higher even count. The string delimiter is ONE single quote to open and ONE to close — NEVER use `'''`, `'''''`, or `''''''` as string boundaries.
+
+**ROOT CAUSE**: The LLM double-escapes by treating `''` as needing another layer of escaping to `''''`. This produces two literal apostrophes in the output text instead of one, or breaks SQL syntax entirely.
+
+```sql
+-- ❌❌❌ WRONG: '''' for apostrophe — produces TWO apostrophes ❌❌❌
+format_string('You are an analyst at Moody''''s Analytics...', args)
+-- Output text: "Moody''s Analytics" ← BROKEN (two apostrophes visible)
+
+-- ❌❌❌ WRONG: ''''' as string opener/closer — SYNTAX ERROR ❌❌❌
+format_string('''''# Persona\nYou are a Senior Credit Risk Analyst at Moody''''s...'''''', args)
+-- SQL PARSE ERROR: unmatched quotes, statement never terminates properly
+
+-- ✅✅✅ CORRECT: '' for apostrophe, normal ' for string delimiters ✅✅✅
+format_string('# Persona\nYou are a Senior Credit Risk Analyst at Moody''s Analytics with 18 years of expertise...', args)
+-- Output text: "Moody's Analytics" ← CORRECT (one apostrophe)
+```
+
+**QUICK RULE**: If you see 3+ consecutive single quotes ANYWHERE in your format_string, you have a bug. The ONLY valid patterns are:
+- `'` — opens or closes the string
+- `''` — escaped apostrophe (literal `'` in output)
+- `%%` — escaped percent sign
+NOTHING ELSE. Period.
+
 **🔥 CORRECT PATTERN - COMPREHENSIVE EXAMPLE 🔥:**
 
 ```sql
@@ -4201,7 +5053,7 @@ account_prompt_generation AS (
   SELECT 
     *,
     format_string(
-      '''# Persona
+      '# Persona
       You are an Account Strategy Director working for {business_name}, which is {enriched_business_context}. The organization''s strategic goals include: {enriched_strategic_goals}. Business priorities are: {enriched_business_priorities}. With 18 years of experience in enterprise account management, revenue optimization, and strategic planning, your expertise in account health analysis and growth strategy aligns with the strategic initiative: Customer success and retention.
 
       # Task
@@ -4233,7 +5085,7 @@ account_prompt_generation AS (
       [STANDARD_CONSTRAINTS — see above]
 
       # Remarks
-      [STANDARD_REMARKS — see above]''',
+      [STANDARD_REMARKS — see above]',
       CONCAT(LEFT(account_name, 2), '****'), account_id, vertical, account_tier, ROUND(arr, 2), ROUND(arr_percentile_rank * 100, 1), arr_decile, ROUND(t3m_annualized, 2), ROUND(customer_age_years, 1), strategic_account, fortune_500, avg_arr, median_arr, p75_arr, next_renewal_date
     ) AS ai_sys_prompt  -- ✅ Named ai_sys_prompt for auditability + PII masked
   FROM account_statistics
@@ -4548,7 +5400,7 @@ order_analysis_prompts AS (
   SELECT 
     *,
     format_string(
-      '''# Persona
+      '# Persona
       You are a Revenue Operations Director working for {business_name}, which is {enriched_business_context}. The organization''s strategic goals include: {enriched_strategic_goals}. Business priorities are: {enriched_business_priorities}. With 15 years of experience in order analysis, fraud detection, and revenue optimization, your expertise in transaction pattern analysis and anomaly detection aligns with the strategic initiative: Data-driven decision making.
 
       # Task
@@ -4658,6 +5510,42 @@ SELECT * FROM messy_cte;  -- ❌ This messy pattern is wrong - don't copy it!
   - Use %s placeholders for column values in the format string
   - Column names go as arguments after the format string (NO QUOTES)
   - format_string is NULL-safe; CONCAT returns NULL if any argument is NULL
+
+  **🚨🚨🚨 CRITICAL: APOSTROPHE / POSSESSIVE ESCAPING INSIDE format_string 🚨🚨🚨**
+  
+  In Databricks SQL, a single quote inside a string is escaped by DOUBLING it: `''` (two single quotes).
+  This applies to ALL possessives (Moody's, Carrefour's, organization's) and contractions (don't, it's, can't).
+  
+  ```sql
+  -- ✅✅✅ CORRECT: Apostrophe = '' (exactly TWO single quotes) ✅✅✅
+  format_string('You are an analyst at Moody''s Analytics with 18 years of experience...', args)
+  format_string('MAF Carrefour''s credit portfolio spans hundreds of accounts...', args)
+  format_string('The organization''s strategic goals include...', args)
+  
+  -- ❌❌❌ WRONG: '''' (FOUR single quotes) — this produces TWO apostrophes, not one ❌❌❌
+  format_string('You are an analyst at Moody''''s Analytics...', args)  -- Output: Moody''s ❌
+  format_string('MAF Carrefour''''s credit portfolio...', args)        -- Output: Carrefour''s ❌
+  
+  -- ❌❌❌ WRONG: ''''' (FIVE+ quotes) as string delimiters — SYNTAX ERROR ❌❌❌
+  format_string('''''# Persona...text...'''''', args)  -- ❌ Broken SQL! Not valid syntax!
+  
+  -- ✅✅✅ CORRECT: Normal single quotes as string delimiters ✅✅✅
+  format_string('# Persona...text...', args)  -- ✅ Simple, correct
+  ```
+  
+  **ESCAPING RULES FOR format_string TEMPLATE TEXT:**
+  - String delimiter: ONE single quote to open, ONE single quote to close: `'...'`
+  - Apostrophe/possessive inside string: EXACTLY TWO single quotes: `''`
+  - NEVER use 3, 4, 5, or 6 consecutive single quotes for ANY purpose
+  - NEVER try to use Python-style triple quotes (`'''`) — SQL does not support this
+  - Count: every word with an apostrophe needs EXACTLY `''` — not `''''`, not `''''''`
+  
+  **SCAN RULE**: After writing format_string, search for every possessive/contraction word:
+  ☐ Moody''s (2 quotes) NOT Moody''''s (4 quotes)
+  ☐ Carrefour''s (2 quotes) NOT Carrefour''''s (4 quotes)
+  ☐ organization''s (2 quotes) NOT organization''''s (4 quotes)
+  ☐ don''t (2 quotes) NOT don''''t (4 quotes)
+  ☐ String opens with `'` and closes with `'` — never `'''''` or `'''`
 
 - **ARRAY SYNTAX** - Second most common error:
   ```sql
@@ -4784,12 +5672,12 @@ SELECT * FROM messy_cte;  -- ❌ This messy pattern is wrong - don't copy it!
   -- Step 1: GROUP BY multiple columns
   WITH historical_data AS (
     SELECT 
-      airport_code,      -- Column A
-      service_type,      -- Column B
+      region_code,       -- Column A
+      product_type,      -- Column B
       DATE_TRUNC('month', date) AS ds,
       SUM(cost) AS monthly_cost
     FROM table
-    GROUP BY airport_code, service_type, DATE_TRUNC('month', date)  -- ⚠️ Groups by BOTH columns
+    GROUP BY region_code, product_type, DATE_TRUNC('month', date)  -- ⚠️ Groups by BOTH columns
     ORDER BY ds
     -- ✅ NO LIMIT - using WHERE clause for date filtering
   ),
@@ -4799,24 +5687,24 @@ SELECT * FROM messy_cte;  -- ❌ This messy pattern is wrong - don't copy it!
       TABLE(historical_data),
       time_col => 'ds',
       value_col => 'monthly_cost',
-      group_col => 'airport_code',  -- ⚠️ ONLY airport_code specified!
+      group_col => 'region_code',  -- ⚠️ ONLY region_code specified!
       horizon => (SELECT date_add(MONTH, 3, MAX(ds)) FROM historical_data)
     )
     -- ✅ NO LIMIT
   )
-  -- Step 3: Try to SELECT service_type
+  -- Step 3: Try to SELECT product_type
   SELECT 
-    airport_code,     -- ✅ This exists (in group_col)
-    service_type,     -- ❌ ERROR! This doesn't exist in output!
+    region_code,      -- ✅ This exists (in group_col)
+    product_type,     -- ❌ ERROR! This doesn't exist in output!
     monthly_cost_forecast
   FROM forecast_results
   ```
   
   **WHY THIS FAILS:**
-  - Input CTE grouped by airport_code AND service_type
-  - But group_col only specified 'airport_code'
+  - Input CTE grouped by region_code AND product_type
+  - But group_col only specified 'region_code'
   - AI_FORECAST **ONLY returns columns in group_col**
-  - service_type is **NOT returned** because it wasn't in group_col!
+  - product_type is **NOT returned** because it wasn't in group_col!
   
   **THE FIX - TWO OPTIONS:**
   
@@ -4827,13 +5715,13 @@ SELECT * FROM messy_cte;  -- ❌ This messy pattern is wrong - don't copy it!
       TABLE(historical_data),
       time_col => 'ds',
       value_col => 'monthly_cost',
-      group_col => ARRAY('airport_code', 'service_type'),  -- ✅ Include BOTH columns
+      group_col => ARRAY('region_code', 'product_type'),  -- ✅ Include BOTH columns
       horizon => (SELECT date_add(MONTH, 3, MAX(ds)) FROM historical_data)
     )
     -- ✅ NO LIMIT
   )
-  -- Now service_type is available!
-  SELECT airport_code, service_type, monthly_cost_forecast FROM forecast_results
+  -- Now product_type is available!
+  SELECT region_code, product_type, monthly_cost_forecast FROM forecast_results
   ```
   
   **Option 2: Join back to original table to get missing columns**
@@ -4841,10 +5729,10 @@ SELECT * FROM messy_cte;  -- ❌ This messy pattern is wrong - don't copy it!
   forecast_with_context AS (
     SELECT 
       f.*,
-      t.service_type  -- Get service_type from JOIN
+      t.product_type  -- Get product_type from JOIN
     FROM forecast_results AS f
     LEFT JOIN original_table AS t
-      ON f.airport_code = t.airport_code
+      ON f.region_code = t.region_code
     -- ✅ NO LIMIT
   )
   ```
@@ -5035,27 +5923,27 @@ SELECT path, ai_extract(
   ```sql
   -- Step 1: Prepare historical data with GROUP BY to ensure unique time values
   -- 🚨 EVERY column must be COALESCE'd or have IS NOT NULL check!
-  WITH historical_route_metrics AS (
+  WITH historical_metrics AS (
     SELECT 
-      route_id,                                              -- CRITICAL: filtered with IS NOT NULL (group_col)
-      DATE_TRUNC('month', flight_date) AS ds,                -- CRITICAL: filtered with IS NOT NULL (time_col)
-      COALESCE(SUM(passenger_count), 0) AS passenger_demand, -- ✅ COALESCE'd (value_col)
+      region_code,                                           -- CRITICAL: filtered with IS NOT NULL (group_col)
+      DATE_TRUNC('month', order_date) AS ds,                 -- CRITICAL: filtered with IS NOT NULL (time_col)
+      COALESCE(SUM(quantity), 0) AS total_demand,            -- ✅ COALESCE'd (value_col)
       COALESCE(SUM(revenue), 0.0) AS total_revenue           -- ✅ COALESCE'd (value_col)
-    FROM `catalog`.`schema`.`flights` AS f
-    WHERE flight_date >= add_months(CURRENT_DATE(), -30)  -- 30 months history for 3-month forecast (10:1 ratio)
-      AND flight_date IS NOT NULL
-      AND route_id IS NOT NULL
-    GROUP BY route_id, DATE_TRUNC('month', flight_date)  -- 🔥 MANDATORY: GROUP BY time column
+    FROM `catalog`.`schema`.`transactions` AS t
+    WHERE order_date >= add_months(CURRENT_DATE(), -30)  -- 30 months history for 3-month forecast (10:1 ratio)
+      AND order_date IS NOT NULL
+      AND region_code IS NOT NULL
+    GROUP BY region_code, DATE_TRUNC('month', order_date)  -- 🔥 MANDATORY: GROUP BY time column
     ORDER BY ds
   ),
-  -- Step 2: Generate forecast (input is guaranteed to have unique ds values per route_id)
+  -- Step 2: Generate forecast (input is guaranteed to have unique ds values per region_code)
   demand_forecast_results AS (
     SELECT * FROM AI_FORECAST(
-      TABLE(historical_route_metrics),
+      TABLE(historical_metrics),
       time_col => 'ds',
-      value_col => ARRAY('passenger_demand', 'total_revenue'),
-      group_col => 'route_id',
-      horizon => (SELECT add_months(MAX(ds), 3) FROM historical_route_metrics)  -- 3 months ahead
+      value_col => ARRAY('total_demand', 'total_revenue'),
+      group_col => 'region_code',
+      horizon => (SELECT add_months(MAX(ds), 3) FROM historical_metrics)  -- 3 months ahead
     )
   -- ✅ NO LIMIT in CTEs
   )
@@ -5064,14 +5952,14 @@ SELECT path, ai_extract(
   
   **WRONG PATTERN ❌ - No GROUP BY (will cause duplicate time values):**
   ```sql
-  -- BAD: No GROUP BY - multiple flights per month will cause duplicate ds values
-  WITH historical_route_metrics AS (
+  -- BAD: No GROUP BY - multiple transactions per month will cause duplicate ds values
+  WITH historical_metrics AS (
     SELECT 
-      route_id,
-      DATE_TRUNC('month', flight_date) AS ds,
-      passenger_count AS passenger_demand  -- ❌ No aggregation!
-    FROM `catalog`.`schema`.`flights` AS f
-    WHERE flight_date IS NOT NULL
+      region_code,
+      DATE_TRUNC('month', order_date) AS ds,
+      quantity AS total_demand  -- ❌ No aggregation!
+    FROM `catalog`.`schema`.`transactions` AS t
+    WHERE order_date IS NOT NULL
     -- ❌ NO GROUP BY - ds will have duplicates!
     LIMIT 1000
   )
@@ -5096,11 +5984,11 @@ SELECT path, ai_extract(
   -- Step 2: Generate forecast
   demand_forecast_raw AS (
     SELECT * FROM AI_FORECAST(
-      TABLE(historical_route_metrics),
+      TABLE(historical_metrics),
       time_col => 'ds',
-      value_col => 'passenger_demand',
-      group_col => 'route_id',
-      horizon => (SELECT date_add(MONTH, 3, MAX(ds)) FROM historical_route_metrics)
+      value_col => 'total_demand',
+      group_col => 'region_code',
+      horizon => (SELECT date_add(MONTH, 3, MAX(ds)) FROM historical_metrics)
     )
   -- ✅ NO LIMIT in CTEs
   ),
@@ -5108,7 +5996,7 @@ SELECT path, ai_extract(
   demand_forecast_clean AS (
     SELECT *
     FROM demand_forecast_raw
-    WHERE passenger_demand_forecast IS NOT NULL  -- 🔥 MANDATORY: Filter NULL forecasts
+    WHERE total_demand_forecast IS NOT NULL  -- 🔥 MANDATORY: Filter NULL forecasts
   -- ✅ NO LIMIT in CTEs
   )
   SELECT * FROM demand_forecast_clean;  -- ✅ NO LIMIT
@@ -5120,7 +6008,7 @@ SELECT path, ai_extract(
   demand_forecast_clean AS (
     SELECT *
     FROM demand_forecast_raw
-    WHERE passenger_demand_forecast IS NOT NULL  -- Filter first metric
+    WHERE total_demand_forecast IS NOT NULL      -- Filter first metric
       AND total_revenue_forecast IS NOT NULL     -- Filter second metric
   -- ✅ NO LIMIT in CTEs
   )
@@ -5184,9 +6072,30 @@ SELECT path, ai_extract(
   ai_query('{sql_model_serving}', format_string('You are a Customer Success Director... Predict churn for customer %s. Output ONLY JSON...', customer_id))  -- Complex analysis with persona
   ai_query('{sql_model_serving}', format_string('You are a Product Manager... Analyze %s and suggest improvements. Output ONLY JSON...', product_name))  -- General tasks with persona
   
-  -- WRONG ❌
+  -- CORRECT ✅ - With modelParameters for temperature control
+  ai_query('{sql_model_serving}', ai_sys_prompt, modelParameters => named_struct('temperature', 0.4)) AS insights_json
+
+  -- WRONG ❌ - Model name issues
   ai_query(model_name, prompt)  -- Model name must be quoted
   ai_query('model', "prompt text")  -- Use single quotes not double
+
+  -- WRONG ❌ - CONCAT instead of format_string (BANNED for AI prompts)
+  ai_query('endpoint', CONCAT('Analyze ', col1, ' for ', col2))  -- ❌ Use format_string, NOT CONCAT!
+  ai_query('endpoint', CONCAT('Entity: ', entity_id, '\nClassify...'))  -- ❌ CONCAT cannot use %s placeholders!
+
+  -- WRONG ❌ - Hardcoded/hallucinated model name
+  ai_query('databricks-meta-llama-3-1-70b-instruct', prompt)  -- ❌ Use '{sql_model_serving}' ONLY!
+  ai_query('databricks-meta-llama-3-3-70b-instruct', prompt)  -- ❌ Use '{sql_model_serving}' ONLY!
+
+  -- WRONG ❌ - Named params as positional strings (see Anti-Pattern #22)
+  ai_query('endpoint', prompt, 'modelParameters', named_struct('temperature', 0.3))  -- ❌ CRASHES: 'modelParameters' = returnType, named_struct = failOnError!
+  ai_query('endpoint', prompt, 'responseFormat', '{{"type": "json_object"}}')  -- ❌ Same error: positional string args!
+
+  -- WRONG ❌ - BANNED parameters (see Anti-Pattern #21)
+  ai_query('endpoint', prompt, systemPrompt => 'You are...')  -- ❌ systemPrompt does NOT exist!
+  ai_query('endpoint', prompt, temperature => 0.4)  -- ❌ Use modelParameters => named_struct('temperature', 0.4)
+  ai_query('endpoint', prompt, responseFormat => 'JSON')  -- ❌ Instruct JSON output in prompt text instead
+  ai_query('endpoint', prompt, system_prompt => 'You are...')  -- ❌ system_prompt does NOT exist!
   ```
 
 - **AI_PARSE_DOCUMENT SYNTAX** (🚨 CRITICAL - ONLY FOR UNSTRUCTURED FILES):
@@ -5295,11 +6204,11 @@ This column is **REQUIRED** for EVERY use case and MUST appear BEFORE `ai_txt_ex
 - `ai_txt_business_outcome` - **CALCULATED MEASURABLE BUSINESS IMPACT** - MUST include:
   1. **Specific quantified savings/gains** with actual numbers from the analysis
   2. **Breakdown calculation** showing Daily/Weekly/Monthly/Yearly projections
-  3. **Currency values** where applicable (e.g., "$3,224 in fuel cost savings")
+  3. **Currency values** where applicable (e.g., "$3,224 in direct cost savings")
   4. **MANDATORY DISCLAIMER**: "DISCLAIMER: All numbers are AI estimates based on available data and must be validated by domain experts before business decisions."
 
 **EXAMPLE ai_txt_business_outcome:**
-"Reducing the 310 kg/hr excess fuel burn over 13 hrs saves approximately 4,030 kg of fuel. At $0.80/kg, this translates to $3,224 in direct fuel cost savings per flight. Breakdown: Daily (1 flight): $3,224 | Weekly (7 flights): $22,568 | Monthly (30 flights): $96,720 | Yearly (365 flights): $1,176,760 in potential savings. DISCLAIMER: All numbers are AI estimates based on available data and must be validated by domain experts before business decisions."
+"Reducing the 12% excess cost on high-volume transactions saves approximately $4,030 per batch. At current volumes, this translates to $3,224 in direct cost savings per cycle. Breakdown: Daily (1 cycle): $3,224 | Weekly (7 cycles): $22,568 | Monthly (30 cycles): $96,720 | Yearly (365 cycles): $1,176,760 in potential savings. DISCLAIMER: All numbers are AI estimates based on available data and must be validated by domain experts before business decisions."
 **⚠️ CRITICAL: In the format_string template, the above example uses LITERAL dollar amounts ($3,224, $22,568, etc.) — NOT %s placeholders. NEVER put %s in ANY example/instruction/Remarks/Output/Narrative text inside format_string! This applies to ALL sections: ai_txt_business_outcome, ai_txt_segment_insights, ai_txt_* field descriptions, # Remarks example patterns, # Output format descriptions. Use [bracket placeholders], literal amounts, or X/Y/Z instead. See Anti-Pattern #10.**
 
 **SYSTEM COLUMNS (`ai_sys_` prefix - MANDATORY for every use case):**
@@ -5317,35 +6226,34 @@ These columns provide AI transparency, prioritization, and data quality insights
 When generating narrative content (rationales, justifications, explanations, strategies, action plans, executive summaries, etc.), you MUST include the **PRINCIPAL** (the specific entity being discussed) with its **IDENTIFYING DETAILS** in the narrative text.
 
 **❌ WRONG - Generic references without principal context:**
-- "The data shows that this flight has burned 4800kg/hr of fuel"
+- "The data shows high cost variance in this period"
 - "This customer shows high churn risk based on the metrics"
 - "The analysis indicates elevated maintenance priority"
 - "Based on the forecast, immediate action is recommended"
-- "The route exhibits declining performance trends"
+- "The entity exhibits declining performance trends"
 
 **✅ CORRECT - Narrative includes principal with identifying details:**
-- "Flight EK005 from DXB-LHR has burned 4800kg/hr of fuel, exceeding the expected 4200kg/hr for A380 aircraft on this route"
-- "Customer ID C-28947 (Emirates Skywards Platinum, 12 years tenure) shows high churn risk due to 45% decrease in booking frequency"
-- "Aircraft A6-EDA (Boeing 777-300ER, 8.5 years in service) requires elevated maintenance priority due to 3 consecutive AOG events"
-- "Route DXB-JFK (daily A380 service, 14hr flight time) requires immediate capacity adjustment based on 23% load factor decline"
-- "Vendor ABC Catering (primary supplier, Dubai hub) shows 15% quality deviation requiring contract review"
+- "Customer ID C-28947 (Gold tier, 12 years tenure) shows high churn risk due to 45% decrease in purchase frequency"
+- "Supplier XYZ Corp (primary vendor, Northeast region) shows 15% quality deviation requiring contract review"
+- "Order #ORD-88421 (priority account, $42K value) requires immediate attention based on 3 consecutive late deliveries"
+- "Product SKU-4892 (Category A, launched Q2-2024) shows 23% demand decline requiring pricing review"
 
 **HOW TO IMPLEMENT IN PROMPTS:**
 In your ai_query prompt instructions, explicitly tell the AI to include the principal with context:
 
 ```sql
-format_string('...your analysis prompt...NARRATIVE FIELD RULES: For ALL narrative fields (rationale, strategy, action_plan, executive_summary, etc.), you MUST start by identifying the specific entity being discussed with its key attributes. Example: Instead of "This shows high risk", write "Flight EK412 from DXB-SIN (A380, daily service) shows high risk due to...". Include: entity name/ID, key identifying attributes (route, type, category), then the analysis. ')
+format_string('...your analysis prompt...NARRATIVE FIELD RULES: For ALL narrative fields (rationale, strategy, action_plan, executive_summary, etc.), you MUST start by identifying the specific entity being discussed with its key attributes. Example: Instead of "This shows high risk", write "Customer C-28947 (Gold tier, 12yr tenure) shows high risk due to...". Include: entity name/ID, key identifying attributes (segment, type, category), then the analysis. ')
 ```
 
-**PRINCIPAL IDENTIFICATION BY DOMAIN:**
-- **Flights**: Flight number + route (origin-destination) + aircraft type: "Flight EK005 from DXB-LHR (A380)"
-- **Aircraft**: Registration + type + age: "Aircraft A6-EDA (Boeing 777-300ER, 8.5 years)"
-- **Routes**: Origin-destination + service frequency + aircraft: "Route DXB-JFK (daily A380 service)"
-- **Customers**: Customer ID + tier/segment + tenure: "Customer C-28947 (Platinum, 12 years)"
-- **Vendors/Suppliers**: Vendor name + type + location: "Vendor ABC Catering (primary supplier, Dubai hub)"
-- **Products**: Product name/code + category: "Product SKU-4892 (Premium meal, Business class)"
+**PRINCIPAL IDENTIFICATION PATTERN (adapt to your industry and data):**
+- **People/Accounts**: ID + tier/segment + tenure: "Customer C-28947 (Gold, 12 years)"
+- **Assets/Equipment**: Registration/ID + type + age: "Asset A-1042 (Type III, 8.5 years)"
+- **Locations/Facilities**: Name + region + capacity: "Warehouse WH-East (Northeast, 50K sqft)"
+- **Transactions/Orders**: ID + account + value: "Order #88421 (Priority account, $42K)"
+- **Vendors/Suppliers**: Name + type + location: "Vendor XYZ Corp (primary supplier, Region A)"
+- **Products**: Name/code + category: "Product SKU-4892 (Category A, Premium)"
 - **Transactions**: Transaction ID + type + amount: "Order ORD-78234 (Corporate booking, $45,000)"
-- **Employees**: Role + department + experience: "Captain Ahmed Al-Rashid (A380 certified, 15 years)"
+- **Employees**: Role + department + experience: "Manager Sarah Chen (Operations, 15 years)"
 
 **CORRECT Business-Friendly Examples WITH ai_cat_/ai_txt_/ai_sys_ PREFIXES:**
 ```sql
@@ -5403,7 +6311,7 @@ ai_forecast(...) + ai_gen for recommendations
 -- For every use case, the LAST 7 COLUMNS must be (in this exact order):
 -- ai_txt_business_outcome, ai_txt_executive_summary, ai_sys_importance, ai_sys_urgency, ai_sys_confidence, ai_sys_feedback, ai_sys_missing_data
 ai_query('{sql_model_serving}', format_string(
-    '''# Persona
+    '# Persona
     You are a [Role] working for {business_name}, which is {enriched_business_context}. The organization''s strategic goals include: {enriched_strategic_goals}. Business priorities are: {enriched_business_priorities}. With [X] years of experience in [domain], your expertise in [relevant expertise] aligns with the strategic initiative: [relevant initiative].
 
     # Task
@@ -5427,7 +6335,8 @@ ai_query('{sql_model_serving}', format_string(
     - ai_cat_field1: (MUST be exactly one of: Value1|Value2|Value3)
     - ai_cat_field2: (MUST be exactly one of: Value1|Value2|Value3)
 
-    NARRATIVE FIELDS (ai_txt_ prefix, detailed free text):
+    NARRATIVE FIELDS (ai_txt_ prefix, detailed free text with principal context):
+    For ALL narrative fields, START by identifying the specific entity with key attributes. Example: "[Entity Name] ([Key Attr 1], [Key Attr 2]) exhibits..." NOT "The entity exhibits...". ⛔ NEVER use %s in this example text — bracket placeholders only (see Anti-Pattern #10).
     - ai_txt_field1: Description of what this field should contain.
     - ai_txt_field2: Description of what this field should contain.
 
@@ -5437,7 +6346,7 @@ ai_query('{sql_model_serving}', format_string(
     [STANDARD_CONSTRAINTS — see above]
 
     # Remarks
-    [STANDARD_REMARKS — see above]'''))
+    [STANDARD_REMARKS — see above]'))
 ```
 
 **MANDATORY STRUCTURE:**
@@ -5447,7 +6356,7 @@ ai_query('{sql_model_serving}', format_string(
 
 **CATEGORICAL COLUMNS - EXAMPLES BY DOMAIN (use `ai_cat_` prefix):**
 
-**Supply Chain / Inventory / Catering:**
+**Supply Chain / Inventory / Procurement:**
 - `ai_cat_inventory_urgency`: `High Priority`, `Medium Priority`, `Low Priority`, `Critical`
 - `ai_cat_waste_risk_level`: `High`, `Medium`, `Low`, `Minimal`
 - `ai_cat_preparation_complexity`: `Complex`, `Standard`, `Simple`, `Minimal`
@@ -5484,26 +6393,26 @@ ai_query('{sql_model_serving}', format_string(
 - `ai_sys_feedback`: AI reasoning and self-assessment
 - `ai_sys_missing_data`: What additional data would improve the analysis
 
-**COMPLETE EXAMPLE (CATERING OPERATIONS):**
+**COMPLETE EXAMPLE (INVENTORY OPERATIONS):**
 ```sql
 -- Step 2: Generate structured insights with ai_cat_ + ai_txt_ + ai_sys_ columns
 ai_query('{sql_model_serving}',
   format_string(
-    '''# Persona
-    You are a Catering Operations Director working for {business_name}, which is {enriched_business_context}. The organization''s strategic goals include: {enriched_strategic_goals}. Business priorities are: {enriched_business_priorities}. With 15 years of expertise in airline catering logistics, inventory management, and waste reduction, your operational focus aligns with the strategic initiative: {enriched_strategic_initiative}.
+    '# Persona
+    You are an Inventory Operations Director working for {business_name}, which is {enriched_business_context}. The organization''s strategic goals include: {enriched_strategic_goals}. Business priorities are: {enriched_business_priorities}. With 15 years of expertise in inventory logistics, supply chain management, and waste reduction, your operational focus aligns with the strategic initiative: {enriched_strategic_initiative}.
 
     # Task
-    Your primary mission is to perform data-driven analysis of catering demand patterns, inventory optimization, and waste reduction to maximize efficiency while maintaining service quality.
+    Your primary mission is to perform data-driven analysis of demand patterns, inventory optimization, and waste reduction to maximize efficiency while maintaining service quality.
 
-    Why this is critical: Catering involves perishable inventory where over-ordering and under-ordering both have significant financial and service quality consequences.
-    Gains of success: Accurate catering intelligence enables reduced waste, lower carrying costs, consistent service quality, and sustainable operations.
-    Losses of failure: Poor planning leads to wasted perishable inventory, service failures from stockouts, strained vendor relationships, and operational chaos during peaks.
-    Competitive Advantage: Organizations mastering demand-driven catering achieve superior margins through waste elimination and consistent quality.
+    Why this is critical: Inventory management involves balancing stock levels where over-ordering and under-ordering both have significant financial and service quality consequences.
+    Gains of success: Accurate demand intelligence enables reduced waste, lower carrying costs, consistent service quality, and sustainable operations.
+    Losses of failure: Poor planning leads to wasted inventory, service failures from stockouts, strained vendor relationships, and operational chaos during peaks.
+    Competitive Advantage: Organizations mastering demand-driven inventory achieve superior margins through waste elimination and consistent quality.
 
     You must act as a relentless investigator. Leave no data point unexamined. Your insights will directly shape executive decision-making, strategic planning, and resource allocation.
 
     # Input
-    Analyze catering forecast for %s in %s on flight %s route %s-%s with %s meals expected.
+    Analyze inventory forecast for %s in %s at location %s for category %s-%s with %s units expected.
 
     # Output
     Output JSON Structure:
@@ -5517,7 +6426,7 @@ ai_query('{sql_model_serving}',
     - ai_cat_quality_priority: (MUST be exactly one of: High Quality|Standard Quality|Basic Quality)
 
     NARRATIVE FIELDS (ai_txt_ prefix, detailed free text with principal context):
-    For ALL narrative fields, START by identifying the specific entity with key attributes. Example: "Flight EK412 DXB-LHR Business Class catering requires..." NOT "The catering requires...". Include: flight number, route, cabin class, then the detailed plan/analysis.
+    For ALL narrative fields, START by identifying the specific entity with key attributes. Example: "Product SKU-4892 (Category A, Warehouse-East) requires immediate restocking..." NOT "The inventory requires...". Include: entity ID, category, location, then the detailed plan/analysis. ⛔ NEVER use %s in this example text — use literal entity names or bracket placeholders only (see Anti-Pattern #10).
     - ai_txt_inventory_plan: Detailed inventory requirements and sourcing plan.
     - ai_txt_preparation_schedule: Timeline and preparation workflow.
     - ai_txt_vendor_strategy: Vendor selection and allocation rationale.
@@ -5527,7 +6436,7 @@ ai_query('{sql_model_serving}',
     - ai_txt_operational_narrative: Overall operational summary.
 
     MANDATORY LAST 7 FIELDS (in this order):
-    1) ai_txt_business_outcome - CALCULATED MEASURABLE BUSINESS IMPACT. Calculate specific savings/gains with numbers. Example: "Optimizing catering for Flight EK412 reduces food waste by 15 meals (valued at $45/meal) = $675 savings per flight. Breakdown: Daily (1 flight): $675 | Weekly (7 flights): $4,725 | Monthly (30 flights): $20,250 | Yearly (365 flights): $246,375. DISCLAIMER: All numbers are AI estimates based on available data and must be validated by domain experts before business decisions." MUST include Daily/Weekly/Monthly/Yearly breakdown and DISCLAIMER.
+    1) ai_txt_business_outcome - CALCULATED MEASURABLE BUSINESS IMPACT. Calculate specific savings/gains with numbers. Example: "Optimizing inventory for Product SKU-4892 reduces waste by 15 units (valued at $45/unit) = $675 savings per cycle. Breakdown: Daily (1 cycle): $675 | Weekly (7 cycles): $4,725 | Monthly (30 cycles): $20,250 | Yearly (365 cycles): $246,375. DISCLAIMER: All numbers are AI estimates based on available data and must be validated by domain experts before business decisions." MUST include Daily/Weekly/Monthly/Yearly breakdown and DISCLAIMER.
     2) ai_txt_executive_summary - Compelling business story in 2-3 sentences that REFERENCES the business outcome numbers.
     3) ai_sys_importance - BUSINESS IMPORTANCE (Very Low|Low|Medium|High|Very High|Critical). Evaluate INDEPENDENTLY from urgency!
     4) ai_sys_urgency - TIME SENSITIVITY (Very Low|Low|Medium|High|Very High|Critical). Evaluate INDEPENDENTLY from importance!
@@ -5538,14 +6447,14 @@ ai_query('{sql_model_serving}',
     # Constraints
     1. ZERO HALLUCINATION POLICY: You must strictly rely on the provided input data. If specific information is missing, ambiguous, or if you cannot determine an answer based ONLY on the provided context, you MUST explicitly state "I do not know" or flag it in ai_sys_missing_data. Never invent metrics, entity names, events, or analytical conclusions.
     2. Output ONLY a JSON object with NO markdown fences, NO extra text, NO preamble or postscript. JUST the raw JSON.
-    3. NARRATIVE RULE: For ALL ai_txt_ fields, ALWAYS start by identifying the specific entity with its key attributes before providing analysis.
+    3. NARRATIVE RULE: For ALL ai_txt_ fields, ALWAYS start by identifying the specific entity with key attributes before providing analysis. ⛔ NEVER use %s in the example — use bracket placeholders: "[Name] (Category: [Category], Location: [Location]) exhibits..." NOT "Item %s (Category: %s) exhibits...". Any %s in NARRATIVE FIELDS instruction text or example text is a format_string bug that causes `Format specifier '%s'` error (see Anti-Pattern #10).
 
     # Remarks
     You MUST be AGGRESSIVE in using data evidence. Every claim MUST be backed by specific numbers from the input data. PUT THE DATA TO WORK: Quantify every insight using the specific numbers provided. Do NOT make generic statements like "too high" — instead write "X is higher than Y by Z%%".
     CRITICAL: ai_sys_importance and ai_sys_urgency are INDEPENDENT dimensions — do NOT automatically set them to the same value. Evaluate each on its own merits.
     BE 100%%%% HONEST — your feedback and confidence score will be evaluated by a more intelligent AI system, so complete honesty is mandatory.
-    Output ONLY the JSON object, nothing else.''',
-    meal_type, cabin_class, flight_number, origin, destination, forecasted_volume)
+    Output ONLY the JSON object, nothing else.',
+    item_type, category, location_code, source_region, dest_region, forecasted_volume)
 )
 ```
 
@@ -5588,8 +6497,8 @@ COALESCE(get_json_object(insights, '$.ai_sys_missing_data'), 'No missing data id
 7. **🚨 NARRATIVE COLUMNS MUST INCLUDE THE PRINCIPAL WITH IDENTIFYING DETAILS 🚨**
    - Every `ai_txt_` field MUST start by identifying the specific entity being discussed
    - Include: entity name/ID + key attributes (route, type, category, etc.) + then the analysis
-   - ❌ WRONG: "The data shows high fuel consumption" (generic, no principal)
-   - ✅ CORRECT: "Flight EK005 DXB-LHR (A380) shows high fuel consumption of 4800kg/hr" (principal with context)
+   - ❌ WRONG: "The data shows high cost variance" (generic, no principal)
+   - ✅ CORRECT: "Order #ORD-88421 (Priority account, Northeast region) shows 23% cost variance above threshold" (principal with context)
 8. **🚨 MANDATORY LAST 7 COLUMNS FOR EVERY USE CASE (in this exact order) 🚨:**
    - `ai_txt_business_outcome` - **CALCULATED MEASURABLE BUSINESS IMPACT** - MUST include: specific quantified savings/gains with actual numbers, Daily/Weekly/Monthly/Yearly breakdown, currency values where applicable, and ALWAYS end with: "DISCLAIMER: All numbers are AI estimates based on available data and must be validated by domain experts before business decisions."
    - `ai_txt_executive_summary` - compelling 2-3 sentence business story that **REFERENCES the business outcome numbers calculated above**
@@ -5812,6 +6721,7 @@ select * from {result_table}
 1. `SELECT * FROM final_output;` completes the CREATE OR REPLACE TABLE statement (with semicolon)
 2. A separate `select * from <result_table>` with commented WHERE filters for user convenience
 3. `--END OF GENERATED SQL` is ALWAYS the absolute LAST line. NOTHING comes after it.
+4. **🚨 CRITICAL: The `select * from <result_table>` MUST be the LAST executable statement.** Do NOT put ANY SET statements (e.g., `SET ansi_mode = true;`, `SET ansi_mode = false;`) or any other statement AFTER the SELECT. In Databricks notebooks, the LAST statement's result is what gets displayed. If you put a SET after the SELECT, the user loses the table preview. `SET ansi_mode = false` goes BEFORE CREATE only. NEVER put `SET ansi_mode = true` anywhere — the session resets naturally.
 
 **🚨 CRITICAL: CTE COLUMN PRESERVATION 🚨:**
 
@@ -5892,7 +6802,7 @@ SELECT * FROM enriched;  -- ✅ All columns available
 
 **🚨🚨🚨 CRITICAL: ENRICHMENT CTE COLUMN PROPAGATION - #1 CAUSE OF UNRESOLVED_COLUMN ERRORS 🚨🚨🚨**
 
-**When joining a parsed enrichment CTE (external_api/internal_data *_parsed CTEs) with the main data pipeline via LEFT JOIN, you MUST select ALL columns from the parsed CTE. Do NOT cherry-pick a subset!**
+**When joining a parsed enrichment CTE (simulated_external_data/internal_data *_parsed CTEs) with the main data pipeline via LEFT JOIN, you MUST select ALL columns from the parsed CTE. Do NOT cherry-pick a subset!**
 
 **THE BUG:** You parse 10 fields from a JSON in `*_parsed` CTE, but only carry 3 of them into the join CTE. Then a downstream CTE (e.g., format_string in prompt generation) references the other 7 fields → UNRESOLVED_COLUMN error.
 
@@ -5904,7 +6814,7 @@ customer_intel_parsed AS (
     COALESCE(get_json_object(json, '$.market_cap'), 0.0) AS market_cap,
     COALESCE(get_json_object(json, '$.competitors'), 'Unknown') AS competitors,
     COALESCE(get_json_object(json, '$.competitors_confidence'), 0.0) AS competitors_confidence
-  FROM external_api_for_customer_intelligence
+  FROM simulated_external_data_for_customer_intelligence
 ),
 combined AS (
   SELECT 
@@ -5929,7 +6839,7 @@ customer_intel_parsed AS (
     COALESCE(get_json_object(json, '$.competitors_confidence'), 0.0) AS competitors_confidence,
     COALESCE(get_json_object(json, '$.revenue'), 0.0) AS revenue,
     COALESCE(get_json_object(json, '$.revenue_confidence'), 0.0) AS revenue_confidence
-  FROM external_api_for_customer_intelligence
+  FROM simulated_external_data_for_customer_intelligence
 ),
 combined AS (
   SELECT 
@@ -5957,36 +6867,36 @@ combined AS (
 
 **RULE: ONLY the FIRST CTE (base_data / base_*) may query raw source tables. ALL subsequent CTEs MUST reference a PREVIOUS CTE, never the raw tables.**
 
-Column aliases (e.g., `i.total_amount AS invoice_freight_cost`) are defined ONLY in the CTE where they are created. If CTE2 queries the raw table again instead of CTE1, those aliases DO NOT EXIST and the query WILL FAIL with `UNRESOLVED_COLUMN`.
+Column aliases (e.g., `t.amount AS total_cost`) are defined ONLY in the CTE where they are created. If CTE2 queries the raw table again instead of CTE1, those aliases DO NOT EXIST and the query WILL FAIL with `UNRESOLVED_COLUMN`.
 
 ```sql
 -- ❌❌❌ FATAL ERROR: CTE2 re-queries raw tables instead of referencing CTE1 ❌❌❌
 WITH base_data AS (
-  SELECT i.total_amount AS invoice_freight_cost,  -- alias created HERE
-         s.weight_kg
-  FROM invoice AS i JOIN shipment AS s ON i.shipment_id = s.shipment_id
-  WHERE i.invoice_id IS NOT NULL
+  SELECT t.amount AS total_cost,  -- alias created HERE
+         d.quantity
+  FROM transactions AS t JOIN details AS d ON t.txn_id = d.txn_id
+  WHERE t.txn_id IS NOT NULL
   LIMIT 10
 ),
 statistical_analysis AS (
   SELECT *,
-    AVG(invoice_freight_cost) OVER () AS avg_cost  -- ❌ FAILS! invoice_freight_cost doesn't exist in raw tables!
-  FROM invoice AS i JOIN shipment AS s ON i.shipment_id = s.shipment_id  -- ❌ RE-QUERYING RAW TABLES!
+    AVG(total_cost) OVER () AS avg_cost  -- ❌ FAILS! total_cost doesn't exist in raw tables!
+  FROM transactions AS t JOIN details AS d ON t.txn_id = d.txn_id  -- ❌ RE-QUERYING RAW TABLES!
 )
 ```
 
 ```sql
 -- ✅✅✅ CORRECT: CTE2 references CTE1 where aliases exist ✅✅✅
 WITH base_data AS (
-  SELECT i.total_amount AS invoice_freight_cost,  -- alias created HERE
-         s.weight_kg
-  FROM invoice AS i JOIN shipment AS s ON i.shipment_id = s.shipment_id
-  WHERE i.invoice_id IS NOT NULL
+  SELECT t.amount AS total_cost,  -- alias created HERE
+         d.quantity
+  FROM transactions AS t JOIN details AS d ON t.txn_id = d.txn_id
+  WHERE t.txn_id IS NOT NULL
   LIMIT 10
 ),
 statistical_analysis AS (
   SELECT *,
-    AVG(invoice_freight_cost) OVER () AS avg_cost  -- ✅ WORKS! invoice_freight_cost exists in base_data
+    AVG(total_cost) OVER () AS avg_cost  -- ✅ WORKS! total_cost exists in base_data
   FROM base_data  -- ✅ REFERENCES PREVIOUS CTE, not raw tables
 )
 ```
@@ -6076,31 +6986,31 @@ CTE1 (base_data) → CTE2 (derived) → CTE3 (statistics, SELECT *)
 **THE BUG:** Multiple CTEs reference the FIRST CTE (base_data) for different purposes. CTE2 computes `cost_per_kg` via GROUP BY. CTE4 also references CTE1 (for a different aggregation like time-series prep), but uses `cost_per_kg` as if it exists in CTE1. It doesn't - it's only in CTE2.
 
 ```sql
--- ❌ WRONG: cost_per_kg is computed in route_monthly (Step 2) but referenced from base_data (Step 1)
+-- ❌ WRONG: cost_per_unit is computed in region_monthly (Step 2) but referenced from base_data (Step 1)
 WITH base_data AS (
-  SELECT route_id, dispatch_date,
-    COALESCE(i.total_amount, 0.0) AS freight_cost,
-    COALESCE(s.weight_kg, 0.0) AS weight_kg
-  FROM shipment AS s JOIN invoice AS i ON s.id = i.id LIMIT 10
+  SELECT region_code, order_date,
+    COALESCE(o.total_amount, 0.0) AS total_cost,
+    COALESCE(d.quantity, 0.0) AS quantity
+  FROM orders AS o JOIN order_details AS d ON o.id = d.order_id LIMIT 10
 ),
-route_monthly AS (
-  SELECT route_id, DATE_TRUNC('month', dispatch_date) AS month,
-    SUM(freight_cost) / NULLIF(SUM(weight_kg), 0) AS cost_per_kg  -- ⬅️ Created HERE, only exists HERE
-  FROM base_data GROUP BY route_id, DATE_TRUNC('month', dispatch_date)
+region_monthly AS (
+  SELECT region_code, DATE_TRUNC('month', order_date) AS month,
+    SUM(total_cost) / NULLIF(SUM(quantity), 0) AS cost_per_unit  -- ⬅️ Created HERE, only exists HERE
+  FROM base_data GROUP BY region_code, DATE_TRUNC('month', order_date)
 ),
 forecast_prep AS (
-  SELECT route_id, DATE_TRUNC('month', dispatch_date) AS ds,
-    AVG(cost_per_kg) AS avg_cost_per_kg  -- ❌ UNRESOLVED_COLUMN! cost_per_kg is NOT in base_data!
-  FROM base_data  -- ❌ base_data has weight_kg and freight_cost, NOT cost_per_kg
-  GROUP BY route_id, DATE_TRUNC('month', dispatch_date)
+  SELECT region_code, DATE_TRUNC('month', order_date) AS ds,
+    AVG(cost_per_unit) AS avg_cost_per_unit  -- ❌ UNRESOLVED_COLUMN! cost_per_unit is NOT in base_data!
+  FROM base_data  -- ❌ base_data has quantity and total_cost, NOT cost_per_unit
+  GROUP BY region_code, DATE_TRUNC('month', order_date)
 )
 
 -- ✅ CORRECT: Either compute the metric INLINE from available raw columns, or reference the CTE that has it
 forecast_prep AS (
-  SELECT route_id, DATE_TRUNC('month', dispatch_date) AS ds,
-    COALESCE(SUM(freight_cost) / NULLIF(SUM(weight_kg), 0), 0.0) AS avg_cost_per_kg  -- ✅ Computed inline!
-  FROM base_data  -- ✅ weight_kg and freight_cost exist here
-  GROUP BY route_id, DATE_TRUNC('month', dispatch_date)
+  SELECT region_code, DATE_TRUNC('month', order_date) AS ds,
+    COALESCE(SUM(total_cost) / NULLIF(SUM(quantity), 0), 0.0) AS avg_cost_per_unit  -- ✅ Computed inline!
+  FROM base_data  -- ✅ quantity and total_cost exist here
+  GROUP BY region_code, DATE_TRUNC('month', order_date)
 )
 ```
 
@@ -6319,7 +7229,7 @@ When using ai_query, you MUST instruct the LLM to output PURE JSON with:
 ```sql
 ai_query('{sql_model_serving}',
   format_string(
-    '''# Persona
+    '# Persona
     You are a Customer Risk Analyst working for {business_name}, which is {enriched_business_context}. The organization''s strategic goals include: {enriched_strategic_goals}. Business priorities are: {enriched_business_priorities}. With 12 years of expertise in customer retention and risk assessment, your analytical focus aligns with the strategic initiative: {enriched_strategic_initiative}.
 
     # Task
@@ -6358,7 +7268,7 @@ ai_query('{sql_model_serving}',
     [STANDARD_CONSTRAINTS — see above]
 
     # Remarks
-    [STANDARD_REMARKS — see above]''',
+    [STANDARD_REMARKS — see above]',
     customer_name, customer_id)
 )
 ```
@@ -6382,7 +7292,7 @@ structured_info AS (
     *,  -- ✅ SELECT * carries ALL upstream columns (customer_id, customer_name, etc.)
     ai_query('{sql_model_serving}',
       format_string(
-        '''# Persona
+        '# Persona
         You are a Customer Success Analyst working for {business_name}, which is {enriched_business_context}. The organization''s strategic goals include: {enriched_strategic_goals}. Business priorities are: {enriched_business_priorities}. With 12 years of expertise in risk assessment and retention strategy, your analytical focus aligns with the strategic initiative: {enriched_strategic_initiative}.
 
         # Task
@@ -6422,7 +7332,7 @@ structured_info AS (
         [STANDARD_CONSTRAINTS — see above]
 
         # Remarks
-        [STANDARD_REMARKS — see above]''',
+        [STANDARD_REMARKS — see above]',
         MANDATORY LAST 7 FIELDS: ai_txt_business_outcome (calculated impact + DISCLAIMER), ai_txt_executive_summary, ai_sys_importance (INDEPENDENT), ai_sys_urgency (INDEPENDENT), ai_sys_confidence (0.0-1.0), ai_sys_feedback, ai_sys_missing_data.
 n on STRING
 -- extracted_data.risk_score  -- THIS WILL FAIL!
@@ -6556,8 +7466,8 @@ If you find yourself setting ai_sys_importance and ai_sys_urgency to the SAME VA
 
 | Domain | Persona Example | Task Enrichment Highlights |
 |--------|----------------|---------------------------|
-| Financial | "Senior Financial Analyst... 15yr aviation finance, TCO analysis, capital allocation" | "Capital decisions = largest commitments. Wrong by a few %% = millions misallocated." |
-| Risk/Compliance | "Airworthiness Compliance Director... 20yr safety, regulatory compliance" | "Non-negotiable compliance. Failure = fleet groundings, regulatory penalties, brand damage." |
+| Financial | "Senior Financial Analyst... 15yr industry finance, TCO analysis, capital allocation" | "Capital decisions = largest commitments. Wrong by a few %% = millions misallocated." |
+| Risk/Compliance | "Chief Compliance Officer... 20yr safety, regulatory compliance" | "Non-negotiable compliance. Failure = operational shutdowns, regulatory penalties, brand damage." |
 | Customer Retention | "Customer Success Director... 12yr retention, churn prediction, LTV optimization" | "Retention 5-7x cheaper than acquisition. 1%% churn reduction = millions in protected revenue." |
 | Operations | "Operations Director... 18yr operational excellence, process optimization" | "Every inefficiency compounds at scale. 1%% improvement = millions in annual savings." |
 | Revenue | "Revenue Strategy Director... 15yr pricing, go-to-market, revenue forecasting" | "Pricing decisions directly impact margins. Small changes compound across portfolio." |
@@ -6565,8 +7475,8 @@ If you find yourself setting ai_sys_importance and ai_sys_urgency to the SAME VA
 **ADDITIONAL PROMPT RULES:**
 - **Include years of experience** (10-20 years) to establish authority; match persona to the use case beneficiary role
 - **🚨 PRINCIPAL IDENTIFICATION IN NARRATIVES 🚨**: All ai_txt_ fields MUST identify the specific entity with key attributes before analysis.
-   - ❌ WRONG: "The data shows high fuel consumption"
-   - ✅ CORRECT: "Flight EK005 DXB-LHR (A380) shows fuel consumption of 4800kg/hr, 14% above fleet average"
+   - ❌ WRONG: "The data shows high cost deviation"
+   - ✅ CORRECT: "Customer C-28947 (Gold tier, 12yr tenure) shows 45% decline in purchase frequency, triggering churn risk alert"
 
 **EXAMPLE: ai_query with Direct JSON Output (with ai_sys_prompt)**
 ```sql
@@ -6586,7 +7496,7 @@ prompt_generation AS (
   SELECT 
     *,
     format_string(
-      '''# Persona
+      '# Persona
       You are a Fraud Detection Director working for {business_name}, which is {enriched_business_context}. The organization''s strategic goals include: {enriched_strategic_goals}. Business priorities are: {enriched_business_priorities}.
 
       # Task
@@ -6609,7 +7519,7 @@ prompt_generation AS (
       [STANDARD_CONSTRAINTS — see above]
 
       # Remarks
-      [STANDARD_REMARKS — see above]''',
+      [STANDARD_REMARKS — see above]',
       order_id, customer_id, order_amount) AS ai_sys_prompt
   FROM base_data
 ),
@@ -6648,7 +7558,7 @@ SELECT
   feedback_text,
   ai_query('{sql_model_serving}',
     format_string(
-      '''# Persona
+      '# Persona
       You are a Customer Feedback Classification Specialist working for {business_name}, which is {enriched_business_context}. The organization''s strategic goals include: {enriched_strategic_goals}. Business priorities are: {enriched_business_priorities}. With 10 years of expertise in sentiment analysis and customer experience management.
 
       # Task
@@ -6682,7 +7592,7 @@ SELECT
       [STANDARD_CONSTRAINTS — see above]
 
       # Remarks
-      [STANDARD_REMARKS — see above]''',
+      [STANDARD_REMARKS — see above]',
       feedback_text)
   ) AS classification
 FROM `main`.`feedback`.`customer_reviews` AS f
@@ -6918,7 +7828,7 @@ regional_prompt_generation AS (
   SELECT 
     *,
     format_string(
-      '''# Persona
+      '# Persona
       You are a Regional Performance Director working for {business_name}, which is {enriched_business_context}. The organization''s strategic goals include: {enriched_strategic_goals}. Business priorities are: {enriched_business_priorities}. With 15 years of experience in regional revenue optimization and performance analytics, your expertise in correlation analysis and strategic resource allocation aligns with the strategic initiative: Regional growth.
 
       # Task
@@ -6955,7 +7865,7 @@ regional_prompt_generation AS (
       [STANDARD_CONSTRAINTS — see above]
 
       # Remarks
-      [STANDARD_REMARKS — see above]''',
+      [STANDARD_REMARKS — see above]',
       region, marketing_revenue_correlation, satisfaction_revenue_correlation, marketing_predictive_power, revenue_per_marketing_dollar, revenue_volatility
     ) AS ai_sys_prompt
   FROM revenue_driver_analysis
@@ -7071,7 +7981,7 @@ cohort_prompt_generation AS (
   SELECT 
     *,
     format_string(
-      '''# Persona
+      '# Persona
       You are a Customer Analytics Director working for {business_name}, which is {enriched_business_context}. The organization''s strategic goals include: {enriched_strategic_goals}. Business priorities are: {enriched_business_priorities}. With 15 years of experience in retention strategy and customer lifetime value optimization, your expertise in cohort analysis, churn prediction, and targeted retention programs aligns with the strategic initiative: Customer success and retention.
 
       # Task
@@ -7103,7 +8013,7 @@ cohort_prompt_generation AS (
       - ai_cat_ltv_trajectory: (Accelerating|Growing|Stable|Declining|Concerning)
       - ai_cat_strategic_action: (Scale Aggressively|Invest More|Maintain|Optimize|Reduce Spend)
 
-      NARRATIVE FIELDS (ai_txt_ prefix):
+      NARRATIVE FIELDS (ai_txt_ prefix — ⛔ NEVER use %s in example/instruction text, use bracket placeholders):
       - ai_txt_acquisition_channel_recommendation, ai_txt_retention_strategy, ai_txt_investment_priority.
 
       MANDATORY LAST 7 FIELDS:
@@ -7118,7 +8028,7 @@ cohort_prompt_generation AS (
       [STANDARD_CONSTRAINTS — see above]
 
       # Remarks
-      [STANDARD_REMARKS — see above]''',
+      [STANDARD_REMARKS — see above]',
       cohort_group, cohort_size, avg_order_value, total_lifetime_value, six_month_retention_rate, early_lifetime_value, purchase_volatility
     ) AS ai_sys_prompt
   FROM cohort_performance_metrics
@@ -7217,7 +8127,7 @@ Use these advanced patterns when the use case description contains keywords like
 -- NOTE: customer_name and purchase_history must be COALESCEd in the source CTE
 ai_query('{sql_model_serving}', 
   format_string(
-    '''# Persona
+    '# Persona
     You are a Product Recommendation Specialist working for {business_name}, which is {enriched_business_context}. The organization''s strategic goals include: {enriched_strategic_goals}. Business priorities are: {enriched_business_priorities}. With 12 years of expertise in purchase pattern analysis and cross-selling strategies, your analytical focus aligns with the strategic initiative: {enriched_strategic_initiative}.
 
     # Task
@@ -7241,13 +8151,13 @@ ai_query('{sql_model_serving}',
     [STANDARD_CONSTRAINTS — see above]
 
     # Remarks
-    [STANDARD_REMARKS — see above]''', CONCAT(LEFT(customer_name, 2), ''****''), purchase_history))
+    [STANDARD_REMARKS — see above]', CONCAT(LEFT(customer_name, 2), ''****''), purchase_history))
 
 -- Risk assessment (using general-purpose LLM) - format_string auto-converts DOUBLE
 -- NOTE: amount, location, behavior_score must be COALESCEd in the source CTE
 ai_query('{sql_model_serving}',
   format_string(
-    '''# Persona
+    '# Persona
     You are a Fraud Detection Analyst working for {business_name}, which is {enriched_business_context}. The organization''s strategic goals include: {enriched_strategic_goals}. Business priorities are: {enriched_business_priorities}. With 12 years of expertise in transaction pattern analysis and anomaly detection, your investigative focus aligns with the strategic initiative: {enriched_strategic_initiative}.
 
     # Task
@@ -7271,13 +8181,13 @@ ai_query('{sql_model_serving}',
     [STANDARD_CONSTRAINTS — see above]
 
     # Remarks
-    [STANDARD_REMARKS — see above]''', amount, location, behavior_score))
+    [STANDARD_REMARKS — see above]', amount, location, behavior_score))
 
 -- Dynamic report generation with structured output (using mandatory default model)
 -- NOTE: department, revenue, growth_pct must be COALESCEd in the source CTE
 ai_query('{sql_model_serving}',
   format_string(
-    '''# Persona
+    '# Persona
     You are an Executive Reporting Analyst working for {business_name}, which is {enriched_business_context}. The organization''s strategic goals include: {enriched_strategic_goals}. Business priorities are: {enriched_business_priorities}. With 15 years of expertise in financial performance analysis and strategic communication, your strategic focus aligns with the strategic initiative: {enriched_strategic_initiative}.
 
     # Task
@@ -7301,7 +8211,7 @@ ai_query('{sql_model_serving}',
     [STANDARD_CONSTRAINTS — see above]
 
     # Remarks
-    [STANDARD_REMARKS — see above]''', department, revenue, growth_pct))
+    [STANDARD_REMARKS — see above]', department, revenue, growth_pct))
 ```
 
 **🚨 REMEMBER: Every ai_query for structured data MUST include:**
@@ -7497,7 +8407,7 @@ prompt_generation AS (
   SELECT 
     *,
     format_string(
-      '''# Persona
+      '# Persona
       You are a Customer Success Director working for {business_name}, which is {enriched_business_context}. The organization''s strategic goals include: {enriched_strategic_goals}. Business priorities are: {enriched_business_priorities}. With 15 years of experience in customer retention and value optimization, your expertise aligns with the strategic initiative: Customer success.
 
       # Task
@@ -7529,7 +8439,7 @@ prompt_generation AS (
       [STANDARD_CONSTRAINTS — see above]
 
       # Remarks
-      [STANDARD_REMARKS — see above]''',
+      [STANDARD_REMARKS — see above]',
       CONCAT(LEFT(customer_name, 2), '****'), customer_id, customer_segment
     ) AS ai_sys_prompt
   FROM classified
@@ -7636,7 +8546,7 @@ enriched AS (
     *,
     ai_query('{sql_model_serving}',
       format_string(
-        '''# Persona
+        '# Persona
         You are a Customer Experience Analyst working for {business_name}, which is {enriched_business_context}. The organization''s strategic goals include: {enriched_strategic_goals}. Business priorities are: {enriched_business_priorities}. With 12 years of expertise in feedback analysis and resolution strategy, your customer-centric focus aligns with the strategic initiative: {enriched_strategic_initiative}.
 
         # Task
@@ -7678,7 +8588,7 @@ enriched AS (
         [STANDARD_CONSTRAINTS — see above]
 
         # Remarks
-        [STANDARD_REMARKS — see above]''',
+        [STANDARD_REMARKS — see above]',
         ai_cat_feedback_category, feedback_text, customer_lifetime_value, purchase_count, ai_cat_feedback_category)
     ) AS insights
   FROM classified
@@ -7741,7 +8651,7 @@ enriched AS (
     *,
     ai_query('{sql_model_serving}',
       format_string(
-        '''# Persona
+        '# Persona
         You are a Customer Success Director working for {business_name}, which is {enriched_business_context}. The organization''s strategic goals include: {enriched_strategic_goals}. Business priorities are: {enriched_business_priorities}. With 15 years of experience in customer segmentation, retention strategy, and lifecycle management, your expertise aligns with the strategic initiative: Customer-centric growth.
 
         # Task
@@ -7766,7 +8676,7 @@ enriched AS (
         - ai_cat_retention_priority: (MUST be exactly one of: Immediate Action/High Priority/Medium Priority/Low Priority/Monitor)
         - ai_cat_engagement_readiness: (MUST be exactly one of: Highly Receptive/Moderately Receptive/Low Receptivity/Difficult)
 
-        NARRATIVE FIELDS (ai_txt_ prefix, detailed free text):
+        NARRATIVE FIELDS (ai_txt_ prefix, detailed free text — ⛔ NEVER use %s in example/instruction text, use bracket placeholders):
         - ai_txt_segmentation_rationale: Why customer is in this tier, key metrics driving classification, 1-2 sentences.
         - ai_txt_retention_strategy: Personalized retention strategy specific to this tier and customer behavior.
         - ai_txt_outreach_plan: Specific outreach approach with recommended timing and channel.
@@ -7785,7 +8695,7 @@ enriched AS (
         [STANDARD_CONSTRAINTS — see above]
 
         # Remarks
-        [STANDARD_REMARKS — see above]''',
+        [STANDARD_REMARKS — see above]',
         ai_cat_value_tier, total_revenue, purchase_frequency, last_purchase_days_ago, product_category_preference, support_tickets_count)
     ) AS insights
   FROM segmented
@@ -7879,7 +8789,7 @@ prompt_generation AS (
   SELECT 
     *,
     format_string(
-      '''# Persona
+      '# Persona
       You are a Customer Success Director working for {business_name}, which is {enriched_business_context}. The organization''s strategic goals include: {enriched_strategic_goals}. Business priorities are: {enriched_business_priorities}. With 15 years of experience in retention strategy and customer success, your expertise aligns with the strategic initiative: Customer retention.
 
       # Task
@@ -7903,7 +8813,7 @@ prompt_generation AS (
       [STANDARD_CONSTRAINTS — see above]
 
       # Remarks
-      [STANDARD_REMARKS — see above]''',
+      [STANDARD_REMARKS — see above]',
       customer_name, account_age_days, recent_activity_score
     ) AS ai_sys_prompt
   FROM customer_data
@@ -7963,7 +8873,7 @@ prompt_generation AS (
   SELECT 
     *,
     format_string(
-      '''# Persona
+      '# Persona
       You are a Marketing Director working for {business_name}, which is {enriched_business_context}. The organization''s strategic goals include: {enriched_strategic_goals}. Business priorities are: {enriched_business_priorities}. With 12 years of experience in personalized campaigns and customer engagement, your expertise aligns with the strategic initiative: Customer engagement.
 
       # Task
@@ -7988,7 +8898,7 @@ prompt_generation AS (
       [STANDARD_CONSTRAINTS — see above]
 
       # Remarks
-      [STANDARD_REMARKS — see above]''',
+      [STANDARD_REMARKS — see above]',
       customer_name, preferred_product_category, lifetime_value
     ) AS ai_sys_prompt
   FROM customer_segments
@@ -8239,7 +9149,7 @@ SELECT
   customer_name,
   ai_query('{sql_model_serving}',
     format_string(
-      '''# Persona
+      '# Persona
       You are a Customer Intelligence Analyst working for {business_name}, which is {enriched_business_context}. The organization''s strategic goals include: {enriched_strategic_goals}. Business priorities are: {enriched_business_priorities}. With 12 years of expertise in customer segmentation, lifetime value optimization, and retention strategy.
 
       # Task
@@ -8263,7 +9173,7 @@ SELECT
       [STANDARD_CONSTRAINTS — see above]
 
       # Remarks
-      [STANDARD_REMARKS — see above]''', CONCAT(LEFT(customer_name, 2), ''****''), customer_segment, lifetime_value, total_orders, total_spent)
+      [STANDARD_REMARKS — see above]', CONCAT(LEFT(customer_name, 2), ''****''), customer_segment, lifetime_value, total_orders, total_spent)
   ) AS customer_insights
 FROM customer_orders
 ;
@@ -8684,8 +9594,8 @@ WITH ...
 ☐ Column names are business-friendly (NOT: classification, sentiment, similarity)
 ☐ Categorical columns have max 20 distinct values for filtering
 ☐ **🚨 Narrative columns MUST identify the principal with key attributes 🚨**:
-   - ❌ WRONG: "The data shows high fuel consumption"
-   - ✅ CORRECT: "Flight EK005 DXB-LHR (A380) shows fuel consumption of 4800kg/hr"
+   - ❌ WRONG: "The data shows high cost variance"
+   - ✅ CORRECT: "Order #ORD-88421 (Priority account, Northeast region) shows 23% cost variance above threshold"
    - Include entity ID/name + identifiers (route, type) + then analysis
 ☐ Combine multiple functions creatively when the use case benefits from it (AI + statistical)
 ☐ LIMIT 10 at END of FIRST CTE only - NO LIMIT in other CTEs or final SELECT
@@ -8801,6 +9711,17 @@ class InputTooLongError(RuntimeError):
     """Raised when input exceeds the model's context limit."""
     pass
 
+class CascadeRebatchError(RuntimeError):
+    """Raised when a model in the cascade timed out and the prompt is too large for remaining models.
+    Signals the caller to re-batch with smaller chunks that fit the target model's context window."""
+    def __init__(self, message, target_model_name=None, target_model_endpoint=None,
+                 target_context_limit_chars=None, failed_model_name=None):
+        super().__init__(message)
+        self.target_model_name = target_model_name
+        self.target_model_endpoint = target_model_endpoint
+        self.target_context_limit_chars = target_context_limit_chars
+        self.failed_model_name = failed_model_name
+
 class TruncatedResponseError(RuntimeError):
     """Raised when LLM response is truncated (missing END marker)."""
     pass
@@ -8909,8 +9830,16 @@ class ConsoleErrorFormatter(logging.Formatter):
         record.exc_text = original_exc_text
         return formatted_message
 
+class FlushingStreamHandler(logging.StreamHandler):
+    """StreamHandler that flushes after every emit for Databricks notebook compatibility."""
+    def emit(self, record):
+        super().emit(record)
+        self.flush()
+
 def setup_logging(output_dir):
     """Configures dual logging: detailed logs to a file and high-level logs to the console."""
+    log_file_path = os.path.join(output_dir, "log.txt")
+    os.makedirs(output_dir, exist_ok=True)
     root_logger = logging.getLogger() # Get root logger
     root_logger.setLevel(logging.DEBUG)
 
@@ -8918,40 +9847,17 @@ def setup_logging(output_dir):
         root_logger.handlers.clear()
 
     # --- File Handler (Detailed) ---
-    # Try primary path; if permission denied (e.g. multi-task pipeline where
-    # a previous task created the file under a different process), fall back
-    # to a task-specific log file, then to console-only logging.
-    file_handler = None
-    log_file_path = os.path.join(output_dir, "log.txt")
-    try:
-        os.makedirs(output_dir, exist_ok=True)
-        # Make dir accessible to other tasks on the same cluster
-        try:
-            os.chmod(output_dir, 0o777)
-        except OSError:
-            pass
-        file_handler = logging.FileHandler(log_file_path, mode='a')
-    except PermissionError:
-        # Fall back: per-PID log file to avoid collisions
-        fallback_dir = f"/tmp/_inspire_logs_{os.getpid()}"
-        try:
-            os.makedirs(fallback_dir, exist_ok=True)
-            log_file_path = os.path.join(fallback_dir, "log.txt")
-            file_handler = logging.FileHandler(log_file_path, mode='a')
-        except Exception:
-            log_file_path = None  # Give up on file logging
-
-    if file_handler:
-        file_handler.setLevel(logging.DEBUG)
-        file_formatter = logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s [in %(pathname)s:%(lineno)d]', 
-            datefmt='%Y-%m-%d %H:%M:%S'
-        )
-        file_handler.setFormatter(file_formatter)
-        root_logger.addHandler(file_handler)
+    file_handler = logging.FileHandler(log_file_path, mode='w')
+    file_handler.setLevel(logging.DEBUG)
+    file_formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s [in %(pathname)s:%(lineno)d]', 
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    file_handler.setFormatter(file_formatter)
+    root_logger.addHandler(file_handler)
 
     # --- Console Handler (High-Level, Clean) ---
-    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler = FlushingStreamHandler(sys.stdout)
     console_handler.setLevel(logging.INFO)
     console_formatter = ConsoleErrorFormatter(
         '%(asctime)s - %(levelname)s - %(message)s', 
@@ -8960,10 +9866,7 @@ def setup_logging(output_dir):
     console_handler.setFormatter(console_formatter)
     root_logger.addHandler(console_handler)
     
-    if log_file_path:
-        logger.info(f"Logging configured. High-level logs to console, detailed logs to {log_file_path}")
-    else:
-        logger.info("Logging configured. Console-only (file logging unavailable due to permissions).")
+    logger.info(f"Logging configured. High-level logs to console, detailed logs to {log_file_path}")
 
 def print_ascii_banner():
     """Prints the Databricks Inspire AI ASCII art banner."""
@@ -9141,27 +10044,20 @@ def replace_single_quote(text: str) -> str:
         return ""
     return text.replace(r"\\", r"\\\\").replace("'", "''")
 
-def execute_sql(spark: SparkSession, query: str, logger: logging.Logger):
+def execute_sql(spark: SparkSession, query: str, logger: logging.Logger, args: dict = None):
     """
     Executes a Spark SQL query and returns the collected rows.
-    
-    Args:
-        spark: SparkSession instance
-        query: SQL query to execute
-        logger: Logger instance
-    
-    Returns:
-        Collected rows from the query
-        
-    Raises:
-        Exception: For SQL execution errors
+    Supports parameterized queries via args dict to avoid SQL injection / escaping issues.
     """
     try:
         logger.debug(f"Executing Spark SQL: {query[:200]}...")
-        result = spark.sql(query).collect()
+        if args:
+            result = spark.sql(query, args=args).collect()
+        else:
+            result = spark.sql(query).collect()
         return result
     except Exception as e:
-        logger.debug(f"Spark SQL query failed: {e}")
+        logger.debug(f"Spark SQL query failed: {get_clean_error_message(e)}")
         raise
 
 def load_and_format_prompt(prompt_key: str, prompt_vars: dict, logger: logging.Logger) -> str:
@@ -9447,6 +10343,140 @@ class RetryHandler:
         raise last_exception
 
 
+_THREAD_CANCEL_REGISTRY = {}
+_THREAD_CANCEL_LOCK = threading.Lock()
+
+def _register_thread_cancel(event):
+    with _THREAD_CANCEL_LOCK:
+        _THREAD_CANCEL_REGISTRY[threading.current_thread().ident] = event
+
+def _unregister_thread_cancel():
+    with _THREAD_CANCEL_LOCK:
+        _THREAD_CANCEL_REGISTRY.pop(threading.current_thread().ident, None)
+
+def _is_thread_cancelled():
+    with _THREAD_CANCEL_LOCK:
+        ev = _THREAD_CANCEL_REGISTRY.get(threading.current_thread().ident)
+    return ev is not None and ev.is_set()
+
+
+def safe_as_completed(futures, timeout=None):
+    """Drop-in replacement for concurrent.futures.as_completed() that keeps
+    the main thread active via a polling loop. On Databricks, the notebook
+    output buffer only flushes when the main thread executes Python code.
+
+    Uses manual future.done() polling + time.sleep() instead of
+    concurrent.futures.wait(). The latter uses C-level Condition.wait()
+    which can block far beyond its timeout when the GIL is contended by
+    worker threads executing C-extensions (e.g. PySpark JNI calls via
+    Py4J). time.sleep() properly releases the GIL and always returns on
+    schedule, guaranteeing the main thread stays responsive.
+    """
+    import time as _time_mod
+    import sys as _sys_mod
+
+    if isinstance(futures, dict):
+        future_set = set(futures.keys())
+    else:
+        future_set = set(futures)
+
+    total = len(future_set)
+    remaining = set(future_set)
+    start_time = _time_mod.time()
+    heartbeat_interval = 10
+    sleep_interval = 2
+    completed_count = 0
+    last_heartbeat = start_time
+
+    while remaining:
+        elapsed = _time_mod.time() - start_time
+        if timeout is not None and elapsed >= timeout:
+            raise concurrent.futures.TimeoutError(
+                f"safe_as_completed timed out after {timeout:.0f}s with {len(remaining)} futures remaining"
+            )
+
+        newly_done = {f for f in remaining if f.done()}
+        remaining -= newly_done
+
+        if newly_done:
+            for future in newly_done:
+                completed_count += 1
+                yield future
+            _sys_mod.stdout.flush()
+            _sys_mod.stderr.flush()
+        else:
+            now = _time_mod.time()
+            if now - last_heartbeat >= heartbeat_interval:
+                timeout_str = f"{timeout:.0f}" if timeout is not None else "∞"
+                timestamp = _time_mod.strftime('%H:%M:%S', _time_mod.localtime())
+                _sys_mod.stdout.write(f"{timestamp} - INFO - ⏳ [{completed_count}/{total}] {len(remaining)} task(s) in progress ({elapsed:.0f}s / {timeout_str}s)\n")
+                last_heartbeat = now
+            _sys_mod.stdout.flush()
+            _sys_mod.stderr.flush()
+            remaining_timeout = (timeout - elapsed) if timeout is not None else sleep_interval
+            _time_mod.sleep(min(sleep_interval, max(0.1, remaining_timeout)))
+
+
+def _safe_future_result(future, timeout=None, poll_interval=2):
+    """Get a future's result with guaranteed timeout enforcement.
+
+    Replaces direct future.result(timeout=X) calls which use C-level
+    Condition.wait() that can block beyond the timeout when the GIL is
+    contended (e.g. PySpark JNI calls). This polls future.done() +
+    time.sleep() instead, both of which behave correctly under GIL pressure.
+    """
+    import time as _time_mod
+    import sys as _sys_mod
+
+    if future.done():
+        return future.result(timeout=0)
+
+    start = _time_mod.time()
+    while not future.done():
+        elapsed = _time_mod.time() - start
+        if timeout is not None and elapsed >= timeout:
+            raise concurrent.futures.TimeoutError(
+                f"_safe_future_result timed out after {timeout:.0f}s"
+            )
+        remaining = (timeout - elapsed) if timeout is not None else poll_interval
+        _time_mod.sleep(min(poll_interval, max(0.1, remaining)))
+        _sys_mod.stdout.flush()
+        _sys_mod.stderr.flush()
+
+    return future.result(timeout=0)
+
+
+class _SafeExecutorContext:
+    """
+    Wraps a ThreadPoolExecutor with safe shutdown on timeout.
+    Call mark_timed_out() when a timeout occurs so __exit__ uses
+    shutdown(wait=False, cancel_futures=True) instead of blocking forever.
+    """
+    __slots__ = ('_executor', '_timed_out', '_logger', '_name')
+
+    def __init__(self, max_workers, thread_name_prefix="Worker", logger=None, name=""):
+        self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix=thread_name_prefix)
+        self._timed_out = False
+        self._logger = logger
+        self._name = name or thread_name_prefix
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self._timed_out:
+            if self._logger:
+                self._logger.warning(f"🛑 [{self._name}] Forcing executor shutdown (wait=False) after timeout")
+        self._executor.shutdown(wait=False, cancel_futures=self._timed_out)
+        return False
+
+    def submit(self, fn, *args, **kwargs):
+        return self._executor.submit(fn, *args, **kwargs)
+
+    def mark_timed_out(self):
+        self._timed_out = True
+
+
 class ParallelExecutor:
     """
     Centralized parallel execution manager using ThreadPoolExecutor.
@@ -9467,6 +10497,12 @@ class ParallelExecutor:
         """
         Execute multiple tasks in parallel using ThreadPoolExecutor.
         
+        Uses a polling loop instead of as_completed() to keep the main thread
+        active. This is critical on Databricks where the notebook output buffer
+        only flushes when the main thread executes Python code. Without polling,
+        worker thread output (logs, heartbeats) accumulates invisibly while the
+        main thread is blocked in as_completed()'s C-level Condition.wait().
+        
         Args:
             tasks: List of callables or (callable, args) tuples
             max_workers: Maximum number of parallel workers
@@ -9480,22 +10516,78 @@ class ParallelExecutor:
         Returns:
             List of results (or exceptions if return_exceptions=True)
         """
+        import time as _time_mod
+        import sys as _sys_mod
+        import traceback as _tb_mod
+        
         results = []
         exceptions = []
+        poll_interval = 15
         
-        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix=thread_name_prefix) as executor:
+        cancel_events = {}
+
+        def _safe_wrapper(idx, fn, fn_args, _cancel_evt=None):
+            if _cancel_evt is not None:
+                _register_thread_cancel(_cancel_evt)
+            try:
+                return fn(*fn_args) if fn_args else fn()
+            except Exception as exc:
+                _sys_mod.stderr.write(f"[ParallelExecutor] {task_name} #{idx} FAILED: {exc}\n{_tb_mod.format_exc()}")
+                _sys_mod.stderr.flush()
+                raise
+            finally:
+                if _cancel_evt is not None:
+                    _unregister_thread_cancel()
+        
+        timed_out = False
+        executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix=thread_name_prefix)
+        try:
             future_to_task = {}
             for i, task in enumerate(tasks):
+                evt = threading.Event()
+                cancel_events[i] = evt
                 if isinstance(task, tuple):
                     func, args = task
-                    future = executor.submit(func, *args)
+                    future = executor.submit(_safe_wrapper, i, func, args, evt)
                 else:
-                    future = executor.submit(task)
+                    future = executor.submit(_safe_wrapper, i, task, None, evt)
                 future_to_task[future] = i
             
-            try:
-                for future in concurrent.futures.as_completed(future_to_task, timeout=total_timeout):
+            remaining = set(future_to_task.keys())
+            completed_indices = set()
+            start_time = _time_mod.time()
+            last_heartbeat = start_time
+            heartbeat_interval = poll_interval
+            sleep_interval = 2
+            
+            while remaining:
+                elapsed = _time_mod.time() - start_time
+                
+                if total_timeout and elapsed >= total_timeout:
+                    timed_out_count = len(remaining)
+                    msg = f"⏱️  Total timeout ({total_timeout}s) exceeded for {task_name}. {timed_out_count} task(s) did not complete."
+                    if logger:
+                        logger.error(msg)
+                    else:
+                        log_print(msg, level="ERROR")
+                    timed_out = True
+                    for evt in cancel_events.values():
+                        evt.set()
+                    if return_exceptions:
+                        for future in remaining:
+                            task_idx = future_to_task[future]
+                            results.append((task_idx, TimeoutError(f"{task_name} #{task_idx} exceeded total timeout of {total_timeout}s")))
+                            future.cancel()
+                    else:
+                        raise concurrent.futures.TimeoutError(msg)
+                    break
+                
+                done = {f for f in remaining if f.done()}
+                remaining -= done
+                
+                for future in done:
                     task_idx = future_to_task[future]
+                    completed_indices.add(task_idx)
                     try:
                         result = future.result(timeout=timeout_per_task)
                         results.append((task_idx, result))
@@ -9514,11 +10606,26 @@ class ParallelExecutor:
                             results.append((task_idx, e))
                         else:
                             exceptions.append((task_idx, e))
-            except concurrent.futures.TimeoutError:
+                
+                if remaining:
+                    now = _time_mod.time()
+                    if not done or now - last_heartbeat >= heartbeat_interval:
+                        elapsed = _time_mod.time() - start_time
+                        timeout_str = f"{total_timeout:.0f}" if total_timeout else "∞"
+                        log_print(f"⏳ [{task_name}] {len(completed_indices)}/{len(future_to_task)} done, {len(remaining)} in progress ({elapsed:.0f}s / {timeout_str}s)")
+                        last_heartbeat = now
+                    _sys_mod.stdout.flush()
+                    _sys_mod.stderr.flush()
+                    if not done:
+                        remaining_timeout = (total_timeout - elapsed) if total_timeout else sleep_interval
+                        _time_mod.sleep(min(sleep_interval, max(0.1, remaining_timeout)))
+        finally:
+            if timed_out:
                 if logger:
-                    logger.error(f"⏱️  Total timeout ({total_timeout}s) exceeded for {task_name}")
-                if not return_exceptions:
-                    raise
+                    logger.warning(f"🛑 [{task_name}] Forcing executor shutdown (wait=False) after timeout to prevent hang")
+                else:
+                    log_print(f"🛑 [{task_name}] Forcing executor shutdown (wait=False) after timeout to prevent hang", level="WARNING")
+            executor.shutdown(wait=False, cancel_futures=timed_out)
         
         results.sort(key=lambda x: x[0])
         
@@ -9576,7 +10683,7 @@ class CSVParser:
             rows = list(reader)
             
             if expected_fields and rows:
-                actual_fields_lower = {k.lower().strip(): k for k in rows[0].keys()}
+                actual_fields_lower = {k.lower().strip(): k for k in rows[0].keys() if k is not None}
                 missing_fields = {f for f in expected_fields if f.lower().strip() not in actual_fields_lower}
                 if missing_fields and logger:
                     logger.warning(f"⚠️  Missing expected CSV fields{f' for {context}' if context else ''}: {missing_fields}")
@@ -9725,14 +10832,18 @@ class TimeoutHandler:
         Returns:
             Result of func() or fallback on timeout
         """
-        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+        from concurrent.futures import TimeoutError as FuturesTimeoutError
         
-        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="Timeout") as executor:
+        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="Timeout")
+        timed_out = False
+        try:
             future = executor.submit(func)
             try:
-                result = future.result(timeout=timeout_seconds)
+                result = _safe_future_result(future, timeout=timeout_seconds)
                 return result
-            except FuturesTimeoutError:
+            except (FuturesTimeoutError, concurrent.futures.TimeoutError):
+                timed_out = True
+                future.cancel()
                 if logger:
                     logger.warning(f"⏱️  Timeout ({timeout_seconds}s) exceeded{f' for {context}' if context else ''}")
                 if fallback is not None:
@@ -9742,6 +10853,8 @@ class TimeoutHandler:
                 if logger:
                     logger.error(f"❌ Error during execution{f' for {context}' if context else ''}: {get_clean_error_message(e)}")
                 raise
+        finally:
+            executor.shutdown(wait=False, cancel_futures=timed_out)
 
 
 
@@ -9873,21 +10986,24 @@ class TableSizeAnalyzer:
                     self.logger.error(f"Failed to analyze schema {schema_key}: {get_clean_error_message(e)}")
         else:
             # Parallel execution for top-level calls
-            with ThreadPoolExecutor(max_workers=max_parallelism, thread_name_prefix="SchemaAnalyzer") as executor:
-                futures = {executor.submit(analyze_schema_group, item): item[0] 
+            with _SafeExecutorContext(max_workers=max_parallelism, thread_name_prefix="SchemaAnalyzer", logger=self.logger, name="SchemaAnalyzer") as ctx:
+                futures = {ctx.submit(analyze_schema_group, item): item[0] 
                           for item in schema_groups.items()}
                 
-                # Add timeout to prevent indefinite hangs (5 minutes per schema group)
                 total_timeout = len(futures) * 300
-                for future in concurrent.futures.as_completed(futures, timeout=total_timeout):
-                    schema_key = futures[future]
-                    try:
-                        schema_results = future.result(timeout=300)
-                        results.extend(schema_results)
-                    except concurrent.futures.TimeoutError:
-                        self.logger.error(f"Schema analysis timed out for {schema_key} after 5 minutes")
-                    except Exception as e:
-                        self.logger.error(f"Failed to analyze schema {schema_key}: {get_clean_error_message(e)}")
+                try:
+                    for future in safe_as_completed(futures, timeout=total_timeout):
+                        schema_key = futures[future]
+                        try:
+                            schema_results = future.result(timeout=300)
+                            results.extend(schema_results)
+                        except concurrent.futures.TimeoutError:
+                            self.logger.error(f"Schema analysis timed out for {schema_key} after 5 minutes")
+                        except Exception as e:
+                            self.logger.error(f"Failed to analyze schema {schema_key}: {get_clean_error_message(e)}")
+                except concurrent.futures.TimeoutError:
+                    ctx.mark_timed_out()
+                    self.logger.error(f"Overall schema analysis timeout ({total_timeout}s). Proceeding with partial results.")
         
         return results
     
@@ -9900,7 +11016,7 @@ class TableSizeAnalyzer:
             count = df.filter(~col("col_name").startswith("#")).count()
             return count
         except Exception as e:
-            self.logger.debug(f"Error getting column count for {catalog}.{schema}.{table}: {e}")
+            self.logger.debug(f"Error getting column count for {catalog}.{schema}.{table}: {get_clean_error_message(e, max_chars=2000)}")
             return 0
     
     def _categorize_table(self, num_columns):
@@ -10134,9 +11250,28 @@ class DataLoader:
             if cat:
                 unique_catalogs.add(cat)
         
-        self.logger.info(f"Initializing capabilities for catalogs: {unique_catalogs}")
-        for catalog in unique_catalogs:
-            self.catalog_capabilities[catalog] = self._check_catalog_capability(catalog)
+        self.logger.info(f"Initializing capabilities for {len(unique_catalogs)} catalogs in parallel: {unique_catalogs}")
+        if len(unique_catalogs) > 1:
+            with _SafeExecutorContext(max_workers=min(len(unique_catalogs), METADATA_PARALLELISM), thread_name_prefix="cat_cap", logger=self.logger, name="CatalogCapabilities") as ctx:
+                cap_futures = {ctx.submit(self._check_catalog_capability, cat): cat for cat in unique_catalogs}
+                try:
+                    for future in safe_as_completed(cap_futures, timeout=120):
+                        cat = cap_futures[future]
+                        try:
+                            self.catalog_capabilities[cat] = future.result(timeout=60)
+                        except Exception as exc:
+                            self.logger.warning(f"Catalog capability check failed for '{cat}': {get_clean_error_message(exc)}")
+                            self.catalog_capabilities[cat] = False
+                except concurrent.futures.TimeoutError:
+                    ctx.mark_timed_out()
+                    self.logger.error("Catalog capability checks timed out globally (120s)")
+                    for future in cap_futures:
+                        if not future.done():
+                            cat = cap_futures[future]
+                            self.catalog_capabilities[cat] = False
+        else:
+            for catalog in unique_catalogs:
+                self.catalog_capabilities[catalog] = self._check_catalog_capability(catalog)
         self.logger.info(f"Capabilities found: {self.catalog_capabilities}")
 
         # === MODIFIED: Build the database queue and individual tables list ===
@@ -10169,15 +11304,39 @@ class DataLoader:
                 self.logger.warning(f"Skipping malformed table name: {t} (expected format: catalog.schema.table)")
         
         # 3. From catalogs (schemas from catalogs should also expand ALL tables)
-        for cat in self.catalogs_to_process:
-            if not self.catalog_capabilities.get(cat, False):
-                 self.logger.warning(f"Skipping schema discovery for catalog `{cat}`: Lacks information_schema support and fallback failed.")
-                 continue
-            self.logger.info(f"Fetching schemas for catalog: {cat}")
-            schemas_in_cat = self._fetch_schemas_for_catalog(cat)
-            for db in schemas_in_cat:
-                db_set.add((cat, db))
-                self.explicit_schemas_set.add((cat, db))  # Mark as explicit - expand ALL tables
+        eligible_catalogs = [cat for cat in self.catalogs_to_process if self.catalog_capabilities.get(cat, False)]
+        skipped_catalogs = [cat for cat in self.catalogs_to_process if not self.catalog_capabilities.get(cat, False)]
+        for cat in skipped_catalogs:
+            self.logger.warning(f"Skipping schema discovery for catalog `{cat}`: Lacks information_schema support and fallback failed.")
+        
+        if len(eligible_catalogs) > 1:
+            _schema_lock = threading.Lock()
+            def _fetch_catalog_schemas(cat):
+                self.logger.info(f"Fetching schemas for catalog: {cat}")
+                return cat, self._fetch_schemas_for_catalog(cat)
+            
+            with _SafeExecutorContext(max_workers=min(len(eligible_catalogs), METADATA_PARALLELISM), thread_name_prefix="cat_sch", logger=self.logger, name="SchemaDiscovery") as ctx:
+                sch_futures = {ctx.submit(_fetch_catalog_schemas, cat): cat for cat in eligible_catalogs}
+                try:
+                    for future in safe_as_completed(sch_futures, timeout=300):
+                        try:
+                            cat, schemas_in_cat = future.result(timeout=120)
+                            with _schema_lock:
+                                for db in schemas_in_cat:
+                                    db_set.add((cat, db))
+                                    self.explicit_schemas_set.add((cat, db))
+                        except Exception as exc:
+                            self.logger.error(f"Schema discovery failed for catalog: {get_clean_error_message(exc)}")
+                except concurrent.futures.TimeoutError:
+                    ctx.mark_timed_out()
+                    self.logger.error("Schema discovery timed out globally (300s)")
+        else:
+            for cat in eligible_catalogs:
+                self.logger.info(f"Fetching schemas for catalog: {cat}")
+                schemas_in_cat = self._fetch_schemas_for_catalog(cat)
+                for db in schemas_in_cat:
+                    db_set.add((cat, db))
+                    self.explicit_schemas_set.add((cat, db))
         
         self.database_queue = sorted(list(db_set)) # Sort for deterministic order
         self.logger.info(f"Found {len(self.database_queue)} unique databases to process.")
@@ -10235,7 +11394,7 @@ class DataLoader:
                 all_schemas = [row[col_name] for row in df.orderBy(col_name).collect()]
                 return [s for s in all_schemas if s != 'information_schema']
             except Exception as e_show_schemas:
-                self.logger.error(f"Error listing schemas for catalog `{catalog_name}`. All fallbacks failed: {e_show_schemas}")
+                self.logger.error(f"Error listing schemas for catalog `{catalog_name}`. All fallbacks failed: {get_clean_error_message(e_show_schemas)}")
                 return []
 
     # === MODIFIED: Added streaming/pagination support for memory efficiency ===
@@ -10712,15 +11871,21 @@ class DataLoader:
             all_column_details = []
             
             def fetch_details_with_sampling(args):
-                # Apply sampling based on enable_column_sampling flag
                 return self._get_table_details(*args, apply_sampling=self.enable_column_sampling)
             
-            with concurrent.futures.ThreadPoolExecutor(max_workers=column_parallelism) as executor:
-                results = executor.map(fetch_details_with_sampling, batch_table_tuples)
-                
-                for column_list in results:
-                    if column_list:
-                        all_column_details.extend(column_list)
+            with _SafeExecutorContext(max_workers=column_parallelism, thread_name_prefix="tbl_detail", logger=self.logger, name="TableDetailsBatch") as ctx:
+                detail_futures = [ctx.submit(fetch_details_with_sampling, args) for args in batch_table_tuples]
+                try:
+                    for future in safe_as_completed(detail_futures, timeout=600):
+                        try:
+                            column_list = future.result(timeout=120)
+                            if column_list:
+                                all_column_details.extend(column_list)
+                        except Exception as exc:
+                            self.logger.warning(f"Table detail fetch failed: {get_clean_error_message(exc)}")
+                except concurrent.futures.TimeoutError:
+                    ctx.mark_timed_out()
+                    self.logger.error("Table details batch timed out globally (600s)")
             
             self.logger.info(f"   ✓ Batch {batch_num} loaded: {len(all_column_details)} columns from {len(batch_table_tuples)} tables")
             
@@ -10759,12 +11924,19 @@ class DataLoader:
             def fetch_details_with_sampling(args):
                 return self._get_table_details(*args, apply_sampling=self.enable_column_sampling)
             
-            with concurrent.futures.ThreadPoolExecutor(max_workers=column_parallelism) as executor:
-                results = executor.map(fetch_details_with_sampling, batch_table_tuples)
-                
-                for column_list in results:
-                    if column_list:
-                        all_column_details.extend(column_list)
+            with _SafeExecutorContext(max_workers=column_parallelism, thread_name_prefix="tbl_detail_sp", logger=self.logger, name="TableDetailsSinglePass") as ctx:
+                detail_futures = [ctx.submit(fetch_details_with_sampling, args) for args in batch_table_tuples]
+                try:
+                    for future in safe_as_completed(detail_futures, timeout=600):
+                        try:
+                            column_list = future.result(timeout=120)
+                            if column_list:
+                                all_column_details.extend(column_list)
+                        except Exception as exc:
+                            self.logger.warning(f"Table detail fetch failed: {get_clean_error_message(exc)}")
+                except concurrent.futures.TimeoutError:
+                    ctx.mark_timed_out()
+                    self.logger.error("Table details single-pass batch timed out globally (600s)")
             
             # Batch complete - high-level logging only
             
@@ -10836,7 +12008,7 @@ class DataLoader:
                     # Extract clean error message without stack trace for console
                     error_msg = get_clean_error_message(e)
                     self.logger.warning(f"   Could not count tables in {db_fqn}: {error_msg}. Using non-streaming mode.")
-                    self.logger.debug(f"   Full error details: {e}")  # Full trace to log file only
+                    self.logger.debug(f"   Full error details: {get_clean_error_message(e, max_chars=2000)}")  # Full trace to log file only
                     use_streaming = False  # Fallback to non-streaming
                 
                 if use_streaming:
@@ -10904,32 +12076,33 @@ class DataLoader:
             )
             log_adaptive_parallelism_decision("schema_discovery", discovery_parallelism, self.max_parallelism, reason)
             
-            with ThreadPoolExecutor(max_workers=discovery_parallelism, thread_name_prefix="SchemaDiscovery") as executor:
-                futures = {executor.submit(discover_and_analyze_schema, schema_tuple): schema_tuple 
+            with _SafeExecutorContext(max_workers=discovery_parallelism, thread_name_prefix="SchemaDiscovery", logger=self.logger, name="SchemaDiscovery") as ctx:
+                futures = {ctx.submit(discover_and_analyze_schema, schema_tuple): schema_tuple 
                           for schema_tuple in self.database_queue}
                 
                 completed = 0
                 total = len(self.database_queue)
                 self.logger.info(f"      Submitted {total} schemas for parallel discovery...")
                 
-                # Add timeout to prevent infinite hangs
                 timeout_per_schema = self.schema_timeout_seconds
                 
-                for future in concurrent.futures.as_completed(futures, timeout=timeout_per_schema * total):
-                    schema_tuple = futures[future]
-                    completed += 1
-                    try:
-                        # Add per-future timeout as well
-                        schema_size_infos = future.result(timeout=timeout_per_schema)
-                        all_table_size_infos.extend(schema_size_infos)
-                        self.logger.info(f"      Progress: {completed}/{total} schemas analyzed, {len(all_table_size_infos)} tables discovered so far")
-                    except concurrent.futures.TimeoutError:
-                        timeout_minutes = timeout_per_schema // 60
-                        self.logger.error(f"⏱️  Timeout analyzing schema {schema_tuple} (>{timeout_minutes} min). Skipping this schema.")
-                    except Exception as e:
-                        self.logger.error(f"Failed to analyze schema {schema_tuple}: {e}")
+                try:
+                    for future in safe_as_completed(futures, timeout=timeout_per_schema * total):
+                        schema_tuple = futures[future]
+                        completed += 1
+                        try:
+                            schema_size_infos = future.result(timeout=timeout_per_schema)
+                            all_table_size_infos.extend(schema_size_infos)
+                            self.logger.info(f"      Progress: {completed}/{total} schemas analyzed, {len(all_table_size_infos)} tables discovered so far")
+                        except concurrent.futures.TimeoutError:
+                            timeout_minutes = timeout_per_schema // 60
+                            self.logger.error(f"⏱️  Timeout analyzing schema {schema_tuple} (>{timeout_minutes} min). Skipping this schema.")
+                        except Exception as e:
+                            self.logger.error(f"Failed to analyze schema {schema_tuple}: {get_clean_error_message(e)}")
+                except concurrent.futures.TimeoutError:
+                    ctx.mark_timed_out()
+                    self.logger.error(f"⏱️  Overall schema discovery timeout ({timeout_per_schema * total}s). Proceeding with {completed}/{total} schemas.")
                 
-                # Log final completion
                 if completed < total:
                     self.logger.warning(f"⚠️  Only {completed}/{total} schemas completed. {total - completed} schemas timed out or failed.")
             
@@ -11016,32 +12189,33 @@ class DataLoader:
             )
             log_adaptive_parallelism_decision("table_discovery", table_discovery_parallelism, self.max_parallelism, reason)
             
-            with ThreadPoolExecutor(max_workers=table_discovery_parallelism, thread_name_prefix="TableDiscovery") as executor:
-                futures = {executor.submit(fetch_schema_tables, schema_tuple): schema_tuple 
+            with _SafeExecutorContext(max_workers=table_discovery_parallelism, thread_name_prefix="TableDiscovery", logger=self.logger, name="TableDiscovery") as ctx:
+                futures = {ctx.submit(fetch_schema_tables, schema_tuple): schema_tuple 
                           for schema_tuple in self.database_queue}
                 
                 completed = 0
                 total = len(self.database_queue)
                 self.logger.info(f"      Submitted {total} schemas for parallel discovery...")
                 
-                # Add timeout to prevent infinite hangs
                 timeout_per_schema = self.schema_timeout_seconds
                 
-                for future in concurrent.futures.as_completed(futures, timeout=timeout_per_schema * total):
-                    schema_tuple = futures[future]
-                    completed += 1
-                    try:
-                        # Add per-future timeout as well
-                        schema_tuples = future.result(timeout=timeout_per_schema)
-                        self.all_table_tuples.extend(schema_tuples)
-                        self.logger.info(f"      Progress: {completed}/{total} schemas processed, {len(self.all_table_tuples)} tables discovered so far")
-                    except concurrent.futures.TimeoutError:
-                        timeout_minutes = timeout_per_schema // 60
-                        self.logger.error(f"⏱️  Timeout fetching tables for schema {schema_tuple} (>{timeout_minutes} min). Skipping this schema.")
-                    except Exception as e:
-                        self.logger.error(f"Failed to fetch tables for schema {schema_tuple}: {e}")
+                try:
+                    for future in safe_as_completed(futures, timeout=timeout_per_schema * total):
+                        schema_tuple = futures[future]
+                        completed += 1
+                        try:
+                            schema_tuples = future.result(timeout=timeout_per_schema)
+                            self.all_table_tuples.extend(schema_tuples)
+                            self.logger.info(f"      Progress: {completed}/{total} schemas processed, {len(self.all_table_tuples)} tables discovered so far")
+                        except concurrent.futures.TimeoutError:
+                            timeout_minutes = timeout_per_schema // 60
+                            self.logger.error(f"⏱️  Timeout fetching tables for schema {schema_tuple} (>{timeout_minutes} min). Skipping this schema.")
+                        except Exception as e:
+                            self.logger.error(f"Failed to fetch tables for schema {schema_tuple}: {get_clean_error_message(e)}")
+                except concurrent.futures.TimeoutError:
+                    ctx.mark_timed_out()
+                    self.logger.error(f"⏱️  Overall table discovery timeout ({timeout_per_schema * total}s). Proceeding with {completed}/{total} schemas.")
                 
-                # Log final completion
                 if completed < total:
                     self.logger.warning(f"⚠️  Only {completed}/{total} schemas completed. {total - completed} schemas timed out or failed.")
             
@@ -11283,11 +12457,11 @@ class LakeViewDashboard:
         
         except (WidgetFailedToCreate, AttributeError, IndexError, TypeError) as e:
             # Catch "expected" failures (bad type, bad SQL, bad spec, NoneType errors)
-            self.logger.warning(f"Skipping widget '{viz_title}' during final assembly: {e}")
+            self.logger.warning(f"Skipping widget '{viz_title}' during final assembly: {get_clean_error_message(e)}")
             return False # Return False on "expected" failure
         except Exception as e:
             # Catch any other unexpected errors
-            self.logger.error(f"Unexpected error adding widget '{viz_title}': {e}")
+            self.logger.error(f"Unexpected error adding widget '{viz_title}': {get_clean_error_message(e)}")
             return False # Return False on "unexpected" failure
         
 PROMPT_TEMPLATES["DASHBOARDS_GEN_PROMPT"] = """
@@ -11454,26 +12628,52 @@ PROMPT_TEMPLATES["FILTER_BUSINESS_TABLES_PROMPT"] = """You are a **Senior Data A
 
 **DATA CATEGORY CLASSIFICATION (SEMANTIC — not score-based)**:
 
+Use the business context above to understand what this company does, then classify EACH table by applying the 3-QUESTION FRAMEWORK below. Do NOT rely on table names alone — reason about what data the table holds in the context of THIS specific industry and business.
+
+**🚨 3-QUESTION FRAMEWORK (apply to EVERY table) 🚨**
+
+**Q1: "Does a NEW row get inserted every time a business EVENT occurs?"**
+  YES → likely **TRANSACTIONAL**. The table records discrete business events — things that HAPPENED at a specific moment. Each row represents one occurrence (one sale, one payment, one inspection, one shipment, one measurement). The table grows continuously over time. Rows are rarely updated after insertion.
+
+**Q2: "Does this table describe WHAT something IS — its identity, attributes, or configuration — rather than WHAT HAPPENED?"**
+  YES → likely **MASTER**. The table represents business ENTITIES — things that EXIST and have a lifecycle (active/inactive). Think: people, organizations, physical assets, products, locations, contracts, plans. The table is updated occasionally when entity attributes change, but new rows are NOT inserted for each business event.
+
+**Q3: "Is this a finite, controlled lookup set that classifies or categorizes data in other tables?"**
+  YES → likely **REFERENCE**. The table is a small, stable set of codes, types, categories, or rules. It changes rarely (quarterly/annually). Other tables reference it via foreign keys to categorize their data.
+
 **TRANSACTIONAL** — "VERBS" of the business (events that HAPPENED):
-- Each row = one discrete business event with a PRIMARY BUSINESS TIMESTAMP (order_date, payment_date, shipment_date, measurement_time — NOT last_updated/modified_at which are housekeeping)
-- Insert-heavy, rarely updated. High volume, grows over time. References MASTER entities via FK.
-- Examples: orders, payments, shipments, bookings, production_runs, sensor_readings, quality_measurements
-- Name patterns: `*_log` (business), `*_history`, `*_movement`, `*_transfer`, `*_transaction`
+- Each row = one discrete business event with a PRIMARY BUSINESS TIMESTAMP — a timestamp that records WHEN THE EVENT OCCURRED (not when the row was created/modified).
+- Insert-heavy, rarely updated after creation. High volume, grows continuously over time.
+- Typically references MASTER entities via FK (e.g., a transaction row points to a customer row).
 
 **MASTER** — "NOUNS" of the business (entities that EXIST):
-- Core business entity with lifecycle (active→inactive). Updated occasionally. Has natural ID (customer_id, product_code).
-- Timestamps are METADATA (created_at, last_updated, hire_date = entity ATTRIBUTES), NOT events.
-- Examples: customers, employees, products, vendors, accounts, contracts, assets, equipment
-- ❌ `customer.created_at` does NOT make it transactional — it's housekeeping.
+- Core business entity with lifecycle. Has a natural business identifier (ID, code, number).
+- Timestamps on master tables are METADATA ABOUT the entity (created_at, last_updated, effective_date, hire_date, registration_date) — these do NOT make it transactional. These timestamps describe WHEN THE ENTITY WAS CREATED/CHANGED, not when business events happened.
+- Updated occasionally when attributes change. Does NOT grow with each business transaction.
 
-**REFERENCE** — "ADJECTIVES" of the business (lookup codes):
-- Finite controlled set (typically <1000 rows). Classifies/categorizes other data. Rarely changes.
-- Name patterns: `*_type`, `*_status`, `*_code`, `*_category`, `*_grade`, `*_level`, singular lookups (country, currency, gender)
+**REFERENCE** — "ADJECTIVES" of the business (lookup/configuration codes):
+- Finite controlled set (typically <1000 rows). Classifies, categorizes, or configures other data.
+- Changes rarely (quarterly, annually, or never). Other tables point to it for classification.
 
-**KEY TIMESTAMP RULE**: Ask "Is this timestamp the REASON the row exists (event) or just metadata ABOUT the row (housekeeping)?"
-- Event timestamp → TRANSACTIONAL | Housekeeping → check MASTER or REFERENCE
+**🚨 CRITICAL ANTI-MISCLASSIFICATION RULES (apply to ALL industries) 🚨**
 
-**Decision tree**: Finite codes (<1000 rows, classifies data) → REFERENCE. Each row = business event with event timestamp → TRANSACTIONAL. Core entity with lifecycle → MASTER. When in doubt → MASTER.
+The #1 error is classifying MASTER tables as TRANSACTIONAL. Apply these rules to catch it:
+
+1. **THE ENTITY TEST**: If the table represents a WHO (person, organization, partner), a WHAT (asset, product, service, resource), or a WHERE (location, facility, infrastructure) → it is MASTER or REFERENCE, NOT transactional. These tables describe things that EXIST, regardless of whether business events happen.
+
+2. **THE EVENT TEST**: A table is ONLY transactional if each row captures a DISCRETE BUSINESS EVENT — something that happened at a specific point in time that would NOT exist if the event hadn't occurred. Ask: "If this business event hadn't happened, would this row not exist?" If yes → TRANSACTIONAL. If the row exists because the entity exists (regardless of events) → MASTER.
+
+3. **THE TIMESTAMP TEST**: EVERY table has timestamps. The question is: does the timestamp represent the REASON the row exists (an event occurring), or is it just metadata about the row? If the table's primary purpose is to record "something happened at time X" → TRANSACTIONAL. If the timestamp is just "this entity was created/updated at time X" → MASTER/REFERENCE.
+
+4. **THE GROWTH TEST**: Does this table grow proportionally with business activity? If transaction volume doubles, does this table's row count roughly double? If yes → TRANSACTIONAL. If the table stays roughly the same size regardless of business volume → MASTER/REFERENCE.
+
+5. **THE FK DIRECTION TEST**: Does this table POINT TO other tables (has FK columns referencing master/reference entities), or do other tables POINT TO it (other tables have FK columns referencing this table's ID)? Tables that are POINTED TO by transactions are typically MASTER. Tables that POINT TO master entities are typically TRANSACTIONAL.
+
+6. **PLANS/SCHEDULES/CONFIGURATIONS are MASTER, not TRANSACTIONAL**: A planned schedule, a pricing rule, a capacity allocation, a route definition, or a configuration table describes HOW things SHOULD work — not events that happened. Even if schedules change over time, each row represents a PLAN, not an event.
+
+7. **CATALOGS/DIRECTORIES/REGISTRIES are MASTER or REFERENCE**: A product catalog, a partner directory, an asset registry, a service listing — these describe what CAN exist, not what DID happen.
+
+**WHEN IN DOUBT → MASTER**: It is ALWAYS safer to classify as MASTER than as TRANSACTIONAL. MASTER tables are still available as JOIN context for use case generation. Misclassifying as TRANSACTIONAL wastes generation resources on static data and produces low-quality use cases centered on entity attributes rather than business events.
 
 **TECHNICAL tables**: ONLY for IT infrastructure with ZERO business value: IT system logs, DB monitoring, server health, ETL orchestration, CI/CD, schema migrations, system configs.
 **Edge cases default to BUSINESS**: Business user activity logs → TRANSACTIONAL. Business audit tables → TRANSACTIONAL. Business config/pricing → REFERENCE/MASTER. Mixed (>10% business columns) → BUSINESS.
@@ -11489,7 +12689,7 @@ PROMPT_TEMPLATES["FILTER_BUSINESS_TABLES_PROMPT"] = """You are a **Senior Data A
 - Classification: "BUSINESS" or "TECHNICAL". Data Category: "MASTER", "TRANSACTIONAL", "REFERENCE", or "TECHNICAL".
 - ALL fields double-quoted. Classify EVERY table. When in doubt, prefer BUSINESS.
 
-Your response must START with: "Table Name","Classification","Business Score","Reason","honesty_score","honesty_justification"
+Your response must START with: "Table Name","Classification","Data Category","Business Score","Reason","honesty_score","honesty_justification"
 """ + HONESTY_CHECK_CSV
 
 # COMMAND ----------
@@ -11507,7 +12707,11 @@ class AIAgent:
 
     # === MODIFIED: Added prompt_templates parameter ===
     def __init__(self, spark, logger, worker_llm_config, judge_llm_config, prompt_templates: dict,
-                 default_timeout_seconds: int = 300, max_retry_attempts: int = 1):
+                 default_timeout_seconds: int = None, max_retry_attempts: int = None, status_emitter=None):
+        if default_timeout_seconds is None:
+            default_timeout_seconds = TECHNICAL_CONTEXT["runtime"]["llm_timeout_seconds"]
+        if max_retry_attempts is None:
+            max_retry_attempts = TECHNICAL_CONTEXT["runtime"]["max_retry_attempts"]
         self.spark = spark
         self.logger = logger
         self.worker_llm = worker_llm_config
@@ -11515,22 +12719,282 @@ class AIAgent:
         self.prompt_templates = prompt_templates  # <-- NEW: Store the dictionary
         self.current_language = "English"  # Default language for context limit calculations
         self.default_timeout_seconds = default_timeout_seconds
-        # Number of retries after the first attempt (global knob)
         self.max_retry_attempts = max(0, max_retry_attempts)
+        self.status_emitter = status_emitter
+        self._status_step_ids = {}
+        self._warning_seq = 0
         
-        # === NEW: Check if prompt dictionary is empty ===
+        self._llm_cache_dir = None
+        self._llm_cache_lock = threading.Lock()
+        
         if not self.prompt_templates:
             self.logger.warning("AIAgent initialized with an empty prompt_templates dictionary.")
+
+    def _utc_event_at(self):
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).isoformat()
+
+    def _derive_entity_id(self, prompt_name: str, step_name: str, result_json) -> str:
+        if isinstance(result_json, dict):
+            for key in ("entity_id", "domain_name", "use_case_id", "batch_id"):
+                value = result_json.get(key)
+                if value:
+                    return f"{prompt_name}:{value}"
+        return f"{prompt_name}:{step_name}"
+
+    def _enrich_status_payload(self, prompt_name: str, step_name: str, result_json):
+        payload = result_json if isinstance(result_json, dict) else {}
+        if "event_at" not in payload:
+            payload["event_at"] = self._utc_event_at()
+        if "entity_id" not in payload:
+            payload["entity_id"] = self._derive_entity_id(prompt_name, step_name, payload)
+        payload.setdefault("step_name", step_name)
+        payload.setdefault("prompt_name", prompt_name)
+        return payload
+
+    def _emit_runtime_warning(self, prompt_name: str, step_name: str, message: str, payload: dict = None):
+        import time
+        self._warning_seq += 1
+        warning_step = f"{step_name}__warning_{int(time.time() * 1000)}_{self._warning_seq}"
+        self._emit_status(
+            prompt_name=prompt_name,
+            step_name=warning_step,
+            status="ended_warning",
+            message=message,
+            result_json=payload if payload is not None else {}
+        )
+
+    def _emit_status(self, prompt_name: str, step_name: str, status: str, message: str = "", result_json=None):
+        if not self.status_emitter:
+            return
+        try:
+            payload = self._enrich_status_payload(prompt_name, step_name, result_json if result_json is not None else {})
+            key = f"{prompt_name}|{step_name}"
+            if status == "started":
+                step_id = self.status_emitter(
+                    prompt_name=prompt_name,
+                    step_name=step_name,
+                    status=status,
+                    message=message,
+                    result_json=payload,
+                    step_id=None
+                )
+                if step_id is not None:
+                    self._status_step_ids[key] = step_id
+                return
+
+            existing_step_id = self._status_step_ids.get(key)
+            self.status_emitter(
+                prompt_name=prompt_name,
+                step_name=step_name,
+                status=status,
+                message=message,
+                result_json=payload,
+                step_id=existing_step_id
+            )
+            if status.startswith("ended_"):
+                self._status_step_ids.pop(key, None)
+        except Exception:
+            pass
+
+    def _count_csv_rows_hint(self, csv_text: str) -> int:
+        if not csv_text:
+            return 0
+        lines = [ln for ln in str(csv_text).splitlines() if ln.strip()]
+        if not lines:
+            return 0
+        return max(0, len(lines) - 1)
+
+    def _extract_csv_rows(self, raw_response: str, max_rows: int = 200) -> tuple:
+        import csv
+        from io import StringIO
+        cleaned = clean_csv_response(raw_response) if raw_response else ""
+        if not cleaned or "," not in cleaned:
+            return [], 0, False
+        try:
+            reader = csv.DictReader(StringIO(cleaned))
+            rows = []
+            total = 0
+            for row in reader:
+                total += 1
+                if len(rows) < max_rows:
+                    rows.append({str(k): str(v) for k, v in row.items()})
+            return rows, total, total > len(rows)
+        except Exception:
+            return [], 0, False
+
+    def _extract_json_object(self, raw_response: str):
+        import json
+        candidates = []
+        if raw_response:
+            candidates.append(raw_response)
+            try:
+                candidates.append(clean_json_response(raw_response))
+            except Exception:
+                pass
+        for candidate in candidates:
+            if not candidate:
+                continue
+            try:
+                return json.loads(candidate)
+            except Exception:
+                continue
+        return None
+
+    def _build_started_status(self, prompt_name: str, step_name: str, prompt_vars: dict) -> tuple:
+        pv = prompt_vars if isinstance(prompt_vars, dict) else {}
+        summary = {"step_name": step_name, "prompt_name": prompt_name}
+        if "schema_markdown" in pv:
+            summary["schema_chars"] = len(str(pv.get("schema_markdown", "")))
+        if "foreign_key_relationships" in pv:
+            summary["fk_chars"] = len(str(pv.get("foreign_key_relationships", "")))
+        if "use_cases_csv" in pv:
+            summary["use_cases_input_count"] = self._count_csv_rows_hint(pv.get("use_cases_csv", ""))
+        if "batch_csv" in pv:
+            summary["batch_rows"] = self._count_csv_rows_hint(pv.get("batch_csv", ""))
+        if "domain_name" in pv:
+            summary["domain_name"] = str(pv.get("domain_name", ""))
+        if "target_language" in pv:
+            summary["target_language"] = str(pv.get("target_language", ""))
+        if "strategic_goals" in pv:
+            summary["strategic_goals_chars"] = len(str(pv.get("strategic_goals", "")))
+        message = f"{prompt_name} started"
+        details = []
+        if "schema_chars" in summary:
+            details.append(f"schema_chars={summary['schema_chars']}")
+        if "use_cases_input_count" in summary:
+            details.append(f"use_cases={summary['use_cases_input_count']}")
+        if "domain_name" in summary and summary["domain_name"]:
+            details.append(f"domain={summary['domain_name']}")
+        if details:
+            message = f"{prompt_name} started ({', '.join(details)})"
+        return message, summary
+
+    def _build_success_status(self, prompt_name: str, step_name: str, raw_response: str, response_schema) -> tuple:
+        payload = {
+            "step_name": step_name,
+            "prompt_name": prompt_name,
+            "response_type": "json" if response_schema else "raw",
+            "response_chars": len(raw_response or "")
+        }
+        rows, total_rows, truncated = self._extract_csv_rows(raw_response)
+        parsed_json = self._extract_json_object(raw_response)
+
+        if prompt_name in ("AI_USE_CASE_GEN_PROMPT", "STATS_USE_CASE_GEN_PROMPT", "BASE_USE_CASE_GEN_PROMPT", "UNSTRUCTURED_DATA_USE_CASE_GEN_PROMPT"):
+            use_cases = []
+            for r in rows:
+                use_cases.append({
+                    "id": r.get("No", ""),
+                    "name": r.get("Name", ""),
+                    "business_domain": r.get("Business Domain", ""),
+                    "subdomain": r.get("Subdomain", ""),
+                    "type": r.get("type", ""),
+                    "priority": r.get("Priority", "")
+                })
+            payload["use_cases"] = use_cases
+            payload["use_cases_count"] = total_rows
+            payload["is_truncated"] = truncated
+            return f"{prompt_name} completed with {total_rows} use cases", payload
+
+        if prompt_name in ("DOMAIN_FINDER_PROMPT", "SUBDOMAIN_DETECTOR_PROMPT", "DOMAINS_MERGER_PROMPT"):
+            if isinstance(parsed_json, dict):
+                domains = parsed_json.get("domains", parsed_json.get("domain_clusters", []))
+                payload["domains"] = domains if isinstance(domains, list) else []
+                payload["domains_count"] = len(payload["domains"])
+            elif rows:
+                payload["domains"] = rows
+                payload["domains_count"] = total_rows
+                payload["is_truncated"] = truncated
+            return f"{prompt_name} completed with {payload.get('domains_count', 0)} domains", payload
+
+        if prompt_name in ("USE_CASE_VALUE_SCORE_PROMPT", "USE_CASE_QUALITY_SCORE_PROMPT", "COMBINED_VALUE_QUALITY_SCORE_PROMPT", "REVIEW_USE_CASES_PROMPT"):
+            priorities = []
+            scored_use_cases = []
+            for r in rows:
+                item = {
+                    "id": r.get("No", ""),
+                    "name": r.get("Name", ""),
+                    "priority": r.get("Priority", r.get("priority", "")),
+                    "value": r.get("Value", r.get("value", "")),
+                    "feasibility": r.get("Feasibility", r.get("feasibility", "")),
+                    "quality": r.get("Quality", r.get("quality", ""))
+                }
+                scored_use_cases.append(item)
+                if item["priority"]:
+                    priorities.append({"id": item["id"], "priority": item["priority"]})
+            payload["scored_use_cases"] = scored_use_cases
+            payload["priorities"] = priorities
+            payload["scored_count"] = total_rows
+            payload["is_truncated"] = truncated
+            return f"{prompt_name} completed with {total_rows} scored use cases", payload
+
+        if prompt_name in ("USE_CASE_SQL_GEN_PROMPT", "USE_CASE_SQL_FIX_PROMPT", "INTERPRET_USER_SQL_REGENERATION_PROMPT"):
+            payload["sql_preview"] = (raw_response or "")[:2000]
+            return f"{prompt_name} completed", payload
+
+        if rows:
+            payload["rows"] = rows
+            payload["rows_count"] = total_rows
+            payload["is_truncated"] = truncated
+            return f"{prompt_name} completed with {total_rows} rows", payload
+        if parsed_json is not None:
+            payload["json"] = parsed_json
+            return f"{prompt_name} completed", payload
+        return f"{prompt_name} completed", payload
     
     def set_language(self, language: str):
-        """
-        Set the current language for context limit calculations.
-        
-        Args:
-            language: Language name (e.g., "English", "French", "Spanish")
-        """
         self.current_language = language
-        # Language set - no debug logging needed
+
+    def enable_llm_cache(self, session_id):
+        import tempfile, os
+        self._llm_cache_dir = os.path.join(tempfile.gettempdir(), f"inspire_{session_id}", "llm_cache")
+        os.makedirs(self._llm_cache_dir, exist_ok=True)
+        self.logger.info(f"LLM disk cache enabled: {self._llm_cache_dir}")
+
+    def cleanup_llm_cache(self):
+        import shutil
+        if self._llm_cache_dir:
+            try:
+                shutil.rmtree(self._llm_cache_dir, ignore_errors=True)
+                self.logger.info(f"LLM disk cache cleaned up: {self._llm_cache_dir}")
+            except Exception:
+                pass
+            self._llm_cache_dir = None
+
+    def _llm_cache_key(self, prompt: str, model: str) -> str:
+        import hashlib
+        h = hashlib.sha256((prompt + "||" + model).encode('utf-8', errors='replace')).hexdigest()[:32]
+        return h
+
+    def _llm_cache_get(self, prompt: str, model: str):
+        if not self._llm_cache_dir:
+            return None
+        import os
+        key = self._llm_cache_key(prompt, model)
+        path = os.path.join(self._llm_cache_dir, f"{key}.txt")
+        if os.path.exists(path):
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    cached = f.read()
+                if cached:
+                    self.logger.info(f"   LLM cache HIT: key={key[:12]}... ({len(cached):,} chars)")
+                    return cached
+            except Exception:
+                pass
+        return None
+
+    def _llm_cache_put(self, prompt: str, model: str, response: str):
+        if not self._llm_cache_dir or not response:
+            return
+        import os
+        key = self._llm_cache_key(prompt, model)
+        path = os.path.join(self._llm_cache_dir, f"{key}.txt")
+        try:
+            with self._llm_cache_lock:
+                with open(path, 'w', encoding='utf-8') as f:
+                    f.write(response)
+        except Exception:
+            pass
 
     _UNESCAPED_BRACE_RE = re.compile(r'(?<!\{)\{([^{}]+)\}(?!\})')
 
@@ -11585,286 +13049,468 @@ class AIAgent:
         try:
             return prompt_template.format(**prompt_vars)
         except KeyError as e:
-            self.logger.error(f"Failed to format prompt '{prompt_key}'. Missing variable: {e}")
+            self.logger.error(f"Failed to format prompt '{prompt_key}'. Missing variable: {get_clean_error_message(e)}")
             raise e
         except Exception as e:
-            self.logger.error(f"An unexpected error occurred during prompt formatting for '{prompt_key}': {e}")
+            self.logger.error(f"An unexpected error occurred during prompt formatting for '{prompt_key}': {get_clean_error_message(e)}")
             raise
 
-    def _call_ai_query(self, prompt: str, prompt_name: str, response_schema=None, model_override=None, timeout_seconds=None, max_retries=None, display_name=None) -> str:
+    def _call_ai_query(self, prompt: str, prompt_name: str, response_schema=None, model_override=None, timeout_seconds=None, max_retries=None, display_name=None, start_from_model=None, skip_cache=False, status_step_name=None) -> str:
         """
         Calls Databricks AI query function with the given prompt.
-        Now tracks statistics by prompt_name (actual template name) instead of step_name.
-        Includes resilience for "Input is too long" errors.
-        Performs pre-flight check to ensure prompt respects language-aware context limits.
-        Handles throttling and timeouts with automatic retry logic.
+        
+        Uses model_type cascade: resolves the prompt's model_type (thinker/worker) to an
+        ordered list of models. Tries the lowest-order model first; on failure, cascades
+        to the next model of the same type. Each model gets up to max_retries attempts
+        before cascading.
         
         Args:
             prompt: The prompt text
-            prompt_name: Name of the prompt template (for logging)
+            prompt_name: Name of the prompt template (for logging and model_type resolution)
             response_schema: Optional JSON schema for structured responses
-            model_override: Optional model name override
-            timeout_seconds: Timeout in seconds for LLM call (default: 420 seconds unless overridden)
-            max_retries: Maximum number of retry attempts for throttling/timeouts (default: 3)
+            model_override: Optional endpoint name override (skips cascade, uses only this model)
+            timeout_seconds: Timeout in seconds for LLM call
+            max_retries: Maximum number of retry attempts per model for throttling/timeouts
             display_name: Optional display name for heartbeat logs (defaults to prompt_name)
+            start_from_model: Optional model name/endpoint to start cascade from (skips earlier models)
         
         Returns:
             Raw response string from the LLM
         """
         import time
-        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
-        
-        model = model_override if model_override else self.worker_llm
         
         heartbeat_name = display_name if display_name else prompt_name
+        status_step = status_step_name if status_step_name else heartbeat_name
         
-        # Resolve timeout/retries from configurable defaults
-        attempts_allowed = (max_retries if max_retries is not None else self.max_retry_attempts) + 1
+        attempts_per_model = (max_retries if max_retries is not None else self.max_retry_attempts) + 1
         timeout_val = timeout_seconds if timeout_seconds is not None else self.default_timeout_seconds
         
-        # SAFETY: Ensure timeout_val is positive and not None
         if not timeout_val or timeout_val <= 0:
             self.logger.warning(f"Timeout value '{timeout_val}' is invalid. Enforcing safety fallback of 300s.")
             timeout_val = 300
 
-        # Try the LLM call with retries for throttling and timeouts
-        for attempt in range(1, attempts_allowed + 1):
-            try:
-            
-                if attempt > 1:
-                    self.logger.info(f"🔄 [{prompt_name}] Retry attempt {attempt}/{attempts_allowed} after error...")
-                
-                # PRE-FLIGHT CHECK: Ensure prompt length is within language-aware context limit
-                # Uses BOTH char-based limit (for non-SQL prompts) AND conservative token estimation (for SQL gen)
-                max_context_chars = get_max_context_chars(self.current_language, prompt_name)
-                prompt_len = len(prompt)
-                
-                input_token_limit_val = get_model_token_limit(prompt_name)
-                conservative_char_limit = int(input_token_limit_val * 3.2)
-                effective_limit = min(max_context_chars, conservative_char_limit)
-                
-                if prompt_len > effective_limit:
-                    estimated_tokens = int(prompt_len / 3.2)
-                    self.logger.error(
-                        f"Prompt length ({prompt_len:,} chars, ~{estimated_tokens:,} est. tokens) exceeds limit "
-                        f"({effective_limit:,} chars / {input_token_limit_val:,} tokens) "
-                        f"for language '{self.current_language}' and prompt: {prompt_name}. This will likely fail."
-                    )
-                    raise InputTooLongError(
-                        f"Input length: {prompt_len:,} characters (~{estimated_tokens:,} tokens) exceeds context limit of {effective_limit:,} characters "
-                        f"({input_token_limit_val:,} tokens) "
-                        f"for language '{self.current_language}'. "
-                        f"Prompt: {prompt_name}, Model: {model}. Please batch your input."
-                    )
-                
-                if prompt_len > (effective_limit * 0.9):
-                    pass
-                
-                # Prepare response_format if schema is provided
-                response_format_str = ""
-                
-                # CRITICAL FIX: Set max_tokens to prevent output truncation
-                # Claude Sonnet 4 defaults to only 1000 output tokens without explicit max_tokens!
-                # This caused queries exceeding ~350 lines to be truncated mid-response.
-                output_token_limit = get_model_output_token_limit(prompt_name)
-                # Use 90% of the model's max output tokens as a safe limit, with a minimum floor of 32000 tokens
-                max_output_tokens = max(32000, int(output_token_limit * 0.9))
-                
-                # Log the max_tokens being used for debugging truncation issues
-                self.logger.info(f"   [{prompt_name}] Setting max_tokens={max_output_tokens:,} (model limit: {output_token_limit:,})")
-                
-                if response_schema:
-                    response_format_str = json.dumps({"type": "json_schema", "json_schema": response_schema}, separators=(',', ':')).replace("'", "''")
-                    ai_query_sql = f"SELECT ai_query('{model}', '{replace_single_quote(prompt)}', responseFormat => '{response_format_str}', modelParameters => named_struct('max_tokens', {max_output_tokens})) AS ai_response"
-                else:
-                    ai_query_sql = f"SELECT ai_query('{model}', '{replace_single_quote(prompt)}', modelParameters => named_struct('max_tokens', {max_output_tokens})) AS ai_response"
-                
-                # Execute with timeout using simple Thread with watchdog pattern
-                response_rows = None
-                error_holder = [None]
-                completed_flag = [False]
-                
-                def execute_query():
-                    try:
-                        error_holder[0] = None
-                        result = execute_sql(self.spark, ai_query_sql, self.logger)
-                        nonlocal response_rows
-                        response_rows = result
-                        completed_flag[0] = True
-                    except Exception as e:
-                        error_holder[0] = e
-                        completed_flag[0] = True
-                
-                query_thread = threading.Thread(target=execute_query, name=f"LLM_Query_{prompt_name}")
-                query_thread.daemon = True
-                start_time = time.time()
-                query_thread.start()
-                
-                # Use polling with small intervals instead of single long join
-                # This ensures we can detect hangs even if join() misbehaves
-                poll_interval = 5  # Check every 5 seconds
-                while True:
-                    query_thread.join(timeout=poll_interval)
-                    elapsed = time.time() - start_time
-                    
-                    if completed_flag[0] or not query_thread.is_alive():
-                        break
-                    
-                    if elapsed >= timeout_val:
-                        log_print(f"⏱️  [{prompt_name}] LLM call TIMED OUT after {elapsed:.1f}s (attempt {attempt}/{attempts_allowed}) - Thread still alive", level="ERROR")
-                        self.logger.error(f"⏱️  [{prompt_name}] LLM call timed out after {elapsed:.1f} seconds (attempt {attempt}/{attempts_allowed})")
-                        break
-                    
-                    # Log heartbeat every 60 seconds to show progress
-                    if elapsed > 0 and int(elapsed) % 60 == 0 and int(elapsed) != int(elapsed - poll_interval):
-                        log_print(f"[{heartbeat_name}] Still waiting... {elapsed:.0f}s elapsed (timeout: {timeout_val}s)")
-                
-                if query_thread.is_alive():
-                    raise Exception(f"LLM call timed out after {timeout_val} seconds")
-                
-                if error_holder[0] is not None:
-                    raise error_holder[0]
-                
-                raw_response = response_rows[0].ai_response if response_rows and response_rows[0] else ""
-                del response_rows, ai_query_sql, error_holder, completed_flag
-                
-                honesty_score, honesty_justification, cleaned_response = extract_honesty_score(raw_response, self.logger)
-                del raw_response
-                
-                if honesty_score is not None:
-                    if honesty_justification:
-                        self.logger.info(f"🔮✨ HONESTY CHECK [{prompt_name}] Score: {honesty_score}% | {honesty_justification} ✨🔮")
-                    else:
-                        self.logger.info(f"🔮✨ HONESTY CHECK [{prompt_name}] Score: {honesty_score}% ✨🔮")
-                
-                input_len = len(prompt)
-                output_len = len(cleaned_response)
+        # --- Build model cascade ---
+        if model_override:
+            override_config = next(
+                (m for m in TECHNICAL_CONTEXT["models"] if m["llm_endpoint_name"] == model_override),
+                None
+            )
+            if not override_config:
+                min_output_limit = min(m.get("llm_output_context_tokens_count", 25000) for m in TECHNICAL_CONTEXT["models"])
+                override_config = {
+                    "name": model_override,
+                    "llm_endpoint_name": model_override,
+                    "llm_input_context_tokens_count": 131000,
+                    "llm_output_context_tokens_count": min_output_limit,
+                    "order": 999,
+                    "type": "worker"
+                }
+            model_cascade = [override_config]
+        elif start_from_model:
+            full_cascade = get_model_cascade_for_prompt(prompt_name)
+            if not full_cascade:
+                full_cascade = sorted(TECHNICAL_CONTEXT["models"], key=lambda m: m.get("order", 999))
+            found_start = False
+            model_cascade = []
+            for m in full_cascade:
+                if m["llm_endpoint_name"] == start_from_model or m.get("name") == start_from_model:
+                    found_start = True
+                if found_start:
+                    model_cascade.append(m)
+            if not model_cascade:
+                self.logger.warning(f"start_from_model '{start_from_model}' not found in cascade, using full cascade")
+                model_cascade = full_cascade
+        else:
+            model_cascade = get_model_cascade_for_prompt(prompt_name)
+            if not model_cascade:
+                model_cascade = sorted(TECHNICAL_CONTEXT["models"], key=lambda m: m.get("order", 999))
 
-                AIAgent._total_ai_calls += 1
-                AIAgent._total_input_chars += input_len
-                AIAgent._total_output_chars += output_len
-                
-                # Track by prompt_name (actual template name) instead of step_name
-                AIAgent._step_stats[prompt_name]["calls"] += 1
-                AIAgent._step_stats[prompt_name]["input_chars"] += input_len
-                AIAgent._step_stats[prompt_name]["output_chars"] += output_len
-                
-                # TRUNCATION DETECTION: Check for mandatory END marker
-                # For SQL generation, we require the response to end with "--END OF GENERATED SQL"
-                # NOTE: SQL FIX prompt does NOT require this marker - it just returns fixed SQL
-                SQL_END_MARKER = "--END OF GENERATED SQL"
-                is_sql_generation = prompt_name == "USE_CASE_SQL_GEN_PROMPT"
-                
-                if is_sql_generation and cleaned_response and len(cleaned_response) > 100:
-                    # Check if the END marker is present
-                    has_end_marker = SQL_END_MARKER in cleaned_response
-                    
-                    if not has_end_marker:
-                        self.logger.warning(
-                            f"⚠️  [{prompt_name}] SQL TRUNCATED - Missing '{SQL_END_MARKER}' marker! "
-                            f"Output: {output_len:,} chars, max_tokens: {max_output_tokens:,}. "
-                            f"Last 100 chars: ...{cleaned_response[-100:]}"
-                        )
-                        # Raise a specific error so caller can handle truncation
-                        raise TruncatedResponseError(
-                            f"SQL response truncated - missing '{SQL_END_MARKER}' marker. "
-                            f"Output length: {output_len:,} chars. Consider reducing input context."
-                        )
-                    else:
-                        self.logger.info(f"   [{prompt_name}] SQL complete - END marker found")
-                
-                # Success - return cleaned response (without honesty section)
-                return cleaned_response
-                
-            except InputTooLongError:
-                # Don't retry InputTooLongError - let caller handle with context reduction
-                raise
-            except TruncatedResponseError:
-                # Don't retry TruncatedResponseError - let caller handle with context reduction
-                raise
-            except Exception as e:
-                error_msg = str(e).lower()
-                
-                # FIRST: Check for "Input is too long" errors BEFORE checking for retryable errors
-                # This includes Databricks-specific error formats
-                is_input_too_long = any(keyword in error_msg for keyword in [
-                    'input is too long', 'too long for requested model', 'input length',
-                    'exceeds context limit', 'context window', 'token limit exceeded',
-                    'maximum context length'
-                ])
-                
-                # Also check for Databricks HTTP 400 errors with "bad_request" and input length messages
-                is_databricks_input_error = (
-                    ('400' in error_msg or 'bad_request' in error_msg or 'bad request' in error_msg) and
-                    ('input' in error_msg or 'length' in error_msg or 'model' in error_msg)
+        cascade_names = [m.get("name", m["llm_endpoint_name"]) for m in model_cascade]
+        self.logger.info(f"   [{prompt_name}] Model cascade ({len(model_cascade)}): {' -> '.join(cascade_names)}")
+
+        if self._llm_cache_dir and not skip_cache:
+            for _mc in model_cascade:
+                cached = self._llm_cache_get(prompt, _mc["llm_endpoint_name"])
+                if cached is not None:
+                    return cached
+        elif skip_cache and self._llm_cache_dir:
+            self.logger.debug(f"   [{prompt_name}] Cache SKIPPED (retry wave — forcing fresh LLM call)")
+
+        last_error = None
+        prompt_len = len(prompt)
+        any_model_attempted = False
+
+        # --- Outer loop: iterate through models in cascade order ---
+        for model_idx, model_config in enumerate(model_cascade):
+            if _is_thread_cancelled():
+                raise Exception(f"[{prompt_name}] Cascade aborted: parent task was cancelled/timed out")
+
+            is_last_model = (model_idx == len(model_cascade) - 1)
+            model = model_config["llm_endpoint_name"]
+            model_name = model_config.get("name", model)
+            input_token_limit_val = model_config.get("llm_input_context_tokens_count", 131000)
+            _min_output_default = min(m.get("llm_output_context_tokens_count", 25000) for m in TECHNICAL_CONTEXT["models"])
+            output_token_limit = model_config.get("llm_output_context_tokens_count", _min_output_default)
+
+            if model_idx > 0:
+                self.logger.info(
+                    f"🔀 [{prompt_name}] Cascading to model '{model_name}' "
+                    f"(order: {model_config.get('order', '?')}, type: {model_config.get('type', '?')}, "
+                    f"input: {input_token_limit_val:,} tokens, output: {output_token_limit:,} tokens)"
                 )
-                
-                if is_input_too_long or is_databricks_input_error:
-                    # This is an "input too long" error - raise immediately without retry
-                    self.logger.error(
-                        f"❌ [{prompt_name}] Input too long error detected (will not retry): {str(e)[:300]}"
-                    )
-                    raise InputTooLongError(
-                        f"Input length: {len(prompt)} characters exceeds model's context limit. "
-                        f"Prompt: {prompt_name}, Model: {model}"
-                    ) from e
-                
-                # Check for retryable errors (only if NOT input too long)
-                is_throttling = any(keyword in error_msg for keyword in [
-                    'throttl', 'rate limit', 'too many requests', 'quota', '429',
-                    'resource exhausted', 'capacity', 'overload'
-                ])
-                is_timeout = any(keyword in error_msg for keyword in [
-                    'timeout', 'timed out', 'deadline', 'time limit'
-                ])
-                is_server_error = any(keyword in error_msg for keyword in [
-                    '500', '502', '503', '504', 'internal server', 'service unavailable',
-                    'bad gateway', 'gateway timeout'
-                ])
-                
-                is_retryable = is_throttling or is_timeout or is_server_error
-                
-                if is_retryable and attempt < attempts_allowed:
-                    # Calculate exponential backoff wait time
-                    wait_time = min(2 ** attempt * 5, 120)  # 5s, 10s, 20s... max 120s
-                    
-                    error_type = "Throttling" if is_throttling else ("Timeout" if is_timeout else "Server error")
+
+            # PRE-FLIGHT: Check if prompt fits this model's context window
+            char_ratio = TOKEN_TO_CHAR_RATIO_NON_ENGLISH if self.current_language.lower() != "english" else TOKEN_TO_CHAR_RATIO_ENGLISH
+            max_context_chars = input_token_limit_val * char_ratio
+            conservative_char_limit = int(input_token_limit_val * 3.2)
+            effective_limit = min(max_context_chars, conservative_char_limit)
+
+            if prompt_len > effective_limit:
+                estimated_tokens = int(prompt_len / 3.2)
+
+                if any_model_attempted:
+                    remaining_models = model_cascade[model_idx:]
+                    best_remaining = max(remaining_models, key=lambda m: m.get("llm_input_context_tokens_count", 0))
+                    best_limit = get_context_limit_chars_for_model(best_remaining, self.current_language)
+                    failed_name = cascade_names[model_idx - 1] if model_idx > 0 else "unknown"
                     self.logger.warning(
-                        f"⚠️  [{prompt_name}] {error_type} detected (attempt {attempt}/{attempts_allowed}): {str(e)[:200]}"
+                        f"🔄 [{prompt_name}] Prompt ({prompt_len:,} chars) exceeds remaining models' limits after "
+                        f"'{failed_name}' failed. Best remaining: '{best_remaining.get('name')}' ({best_limit:,} chars). "
+                        f"Raising CascadeRebatchError so caller can split into smaller batches."
                     )
-                    self.logger.info(f"   Waiting {wait_time}s before retry...")
-                    time.sleep(wait_time)
-                    continue  # Retry
-                else:
-                    # Non-retryable error or max retries exceeded
+                    raise CascadeRebatchError(
+                        f"Prompt ({prompt_len:,} chars) exceeds '{best_remaining.get('name')}' limit ({best_limit:,} chars) "
+                        f"after '{failed_name}' failed. Caller should rebatch to fit {best_limit:,} chars.",
+                        target_model_name=best_remaining.get("name"),
+                        target_model_endpoint=best_remaining["llm_endpoint_name"],
+                        target_context_limit_chars=best_limit,
+                        failed_model_name=failed_name
+                    )
+
+                if not is_last_model:
+                    self.logger.warning(
+                        f"⚠️  [{prompt_name}] Prompt ({prompt_len:,} chars, ~{estimated_tokens:,} tokens) exceeds "
+                        f"'{model_name}' limit ({effective_limit:,} chars / {input_token_limit_val:,} tokens). "
+                        f"Skipping to next model in cascade."
+                    )
+                    continue
+                self.logger.error(
+                    f"Prompt length ({prompt_len:,} chars, ~{estimated_tokens:,} est. tokens) exceeds limit "
+                    f"({effective_limit:,} chars / {input_token_limit_val:,} tokens) "
+                    f"for language '{self.current_language}' and prompt: {prompt_name}. All cascade models exhausted."
+                )
+                raise InputTooLongError(
+                    f"Input length: {prompt_len:,} characters (~{estimated_tokens:,} tokens) exceeds context limit of {effective_limit:,} characters "
+                    f"({input_token_limit_val:,} tokens) "
+                    f"for language '{self.current_language}'. "
+                    f"Prompt: {prompt_name}, Model: {model_name}. All {len(model_cascade)} cascade models exhausted. Please batch your input."
+                )
+
+            any_model_attempted = True
+
+            # --- Inner loop: retry attempts on this specific model ---
+            cascade_to_next = False
+
+            for attempt in range(1, attempts_per_model + 1):
+                if _is_thread_cancelled():
+                    raise Exception(f"[{prompt_name}] Cascade aborted: parent task was cancelled/timed out")
+                try:
+                    if attempt > 1:
+                        self.logger.info(f"🔄 [{prompt_name}] Retry attempt {attempt}/{attempts_per_model} on model '{model_name}'...")
+                        self._emit_runtime_warning(
+                            prompt_name=prompt_name,
+                            step_name=status_step,
+                            message=f"{prompt_name} retry attempt {attempt}/{attempts_per_model} on {model_name}",
+                            payload={"model": model_name, "attempt": attempt, "attempts_per_model": attempts_per_model}
+                        )
+
+                    response_format_str = ""
+                    if prompt_name in COMPACT_OUTPUT_PROMPTS:
+                        max_output_tokens = min(int(output_token_limit * 0.25), output_token_limit)
+                    else:
+                        max_output_tokens = min(int(output_token_limit * 0.9), output_token_limit)
+                    max_output_tokens = min(max_output_tokens, output_token_limit)
+
+                    self.logger.info(f"   [{prompt_name}] Setting max_tokens={max_output_tokens:,} (model: {model_name}, limit: {output_token_limit:,})")
+
+                    ai_query_args = {"prompt_text": replace_single_quote(prompt)}
+                    if response_schema:
+                        response_format_str = json.dumps({"type": "json_schema", "json_schema": response_schema}, separators=(',', ':'))
+                        ai_query_args["resp_fmt"] = response_format_str
+                        ai_query_sql = f"SELECT ai_query('{model}', :prompt_text, responseFormat => :resp_fmt, modelParameters => named_struct('max_tokens', {max_output_tokens})) AS ai_response"
+                    else:
+                        ai_query_sql = f"SELECT ai_query('{model}', :prompt_text, modelParameters => named_struct('max_tokens', {max_output_tokens})) AS ai_response"
+
+                    _done_event = threading.Event()
+                    _tctx = {'response': None, 'error': None, 'done': False}
+                    _query_tag = f"llm_{prompt_name}_{uuid.uuid4().hex[:8]}"
+
+                    def execute_query(_ctx=_tctx, _sql=ai_query_sql, _args=ai_query_args, _evt=_done_event, _tag=_query_tag, _spark=self.spark):
+                        _tag_added = False
+                        try:
+                            try:
+                                _spark.addTag(_tag)
+                                _tag_added = True
+                            except Exception:
+                                pass
+                            _ctx['error'] = None
+                            result = execute_sql(_spark, _sql, self.logger, args=_args)
+                            _ctx['response'] = result
+                            _ctx['done'] = True
+                        except Exception as e:
+                            _ctx['error'] = e
+                            _ctx['done'] = True
+                        finally:
+                            if _tag_added:
+                                try:
+                                    _spark.removeTag(_tag)
+                                except Exception:
+                                    pass
+                            _evt.set()
+
+                    query_thread = threading.Thread(target=execute_query, name=f"LLM_Query_{prompt_name}")
+                    query_thread.daemon = True
+                    start_time = time.time()
+                    query_thread.start()
+
+                    poll_interval = 5
+                    last_heartbeat_minute = -1
+                    while True:
+                        _done_event.wait(timeout=poll_interval)
+                        elapsed = time.time() - start_time
+
+                        if _done_event.is_set() or _tctx['done'] or not query_thread.is_alive():
+                            break
+
+                        if _is_thread_cancelled():
+                            self.logger.warning(f"🛑 [{prompt_name}] Parent task cancelled - aborting LLM poll (model: {model_name})")
+                            try:
+                                self.spark.interruptTag(_query_tag)
+                            except Exception:
+                                pass
+                            raise Exception(f"[{prompt_name}] Cascade aborted: parent task was cancelled/timed out")
+
+                        if elapsed >= timeout_val:
+                            self.logger.error(f"⏱️  [{prompt_name}] LLM call timed out after {elapsed:.1f}s (model: {model_name}, attempt {attempt}/{attempts_per_model})")
+                            self._emit_runtime_warning(
+                                prompt_name=prompt_name,
+                                step_name=status_step,
+                                message=f"{prompt_name} timeout on {model_name} after {int(elapsed)}s",
+                                payload={
+                                    "model": model_name,
+                                    "attempt": attempt,
+                                    "attempts_per_model": attempts_per_model,
+                                    "elapsed_seconds": int(elapsed),
+                                    "event_type": "timeout"
+                                }
+                            )
+                            try:
+                                self.spark.interruptTag(_query_tag)
+                                self.logger.info(f"🛑 [{prompt_name}] Sent interruptTag for timed-out query (tag: {_query_tag})")
+                            except AttributeError:
+                                self.logger.debug(f"[{prompt_name}] spark.interruptTag not available (non-Spark-Connect runtime)")
+                            except Exception as _cancel_err:
+                                self.logger.debug(f"[{prompt_name}] interruptTag failed: {str(_cancel_err)[:100]}")
+                            break
+
+                        current_minute = int(elapsed) // 60
+                        if current_minute > 0 and current_minute != last_heartbeat_minute:
+                            last_heartbeat_minute = current_minute
+                            log_print(f"[{heartbeat_name}] Still waiting... {elapsed:.0f}s elapsed (timeout: {timeout_val}s, model: {model_name})")
+
+                    if not _done_event.is_set() and query_thread.is_alive():
+                        raise Exception(f"LLM call timed out after {timeout_val} seconds (model: {model_name})")
+
+                    if _tctx['error'] is not None:
+                        raise _tctx['error']
+
+                    raw_response = _tctx['response'][0].ai_response if _tctx['response'] and _tctx['response'][0] else ""
+                    _tctx = None
+                    ai_query_sql = None
+                    ai_query_args = None
+
+                    honesty_score, honesty_justification, cleaned_response = extract_honesty_score(raw_response, self.logger)
+                    del raw_response
+
+                    if honesty_score is not None:
+                        if honesty_justification:
+                            self.logger.info(f"🔮✨ HONESTY CHECK [{prompt_name}] Score: {honesty_score}% | {honesty_justification} ✨🔮")
+                        else:
+                            self.logger.info(f"🔮✨ HONESTY CHECK [{prompt_name}] Score: {honesty_score}% ✨🔮")
+
+                    input_len = len(prompt)
+                    output_len = len(cleaned_response)
+
+                    AIAgent._total_ai_calls += 1
+                    AIAgent._total_input_chars += input_len
+                    AIAgent._total_output_chars += output_len
+
+                    AIAgent._step_stats[prompt_name]["calls"] += 1
+                    AIAgent._step_stats[prompt_name]["input_chars"] += input_len
+                    AIAgent._step_stats[prompt_name]["output_chars"] += output_len
+
+                    SQL_END_MARKER = "--END OF GENERATED SQL"
+                    is_sql_generation = prompt_name == "USE_CASE_SQL_GEN_PROMPT"
+
+                    if is_sql_generation and cleaned_response and len(cleaned_response) > 100:
+                        has_end_marker = SQL_END_MARKER in cleaned_response
+                        if not has_end_marker:
+                            self.logger.warning(
+                                f"⚠️  [{prompt_name}] SQL TRUNCATED - Missing '{SQL_END_MARKER}' marker! "
+                                f"Output: {output_len:,} chars, max_tokens: {max_output_tokens:,}. "
+                                f"Last 100 chars: ...{cleaned_response[-100:]}"
+                            )
+                            raise TruncatedResponseError(
+                                f"SQL response truncated - missing '{SQL_END_MARKER}' marker. "
+                                f"Output length: {output_len:,} chars. Consider reducing input context."
+                            )
+                        else:
+                            self.logger.info(f"   [{prompt_name}] SQL complete - END marker found (model: {model_name})")
+
+                    self._llm_cache_put(prompt, model, cleaned_response)
+                    return cleaned_response
+
+                except InputTooLongError:
+                    raise
+                except CascadeRebatchError:
+                    raise
+                except TruncatedResponseError:
+                    raise
+                except Exception as e:
+                    last_error = e
+                    error_msg = str(e).lower()
+
+                    is_sql_construction_error = (
+                        'parse_syntax_error' in error_msg and
+                        'select ai_query' in error_msg
+                    )
+                    is_max_tokens_error = 'max_new_tokens' in error_msg and 'cannot be greater' in error_msg
+                    if is_sql_construction_error or is_max_tokens_error:
+                        self.logger.error(
+                            f"❌ [{prompt_name}] Non-retryable AI query error: {get_clean_error_message(e)}"
+                        )
+                        raise
+
+                    is_input_too_long = any(keyword in error_msg for keyword in [
+                        'input is too long', 'too long for requested model', 'input length',
+                        'exceeds context limit', 'context window', 'token limit exceeded',
+                        'maximum context length'
+                    ])
+                    is_databricks_input_error = (
+                        ('400' in error_msg or 'bad_request' in error_msg or 'bad request' in error_msg) and
+                        ('input' in error_msg or 'length' in error_msg or 'model' in error_msg)
+                    )
+
+                    if is_input_too_long or is_databricks_input_error:
+                        self.logger.error(
+                            f"❌ [{prompt_name}] Input too long on model '{model_name}': {get_clean_error_message(e)}"
+                        )
+                        if not is_last_model:
+                            next_cfg = model_cascade[model_idx + 1]
+                            next_char_limit = int(next_cfg.get("llm_input_context_tokens_count", 131000) * 3.2)
+                            if prompt_len <= next_char_limit:
+                                self.logger.info(
+                                    f"🔀 [{prompt_name}] Prompt fits next model '{next_cfg.get('name')}' "
+                                    f"({prompt_len:,} chars <= {next_char_limit:,} limit). Cascading."
+                                )
+                                cascade_to_next = True
+                                break
+                        raise InputTooLongError(
+                            f"Input length: {len(prompt)} characters exceeds model's context limit. "
+                            f"Prompt: {prompt_name}, Model: {model_name}. All cascade models exhausted."
+                        ) from e
+
+                    is_throttling = any(keyword in error_msg for keyword in [
+                        'throttl', 'rate limit', 'too many requests', 'quota', '429',
+                        'resource exhausted', 'capacity', 'overload'
+                    ])
+                    is_timeout = any(keyword in error_msg for keyword in [
+                        'timeout', 'timed out', 'deadline', 'time limit'
+                    ])
+                    is_server_error = any(keyword in error_msg for keyword in [
+                        '500', '502', '503', '504', 'internal server', 'service unavailable',
+                        'bad gateway', 'gateway timeout'
+                    ])
+                    is_retryable = is_throttling or is_timeout or is_server_error
+
+                    error_type = "Throttling" if is_throttling else ("Timeout" if is_timeout else ("Server error" if is_server_error else "Error"))
+
+                    clean_err_msg = get_clean_error_message(e)
+
+                    if is_retryable and attempt < attempts_per_model:
+                        wait_time = min(2 ** attempt * 5, 120)
+                        self.logger.warning(
+                            f"⚠️  [{prompt_name}] {error_type} on model '{model_name}' "
+                            f"(attempt {attempt}/{attempts_per_model}): {clean_err_msg}"
+                        )
+                        self.logger.info(f"   Waiting {wait_time}s before retry on same model '{model_name}'...")
+                        self._emit_runtime_warning(
+                            prompt_name=prompt_name,
+                            step_name=status_step,
+                            message=f"{prompt_name} transient {error_type.lower()} on {model_name}, retrying in {wait_time}s",
+                            payload={
+                                "model": model_name,
+                                "attempt": attempt,
+                                "attempts_per_model": attempts_per_model,
+                                "wait_seconds": wait_time,
+                                "event_type": "retry_scheduled",
+                                "error_type": error_type
+                            }
+                        )
+                        time.sleep(wait_time)
+                        continue
+
+                    if not is_last_model:
+                        self.logger.warning(
+                            f"⚠️  [{prompt_name}] {error_type} on model '{model_name}' "
+                            f"(attempt {attempt}/{attempts_per_model}, retries exhausted). "
+                            f"Cascading to next model. Error: {clean_err_msg}"
+                        )
+                        next_model_name = model_cascade[model_idx + 1].get("name", model_cascade[model_idx + 1]["llm_endpoint_name"])
+                        self._emit_runtime_warning(
+                            prompt_name=prompt_name,
+                            step_name=status_step,
+                            message=f"{prompt_name} cascading from {model_name} to {next_model_name}",
+                            payload={
+                                "from_model": model_name,
+                                "to_model": next_model_name,
+                                "attempt": attempt,
+                                "event_type": "cascade"
+                            }
+                        )
+                        cascade_to_next = True
+                        break
+
                     if is_retryable:
                         self.logger.error(
-                            f"❌ [{prompt_name}] Max retries ({attempts_allowed - 1}) exceeded for retryable error: {str(e)[:200]}"
+                            f"❌ [{prompt_name}] All {len(model_cascade)} cascade models and retries exhausted "
+                            f"for retryable error: {clean_err_msg}"
                         )
-                    
-                    # If we get here, it's a non-retryable error
-                    self.logger.error(f"AI Query function failed (Prompt: {prompt_name}). Error: {e}\nModel: {model}")
+                    self.logger.error(f"❌ [{prompt_name}] AI Query failed on '{model_name}' (last in cascade): {get_clean_error_message(e)}")
                     raise
-        
-        # If we exit the loop without returning, all retries failed
-        raise Exception(f"LLM call failed after {attempts_allowed} attempts for prompt: {prompt_name}")
 
-    # === MODIFIED: Uses internal _load_and_format_prompt ===
-    def run_worker(self, step_name, worker_prompt_path, prompt_vars, response_schema, model_override=None, timeout_override=None, max_retries_override=None):
-        # Running AI worker - high-level logging only
+            if cascade_to_next:
+                continue
+
+        if last_error:
+            raise last_error
+        raise Exception(f"All {len(model_cascade)} cascade models exhausted for prompt: {prompt_name}")
+
+    def run_worker(self, step_name, worker_prompt_path, prompt_vars, response_schema, model_override=None, timeout_override=None, max_retries_override=None, start_from_model=None, skip_cache=False):
         try:
-            # === MODIFIED ===
+            start_message, start_payload = self._build_started_status(worker_prompt_path, step_name, prompt_vars)
+            self._emit_status(
+                prompt_name=worker_prompt_path,
+                step_name=step_name,
+                status="started",
+                message=start_message,
+                result_json=start_payload
+            )
             worker_prompt = self._load_and_format_prompt(worker_prompt_path, prompt_vars)
             
             if not worker_prompt:
                 raise ValueError(f"Failed to load prompt: {worker_prompt_path}")
             
-            # Use model from LLM_MODEL_CONFIG if no override provided
-            if model_override is None and worker_prompt_path in LLM_MODEL_CONFIG:
-                model_override = LLM_MODEL_CONFIG[worker_prompt_path]
-                # Model selected from config - no debug logging needed
-            
-            # Pass the prompt_path (template name) to _call_ai_query for tracking
             raw_response = self._call_ai_query(
                 worker_prompt,
                 worker_prompt_path,
@@ -11872,20 +13518,61 @@ class AIAgent:
                 model_override,
                 timeout_seconds=timeout_override,
                 max_retries=max_retries_override,
-                display_name=step_name
+                display_name=step_name,
+                start_from_model=start_from_model,
+                skip_cache=skip_cache,
+                status_step_name=step_name
             )
             
-            # Return based on schema presence
             if response_schema:
-                return clean_json_response(raw_response)
+                parsed = clean_json_response(raw_response)
+                end_message, end_payload = self._build_success_status(worker_prompt_path, step_name, raw_response, response_schema)
+                self._emit_status(
+                    prompt_name=worker_prompt_path,
+                    step_name=step_name,
+                    status="ended_success",
+                    message=end_message,
+                    result_json=end_payload
+                )
+                return parsed
             else:
-                # This is the path for CSV
                 if not raw_response:
                     self.logger.warning(f"AI Worker for {step_name} (Raw) returned an empty response.")
-                    return "" # Return empty string
+                    self._emit_status(
+                        prompt_name=worker_prompt_path,
+                        step_name=step_name,
+                        status="ended_warning",
+                        message=f"{worker_prompt_path} returned empty response",
+                        result_json={"step_name": step_name}
+                    )
+                    return ""
+                end_message, end_payload = self._build_success_status(worker_prompt_path, step_name, raw_response, response_schema)
+                self._emit_status(
+                    prompt_name=worker_prompt_path,
+                    step_name=step_name,
+                    status="ended_success",
+                    message=end_message,
+                    result_json=end_payload
+                )
                 return raw_response
+        except CascadeRebatchError:
+            self._emit_status(
+                prompt_name=worker_prompt_path,
+                step_name=step_name,
+                status="ended_warning",
+                message=f"{worker_prompt_path} requires rebatching",
+                result_json={"step_name": step_name}
+            )
+            raise
         except Exception as e:
-            self.logger.error(f"AI Worker process failed for {step_name}: {e}")
+            self._emit_status(
+                prompt_name=worker_prompt_path,
+                step_name=step_name,
+                status="ended_error",
+                message=f"{worker_prompt_path} failed",
+                result_json={"step_name": step_name, "error": get_clean_error_message(e, max_chars=300)}
+            )
+            self.logger.error(f"AI Worker process failed for {step_name}: {get_clean_error_message(e)}")
             raise
 
     # --- START OF MODIFICATIONS ---
@@ -12005,7 +13692,7 @@ class AIAgent:
                             final_cleaned_json = worker_outputs[0]
                             skip_judge = True
                     except Exception as e:
-                        self.logger.warning(f"Could not compare worker outputs for judge skip: {e}")
+                        self.logger.warning(f"Could not compare worker outputs for judge skip: {get_clean_error_message(e)}")
                 # --- END: NEW JUDGE-SKIP LOGIC ---
 
                 if not judge_prompt_path or skip_judge:
@@ -12046,7 +13733,7 @@ class AIAgent:
                 return final_fixed_json_string
 
             except Exception as e:
-                self.logger.warning(f"Attempt {attempt + 1}/{config['MAX_RETRIES']} for {step_name} {log_context} failed: {e}")
+                self.logger.warning(f"Attempt {attempt + 1}/{config['MAX_RETRIES']} for {step_name} {log_context} failed: {get_clean_error_message(e)}")
                 if attempt == config["MAX_RETRIES"] - 1:
                     self.logger.error(f"FAILED to generate valid output for {step_name} {log_context} after all retries.")
                     raise e
@@ -12184,6 +13871,7 @@ class TranslationService:
         "aspect_value": "Business Value",
         "business_value": "Business Value",
         "aspect_tables": "Tables Involved",
+        "quality_reasons": "Quality Reasons",
         "aspect_ai_function": "AI Function",
         "aspect_analytics_technique": "Analytics Technique",
         "aspect_primary_table": "Primary Table",
@@ -12313,6 +14001,7 @@ class TranslationService:
             "aspect_value": "القيمة التجارية",
             "business_value": "القيمة التجارية",
             "aspect_tables": "الجداول المستخدمة",
+            "quality_reasons": "أسباب الجودة",
             "aspect_ai_function": "وظيفة الذكاء الاصطناعي",
             "aspect_analytics_technique": "تقنية التحليل",
             "aspect_primary_table": "الجدول الرئيسي",
@@ -12427,6 +14116,7 @@ class TranslationService:
             "aspect_value": "Valor Comercial",
             "business_value": "Valor Comercial",
             "aspect_tables": "Tablas Involucradas",
+            "quality_reasons": "Razones de Calidad",
             "aspect_ai_function": "Función de IA",
             "aspect_analytics_technique": "Técnica de Análisis",
             "aspect_primary_table": "Tabla Principal",
@@ -12541,6 +14231,7 @@ class TranslationService:
             "aspect_value": "Valeur Commerciale",
             "business_value": "Valeur Commerciale",
             "aspect_tables": "Tables Impliquées",
+            "quality_reasons": "Raisons de Qualité",
             "aspect_ai_function": "Fonction IA",
             "aspect_analytics_technique": "Technique d'Analyse",
             "aspect_primary_table": "Table Principale",
@@ -12655,6 +14346,7 @@ class TranslationService:
             "aspect_value": "Geschäftswert",
             "business_value": "Geschäftswert",
             "aspect_tables": "Beteiligte Tabellen",
+            "quality_reasons": "Qualitätsgründe",
             "aspect_ai_function": "KI-Funktion",
             "aspect_analytics_technique": "Analysetechnik",
             "aspect_primary_table": "Haupttabelle",
@@ -12769,6 +14461,7 @@ class TranslationService:
             "aspect_value": "Valor de Negócio",
             "business_value": "Valor de Negócio",
             "aspect_tables": "Tabelas Envolvidas",
+            "quality_reasons": "Razões de Qualidade",
             "aspect_ai_function": "Função de IA",
             "aspect_analytics_technique": "Técnica de Análise",
             "aspect_primary_table": "Tabela Principal",
@@ -12883,6 +14576,7 @@ class TranslationService:
             "aspect_value": "Valore Aziendale",
             "business_value": "Valore Aziendale",
             "aspect_tables": "Tabelle Coinvolte",
+            "quality_reasons": "Ragioni di Qualità",
             "aspect_ai_function": "Funzione IA",
             "aspect_analytics_technique": "Tecnica di Analisi",
             "aspect_primary_table": "Tabella Principale",
@@ -12997,6 +14691,7 @@ class TranslationService:
             "aspect_value": "商业价值",
             "business_value": "商业价值",
             "aspect_tables": "涉及的表",
+            "quality_reasons": "质量原因",
             "aspect_ai_function": "AI功能",
             "aspect_analytics_technique": "分析技术",
             "aspect_primary_table": "主表",
@@ -13111,6 +14806,7 @@ class TranslationService:
             "aspect_value": "ビジネス価値",
             "business_value": "ビジネス価値",
             "aspect_tables": "関連テーブル",
+            "quality_reasons": "品質理由",
             "aspect_ai_function": "AI機能",
             "aspect_analytics_technique": "分析技術",
             "aspect_primary_table": "主要テーブル",
@@ -13225,6 +14921,7 @@ class TranslationService:
             "aspect_value": "비즈니스 가치",
             "business_value": "비즈니스 가치",
             "aspect_tables": "관련 테이블",
+            "quality_reasons": "품질 사유",
             "aspect_ai_function": "AI 기능",
             "aspect_analytics_technique": "분석 기법",
             "aspect_primary_table": "주요 테이블",
@@ -13339,6 +15036,7 @@ class TranslationService:
             "aspect_value": "व्यापारिक मूल्य",
             "business_value": "व्यापारिक मूल्य",
             "aspect_tables": "शामिल तालिकाएं",
+            "quality_reasons": "गुणवत्ता कारण",
             "aspect_ai_function": "AI फ़ंक्शन",
             "aspect_analytics_technique": "विश्लेषण तकनीक",
             "aspect_primary_table": "प्राथमिक तालिका",
@@ -13453,6 +15151,7 @@ class TranslationService:
             "aspect_value": "Бизнес-ценность",
             "business_value": "Бизнес-ценность",
             "aspect_tables": "Связанные таблицы",
+            "quality_reasons": "Причины качества",
             "aspect_ai_function": "Функция ИИ",
             "aspect_analytics_technique": "Аналитическая техника",
             "aspect_primary_table": "Основная таблица",
@@ -13687,7 +15386,7 @@ class TranslationService:
                 return final_translations
 
             except Exception as e:
-                self.logger.error(f"Failed to get UI translations for {target_language} (Attempt {attempt}/2): {e}")
+                self.logger.error(f"Failed to get UI translations for {target_language} (Attempt {attempt}/2): {get_clean_error_message(e)}")
                 if attempt == 2:
                     self.logger.error(f"All retry attempts exhausted for UI translations. Falling back to English.")
                     return self.ENGLISH_TRANSLATIONS
@@ -13724,15 +15423,14 @@ class TranslationService:
         
         if enable_parallelization:
             # Parallel processing (used when NOT called from within another ThreadPoolExecutor)
-            with ThreadPoolExecutor(max_workers=max_parallelism) as executor:
-                futures = [executor.submit(self._translate_batch, batch, target_language, i) for i, batch in enumerate(batches)]
+            with _SafeExecutorContext(max_workers=max_parallelism, thread_name_prefix="Translator", logger=self.logger, name="Translation") as ctx:
+                futures = [ctx.submit(self._translate_batch, batch, target_language, i) for i, batch in enumerate(batches)]
                 
-                # Add timeout: 10 minutes per batch * number of batches / parallelism
-                total_timeout = (len(batches) * 600) // max(max_parallelism, 1) + 300
+                total_timeout = (len(batches) * 600) // max_parallelism + 300
                 self.logger.info(f"Translation timeout set to {total_timeout}s for {len(batches)} batches")
                 
                 try:
-                    for future in concurrent.futures.as_completed(futures, timeout=total_timeout):
+                    for future in safe_as_completed(futures, timeout=total_timeout):
                         try:
                             translated_batch = future.result(timeout=600)
                             if translated_batch:
@@ -13740,8 +15438,9 @@ class TranslationService:
                         except concurrent.futures.TimeoutError:
                             self.logger.error(f"Translation batch timed out after 10 minutes")
                         except Exception as e:
-                            self.logger.error(f"A translation future failed unexpectedly: {e}")
+                            self.logger.error(f"A translation future failed unexpectedly: {get_clean_error_message(e)}")
                 except concurrent.futures.TimeoutError:
+                    ctx.mark_timed_out()
                     self.logger.error(f"Overall translation timeout reached ({total_timeout}s). Proceeding with {len(translated_use_cases)} translated use cases.")
         else:
             # Sequential processing (used when called from within another ThreadPoolExecutor to avoid nesting)
@@ -13752,7 +15451,7 @@ class TranslationService:
                     if translated_batch:
                         translated_use_cases.extend(translated_batch)
                 except Exception as e:
-                    self.logger.error(f"Translation batch {i} failed: {e}")
+                    self.logger.error(f"Translation batch {i} failed: {get_clean_error_message(e)}")
         
         if len(translated_use_cases) != len(english_use_cases):
             self.logger.warning(f"Translation mismatch: expected {len(english_use_cases)} use cases, translated {len(translated_use_cases)}. Some batches may have failed and reverted to English.")
@@ -13851,7 +15550,7 @@ class TranslationService:
             error_msg = str(e)
             is_truncation = "TRUNCATED" in error_msg
             
-            self.logger.error(f"Failed to translate use case batch #{batch_num} (Attempt {attempt}/2, Split {split_attempt}/3) for {target_language}: {e}")
+            self.logger.error(f"Failed to translate use case batch #{batch_num} (Attempt {attempt}/2, Split {split_attempt}/3) for {target_language}: {get_clean_error_message(e)}")
             
             # If truncation detected and batch has more than 1 item, try splitting it (up to 3 times)
             if is_truncation and len(use_case_batch) > 1 and split_attempt < 3:
@@ -14041,7 +15740,7 @@ class TranslationService:
             return translated_rows
             
         except Exception as e:
-            self.logger.error(f"Failed to parse translation CSV for batch #{batch_num}: {e}")
+            self.logger.error(f"Failed to parse translation CSV for batch #{batch_num}: {get_clean_error_message(e)}")
             # Show snippet for debugging
             snippet = csv_response[:500] if csv_response else "Empty response"
             self.logger.error(f"CSV response snippet: {snippet}")
@@ -14156,7 +15855,7 @@ class IntermediateStorageManager:
                 shutil.rmtree(self.temp_dir)
                 self.logger.info(f"🧹 Cleaned up intermediate storage: {self.temp_dir}")
             except Exception as e:
-                self.logger.warning(f"Failed to cleanup temp directory {self.temp_dir}: {e}")
+                self.logger.warning(f"Failed to cleanup temp directory {self.temp_dir}: {get_clean_error_message(e)}")
             finally:
                 self.temp_dir = None
                 self.batch_files = []
@@ -14201,6 +15900,40 @@ class IntermediateStorageManager:
         with open(schema_file, 'r', encoding='utf-8') as f:
             raw = json.load(f)
         return [tuple(t) for t in raw]
+
+    def save_scored_use_cases(self, data, tag: str = "combined_scored"):
+        if not self.initialized:
+            self.initialize()
+        path = os.path.join(self.temp_dir, f"{tag}.json")
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=1)
+        self.logger.debug(f"Saved {len(data)} scored use cases to disk ({tag})")
+
+    def load_scored_use_cases(self, tag: str = "combined_scored"):
+        if not self.temp_dir:
+            return None
+        path = os.path.join(self.temp_dir, f"{tag}.json")
+        if not os.path.exists(path):
+            return None
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+
+    def save_schema_markdown(self, markdown: str, tag: str = "schema_markdown"):
+        if not self.initialized:
+            self.initialize()
+        path = os.path.join(self.temp_dir, f"{tag}.txt")
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(markdown)
+        self.logger.debug(f"Saved schema markdown to disk ({len(markdown):,} chars)")
+
+    def load_schema_markdown(self, tag: str = "schema_markdown"):
+        if not self.temp_dir:
+            return None
+        path = os.path.join(self.temp_dir, f"{tag}.txt")
+        if not os.path.exists(path):
+            return None
+        with open(path, 'r', encoding='utf-8') as f:
+            return f.read()
 
     def save_column_tracking(self, fqtn: str, column_names: list):
         """
@@ -14259,7 +15992,7 @@ class IntermediateStorageManager:
                 data = json.load(f)
                 return data.get("columns", None)
         except Exception as e:
-            self.logger.warning(f"Failed to load column tracking for {fqtn}: {e}")
+            self.logger.warning(f"Failed to load column tracking for {fqtn}: {get_clean_error_message(e)}")
             return None
     
     def has_column_tracking(self, fqtn: str) -> bool:
@@ -14302,7 +16035,7 @@ class IntermediateStorageManager:
             with open(ids_file, 'r', encoding='utf-8') as f:
                 return set(json.load(f))
         except Exception as e:
-            self.logger.warning(f"Failed to load PASS 1 IDs: {e}")
+            self.logger.warning(f"Failed to load PASS 1 IDs: {get_clean_error_message(e)}")
             return set()
     
     def save_feedback_file(self, feedback_lines: list):
@@ -14325,7 +16058,7 @@ class IntermediateStorageManager:
             with open(feedback_file, 'r', encoding='utf-8') as f:
                 return f.read()
         except Exception as e:
-            self.logger.warning(f"Failed to load feedback file: {e}")
+            self.logger.warning(f"Failed to load feedback file: {get_clean_error_message(e)}")
             return ""
     
     def iter_pass1_use_cases_for_feedback(self, limit: int = 200):
@@ -14429,10 +16162,370 @@ class IntermediateStorageManager:
             return (data.get("column_id_map", {}), data.get("id_column_map", {}),
                     data.get("table_id_map", {}), data.get("id_table_map", {}))
         except Exception as e:
-            self.logger.warning(f"Failed to load ID maps: {e}")
+            self.logger.warning(f"Failed to load ID maps: {get_clean_error_message(e)}")
             return {}, {}, {}, {}
         
         return os.path.exists(tracking_file)
+
+class AtomicWriter:
+    def __init__(self, spark, logger, inspire_database: str, session_id: int, widget_values: dict = None):
+        import os
+        import threading
+        import tempfile
+        self.spark = spark
+        self.logger = logger
+        self.inspire_database = (inspire_database or "").strip()
+        self.session_id = int(session_id)
+        self.widget_values = widget_values or {}
+        self.enabled = bool(self.inspire_database)
+        self.session_table = f"{self.inspire_database}.__inspire_session" if self.enabled else ""
+        self.steps_table = f"{self.inspire_database}.__inspire_step" if self.enabled else ""
+        self._lock = threading.Lock()
+        self._flush_lock = threading.Lock()
+        self._flush_thread = None
+        self._last_flush_attempt_epoch = 0.0
+        self._flush_interval_seconds = 2.0
+        self._step_counter = 0
+        self.console_step_logging_enabled = str(self.widget_values.get("atomic_writer_console_logs", "false")).strip().lower() in {"1", "true", "yes", "y"}
+        spool_dir = os.path.join(tempfile.gettempdir(), "inspire_atomic_writer")
+        os.makedirs(spool_dir, exist_ok=True)
+        self._spool_path = os.path.join(spool_dir, f"session_{self.session_id}.jsonl")
+        self._spool_offset = 0
+        if os.path.exists(self._spool_path):
+            self._spool_offset = os.path.getsize(self._spool_path)
+
+    def _console_log(self, message: str, level: str = "INFO", force: bool = False):
+        if not force and level not in {"WARNING", "ERROR"} and not self.console_step_logging_enabled:
+            return
+        try:
+            log_print(f"[AtomicWriter][session={self.session_id}] {message}", level=level)
+        except Exception:
+            pass
+
+    def _utc_now_str(self):
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+    def _safe_json_str(self, payload):
+        import json
+        try:
+            return json.dumps(payload if payload is not None else {}, ensure_ascii=True)
+        except Exception:
+            return "{}"
+
+    def _escape_sql_str(self, value: str) -> str:
+        return str(value).replace("\\", "\\\\").replace("'", "''")
+
+    def _next_step_id(self):
+        import time
+        with self._lock:
+            self._step_counter += 1
+            return int((time.time() * 1000) + self._step_counter)
+
+    @staticmethod
+    def _normalize_progress_increment(progress_increment: float) -> float:
+        inc = float(progress_increment or 0.0)
+        if inc <= 0.0:
+            return 1.0
+        return float(max(1, int(round(inc))))
+
+    def _ensure_tables(self):
+        if not self.enabled:
+            return
+        session_sql = f"""
+        CREATE TABLE IF NOT EXISTS {self.session_table} (
+            session_id BIGINT,
+            widget_values VARIANT,
+            processing_status STRING,
+            completed_percent DOUBLE,
+            create_at TIMESTAMP,
+            last_updated TIMESTAMP,
+            completed_on TIMESTAMP,
+            inspire_json VARIANT,
+            results_json VARIANT
+        ) USING DELTA
+        """
+        steps_sql = f"""
+        CREATE TABLE IF NOT EXISTS {self.steps_table} (
+            session_id BIGINT,
+            step_id BIGINT,
+            last_updated TIMESTAMP,
+            stage_name STRING,
+            step_name STRING,
+            sub_step_name STRING,
+            progress_increment DOUBLE,
+            message STRING,
+            status STRING,
+            result_json VARIANT
+        ) USING DELTA
+        """
+        self.spark.sql(session_sql)
+        self.spark.sql(steps_sql)
+        try:
+            self.spark.sql(f"ALTER TABLE {self.session_table} ADD COLUMNS (results_json VARIANT)")
+        except Exception:
+            pass
+
+    def initialize_session(self):
+        if not self.enabled:
+            self._console_log("inspire_database not provided; running in console-only mode")
+            return
+        self._ensure_tables()
+        ts = self._utc_now_str()
+        widget_values_json = self._escape_sql_str(self._safe_json_str(self.widget_values))
+        inspire_json = self._escape_sql_str(self._safe_json_str({}))
+        merge_sql = f"""
+        MERGE INTO {self.session_table} AS target
+        USING (
+            SELECT
+                {self.session_id} AS session_id,
+                parse_json('{widget_values_json}') AS widget_values,
+                'done' AS processing_status,
+                1.0 AS completed_percent,
+                TIMESTAMP('{ts}') AS create_at,
+                TIMESTAMP('{ts}') AS last_updated,
+                CAST(NULL AS TIMESTAMP) AS completed_on,
+                parse_json('{inspire_json}') AS inspire_json,
+                parse_json('{inspire_json}') AS results_json
+        ) AS source
+        ON target.session_id = source.session_id
+        WHEN MATCHED THEN UPDATE SET
+            target.widget_values = source.widget_values,
+            target.processing_status = source.processing_status,
+            target.completed_percent = source.completed_percent,
+            target.create_at = source.create_at,
+            target.last_updated = source.last_updated,
+            target.completed_on = source.completed_on,
+            target.inspire_json = source.inspire_json,
+            target.results_json = source.results_json
+        WHEN NOT MATCHED THEN INSERT (
+            session_id, widget_values, processing_status, completed_percent, create_at, last_updated, completed_on, inspire_json, results_json
+        ) VALUES (
+            source.session_id, source.widget_values, source.processing_status, source.completed_percent, source.create_at, source.last_updated, source.completed_on, source.inspire_json, source.results_json
+        )
+        """
+        self.spark.sql(merge_sql)
+        self._console_log("session initialized and persisted", force=True)
+
+    def emit_step(self, stage_name: str, step_name: str, sub_step_name: str = "", progress_increment: float = 0.0,
+                  message: str = "", status: str = "started", result_json=None, step_id: int = None):
+        effective_step_id = int(step_id) if step_id is not None else self._next_step_id()
+        from datetime import datetime, timezone
+        payload = result_json if isinstance(result_json, dict) else {}
+        payload.setdefault("event_at", datetime.now(timezone.utc).isoformat())
+        payload.setdefault("entity_id", f"{self.session_id}:{stage_name}:{step_name}:{sub_step_name}")
+        normalized_increment = self._normalize_progress_increment(progress_increment)
+        if self.console_step_logging_enabled or status == "ended_error":
+            self._console_log(
+                f"{status} | stage='{stage_name}' step='{step_name}' sub_step='{sub_step_name}' progress={normalized_increment} | {message}",
+                level="ERROR" if status == "ended_error" else "INFO"
+            )
+        if not self.enabled:
+            return effective_step_id
+        import json
+        import time
+        event = {
+            "session_id": self.session_id,
+            "step_id": effective_step_id,
+            "stage_name": str(stage_name or ""),
+            "step_name": str(step_name or ""),
+            "sub_step_name": str(sub_step_name or ""),
+            "progress_increment": normalized_increment,
+            "message": str(message or ""),
+            "status": str(status or "started"),
+            "result_json": payload,
+        }
+        with self._lock:
+            with open(self._spool_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(event, ensure_ascii=True) + "\n")
+        now = time.time()
+        if (now - self._last_flush_attempt_epoch) >= self._flush_interval_seconds:
+            self._last_flush_attempt_epoch = now
+            self._trigger_async_flush(force=False, finalize=False)
+        return event["step_id"]
+
+    def _trigger_async_flush(self, force: bool, finalize: bool):
+        import threading
+        with self._lock:
+            if self._flush_thread and self._flush_thread.is_alive():
+                return
+            self._flush_thread = threading.Thread(
+                target=self.flush_pending,
+                kwargs={"force": force, "finalize": finalize},
+                daemon=True,
+                name=f"AtomicWriterFlush_{self.session_id}"
+            )
+            self._flush_thread.start()
+
+    def _get_session_processing_status(self):
+        if not self.enabled:
+            return None
+        try:
+            rows = self.spark.sql(
+                f"SELECT processing_status FROM {self.session_table} WHERE session_id = {self.session_id} LIMIT 1"
+            ).collect()
+            if not rows:
+                return None
+            return str(rows[0]["processing_status"]).lower() if rows[0]["processing_status"] is not None else None
+        except Exception as e:
+            self.logger.warning(f"AtomicWriter: failed reading processing_status: {get_clean_error_message(e)}")
+            return None
+
+    def _consume_pending_events_stream(self, ts: str, chunk_size: int = 300):
+        import os
+        import json
+        inserted_count = 0
+        progress_increment_sum = 0.0
+        new_offset = self._spool_offset
+        with self._lock:
+            if not os.path.exists(self._spool_path):
+                return inserted_count, new_offset, progress_increment_sum
+            with open(self._spool_path, "r", encoding="utf-8") as f:
+                f.seek(self._spool_offset)
+                current_chunk = []
+                while True:
+                    line = f.readline()
+                    if not line:
+                        break
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        current_chunk.append(json.loads(line))
+                    except Exception:
+                        continue
+                    if len(current_chunk) >= chunk_size:
+                        progress_increment_sum += self._insert_steps_chunk(current_chunk, ts)
+                        inserted_count += len(current_chunk)
+                        current_chunk = []
+                if current_chunk:
+                    progress_increment_sum += self._insert_steps_chunk(current_chunk, ts)
+                    inserted_count += len(current_chunk)
+                new_offset = f.tell()
+        return inserted_count, new_offset, progress_increment_sum
+
+    def _insert_steps_chunk(self, rows: list, ts: str):
+        if not rows:
+            return 0.0
+        import time
+        from pyspark.sql.types import StructType, StructField, LongType, StringType, DoubleType
+        schema = StructType([
+            StructField("session_id", LongType(), False),
+            StructField("step_id", LongType(), False),
+            StructField("stage_name", StringType(), True),
+            StructField("step_name", StringType(), True),
+            StructField("sub_step_name", StringType(), True),
+            StructField("progress_increment", DoubleType(), True),
+            StructField("message", StringType(), True),
+            StructField("status", StringType(), True),
+            StructField("result_json_str", StringType(), True),
+        ])
+        payload_rows = []
+        success_increment_sum = 0.0
+        for row in rows:
+            status = str(row.get("status", "") or "")
+            inc = float(row.get("progress_increment", 0.0) or 0.0)
+            if status == "ended_success":
+                success_increment_sum += inc
+            payload_rows.append((
+                int(row.get("session_id", self.session_id)),
+                int(row.get("step_id")),
+                str(row.get("stage_name", "")),
+                str(row.get("step_name", "")),
+                str(row.get("sub_step_name", "")),
+                inc,
+                str(row.get("message", "")),
+                status,
+                self._safe_json_str(row.get("result_json", {}))
+            ))
+        df = self.spark.createDataFrame(payload_rows, schema=schema)
+        view_name = f"_inspire_steps_queue_{self.session_id}_{int(time.time() * 1000)}"
+        df.createOrReplaceTempView(view_name)
+        insert_sql = f"""
+        INSERT INTO {self.steps_table} (
+            session_id, step_id, last_updated, stage_name, step_name, sub_step_name, progress_increment, message, status, result_json
+        )
+        SELECT
+            session_id,
+            step_id,
+            TIMESTAMP('{ts}') AS last_updated,
+            stage_name,
+            step_name,
+            sub_step_name,
+            progress_increment,
+            message,
+            status,
+            parse_json(result_json_str) AS result_json
+        FROM {view_name}
+        """
+        self.spark.sql(insert_sql)
+        self.spark.catalog.dropTempView(view_name)
+        return success_increment_sum
+
+    def _update_session_ready(self, ts: str, progress_increment_sum: float):
+        update_sql = f"""
+        UPDATE {self.session_table}
+        SET
+            completed_percent = LEAST(99.0, CAST(FLOOR(completed_percent + {float(progress_increment_sum)}) AS DOUBLE)),
+            processing_status = 'ready',
+            last_updated = TIMESTAMP('{ts}'),
+            inspire_json = parse_json('{self._escape_sql_str(self._safe_json_str({"last_flush": ts}))}')
+        WHERE session_id = {self.session_id}
+        """
+        self.spark.sql(update_sql)
+
+    def _finalize_session(self, ts: str, final_results_json=None):
+        final_payload = final_results_json if final_results_json is not None else {"completed": True, "completed_on": ts}
+        final_payload_sql = self._escape_sql_str(self._safe_json_str(final_payload))
+        finalize_sql = f"""
+        UPDATE {self.session_table}
+        SET
+            completed_percent = 100.0,
+            processing_status = 'ready',
+            last_updated = TIMESTAMP('{ts}'),
+            completed_on = TIMESTAMP('{ts}'),
+            inspire_json = parse_json('{final_payload_sql}'),
+            results_json = parse_json('{final_payload_sql}')
+        WHERE session_id = {self.session_id}
+        """
+        self.spark.sql(finalize_sql)
+
+    def flush_pending(self, force: bool = False, finalize: bool = False, final_results_json=None):
+        if not self.enabled:
+            return 0
+        with self._flush_lock:
+            if not force:
+                processing_status = self._get_session_processing_status()
+                if processing_status != "done":
+                    return 0
+            ts = self._utc_now_str()
+            inserted_count, new_offset, progress_increment_sum = self._consume_pending_events_stream(ts=ts, chunk_size=300)
+            if inserted_count == 0 and not finalize:
+                return 0
+            with self._lock:
+                self._spool_offset = max(self._spool_offset, new_offset)
+            if finalize:
+                self._finalize_session(ts, final_results_json=final_results_json)
+            elif inserted_count > 0:
+                self._update_session_ready(ts, progress_increment_sum)
+            return inserted_count
+
+    def finalize_pipeline(self, message: str = "Pipeline completed", final_results_json=None):
+        if not self.enabled:
+            self._console_log(f"finalize (console-only): {message}")
+            return
+        self.emit_step(
+            stage_name="Inspire Journey",
+            step_name="Inspire pipeline completed",
+            sub_step_name="Completed",
+            progress_increment=1.0,
+            message="Completed",
+            status="ended_success",
+            result_json={"session_id": self.session_id}
+        )
+        self.flush_pending(force=True, finalize=True, final_results_json=final_results_json)
+        self._console_log("finalize completed with forced flush and session completion")
+
 
 class DatabricksInspire:
     
@@ -14492,6 +16585,191 @@ class DatabricksInspire:
             f"Do NOT use generic phrases like 'General business operations'"
         )
 
+    @staticmethod
+    def _story_clean_text(value: str) -> str:
+        import re
+        text = str(value or "")
+        text = text.replace("_PROMPT", "")
+        text = text.replace("_", " ")
+        text = re.sub(r"\s+", " ", text).strip()
+        text = text.replace("LLM", "AI")
+        text = text.replace("SQL", "implementation")
+        return text
+
+    def _story_status_line(self, status: str, message: str, fallback: str) -> str:
+        context = self._story_clean_text(fallback or "")
+        if status == "started":
+            return f"In progress: {context.lower()}" if context else "In progress"
+        if status == "ended_success":
+            return f"Completed: {context.lower()}" if context else "Completed"
+        if status == "ended_error":
+            return f"Needs attention: {context.lower()}" if context else "Needs attention"
+        if status == "ended_warning":
+            return f"Completed with caution: {context.lower()}" if context else "Completed with caution"
+        return context if context else "Progress update"
+
+    def _story_prompt_labels(self, prompt_name: str, step_name: str, status: str, message: str):
+        stage_name, step_title = PROMPT_STORY_TITLES.get(
+            prompt_name,
+            ("Inspire Progress", f"Processing {self._story_clean_text(prompt_name)}")
+        )
+        sub_step_name = self._story_status_line(status, message, step_name)
+        return stage_name, step_title, sub_step_name
+
+    def _story_prompt_message(self, prompt_name: str, status: str, step_title: str, sub_step_name: str) -> str:
+        if status == "started":
+            return PROMPT_STORY_STARTED_MESSAGES.get(
+                prompt_name,
+                f"Inspire has started {self._story_clean_text(step_title).lower()}"
+            )
+        if status == "ended_success":
+            return f"Inspire has completed {self._story_clean_text(step_title).lower()}"
+        if status == "ended_warning":
+            return f"Inspire has completed {self._story_clean_text(step_title).lower()} with caution"
+        if status == "ended_error":
+            return f"Inspire needs attention while {self._story_clean_text(step_title).lower()}"
+        return sub_step_name
+
+    def _story_pipeline_labels(self, stage_name: str, step_name: str, sub_step_name: str, status: str, message: str):
+        stage_map = {
+            "Pipeline": "Inspire Journey",
+            "Initialization": "Setup",
+            "Business Context": "Business Understanding",
+            "Document Generation": "Executive Readout",
+            "Excel Generation": "Executive Readout",
+            "Artifact Writing": "Executive Readout",
+            "Dashboard": "Executive Readout",
+            "Summary": "Executive Readout",
+            "Translation": "Localization",
+            "SQL Generation": "Implementation Planning",
+            "Use Cases Scoring": "Use Case Prioritization",
+            "Business Domains Clustering": "Domain Mapping",
+            "AI Use Cases Generation": "Use Case Design",
+        }
+        base_stage = stage_map.get(stage_name, self._story_clean_text(stage_name or "Inspire Progress"))
+        if stage_name == "Pipeline" and step_name == "Execution" and status == "started":
+            base_step = "Inspire pipeline started"
+        elif stage_name == "Pipeline" and step_name == "Execution" and status == "ended_success":
+            base_step = "Inspire pipeline completed"
+        elif stage_name == "Pipeline" and step_name == "Execution" and status == "ended_error":
+            base_step = "Inspire pipeline needs attention"
+        else:
+            clean_step = self._story_clean_text(step_name)
+            base_step = f"Inspire is working on {clean_step.lower()}" if clean_step else "Inspire is processing your request"
+        live_text = self._story_status_line(status, message, sub_step_name)
+        return base_stage, base_step, live_text
+
+    def _story_pipeline_message(self, status: str, step_name: str, sub_step_name: str) -> str:
+        clean_step = self._story_clean_text(step_name)
+        if status == "started":
+            return f"Inspire has started {clean_step.lower()}" if clean_step else "Inspire has started processing"
+        if status == "ended_success":
+            return f"Inspire has completed {clean_step.lower()}" if clean_step else "Inspire has completed processing"
+        if status == "ended_warning":
+            return f"Inspire has completed {clean_step.lower()} with caution" if clean_step else "Inspire has completed with caution"
+        if status == "ended_error":
+            return f"Inspire needs attention while {clean_step.lower()}" if clean_step else "Inspire needs attention"
+        return sub_step_name
+
+    def _emit_prompt_status(self, prompt_name: str, step_name: str, status: str, message: str = "", result_json=None, step_id: int = None):
+        if not getattr(self, "atomic_writer", None):
+            return None
+        tracking_meta = PROMPT_TRACKING_CONFIG.get(prompt_name, None)
+        if tracking_meta:
+            total_prompt_budget = max(1, int(round(float(tracking_meta["progress_increment"]))))
+        else:
+            total_prompt_budget = 1
+
+        payload = result_json if isinstance(result_json, dict) else {}
+        entity_id = str(payload.get("entity_id") or f"{prompt_name}:{step_name}")
+
+        progress_increment = 0
+        if status == "started":
+            with self._prompt_progress_lock:
+                self._prompt_entities_seen.setdefault(prompt_name, set()).add(entity_id)
+        elif status == "ended_success":
+            with self._prompt_progress_lock:
+                self._prompt_entities_seen.setdefault(prompt_name, set()).add(entity_id)
+                entities_seen = self._prompt_entities_seen.get(prompt_name, set())
+                emitted_so_far = int(self._prompt_progress_emitted.get(prompt_name, 0))
+                remaining_budget = max(0, total_prompt_budget - emitted_so_far)
+                if remaining_budget > 0:
+                    if prompt_name in MULTI_ENTITY_PROGRESS_PROMPTS:
+                        progress_increment = 1
+                    else:
+                        denominator = max(1, len(entities_seen))
+                        progress_increment = max(1, remaining_budget // denominator)
+                        progress_increment = min(progress_increment, remaining_budget)
+                self._prompt_progress_emitted[prompt_name] = emitted_so_far + progress_increment
+
+        story_stage_name, story_step_name, story_sub_step_name = self._story_prompt_labels(
+            prompt_name=prompt_name,
+            step_name=step_name,
+            status=status,
+            message=message
+        )
+        story_message = self._story_prompt_message(
+            prompt_name=prompt_name,
+            status=status,
+            step_title=story_step_name,
+            sub_step_name=story_sub_step_name
+        )
+
+        return self.atomic_writer.emit_step(
+            stage_name=story_stage_name,
+            step_name=story_step_name,
+            sub_step_name=story_sub_step_name,
+            progress_increment=progress_increment,
+            message=story_message,
+            status=status,
+            result_json=result_json if result_json is not None else {},
+            step_id=step_id
+        )
+
+    def _emit_pipeline_status(self, stage_name: str, step_name: str, sub_step_name: str, message: str, status: str,
+                              progress_increment: float = 0.0, result_json=None):
+        if not getattr(self, "atomic_writer", None):
+            return None
+        story_stage_name, story_step_name, story_sub_step_name = self._story_pipeline_labels(
+            stage_name=stage_name,
+            step_name=step_name,
+            sub_step_name=sub_step_name,
+            status=status,
+            message=message
+        )
+        story_message = self._story_pipeline_message(
+            status=status,
+            step_name=story_step_name,
+            sub_step_name=story_sub_step_name
+        )
+        return self.atomic_writer.emit_step(
+            stage_name=story_stage_name,
+            step_name=story_step_name,
+            sub_step_name=story_sub_step_name,
+            progress_increment=progress_increment,
+            message=story_message,
+            status=status,
+            result_json=result_json if result_json is not None else {}
+        )
+
+    def finalize_atomic_writer(self, success: bool = True, error_message: str = ""):
+        if not getattr(self, "atomic_writer", None):
+            return
+        final_results_json = getattr(self, "final_inspire_results_json", None)
+        if success:
+            self.atomic_writer.finalize_pipeline(message="Pipeline completed", final_results_json=final_results_json)
+        else:
+            self._emit_pipeline_status(
+                stage_name="Pipeline",
+                step_name="Execution",
+                sub_step_name="Finalize",
+                message=error_message or "Pipeline failed",
+                status="ended_error",
+                progress_increment=1.0,
+                result_json={"session_id": self.session_id}
+            )
+            self.atomic_writer.flush_pending(force=True, finalize=True, final_results_json=final_results_json)
+
     def __init__(self, **kwargs):
         self.spark = spark
         self.dbutils = dbutils
@@ -14530,67 +16808,75 @@ class DatabricksInspire:
         if not self.output_languages:
             self.output_languages = ["English"]
             
+        _runtime = TECHNICAL_CONTEXT["runtime"]
+        
         raw_max_parallelism = kwargs.get("max_parallelism", None)
         if raw_max_parallelism is None or str(raw_max_parallelism).strip() == "":
-            self.max_parallelism = 0
+            self.max_parallelism = _runtime["default_max_parallelism"]
             self.auto_parallelism = True
         else:
             self.max_parallelism = min(int(raw_max_parallelism), 100)
             self.auto_parallelism = False
-        self.scan_parallelism = int(kwargs.get("scan_parallelism", 5) or 5)
-        if self.scan_parallelism < 1:
-            self.scan_parallelism = 5
-        if self.scan_parallelism > 20:
-            self.scan_parallelism = 20
-        self.cluster_memory_gb = int(kwargs.get("cluster_memory_gb", 32) or 32)
-        self.cluster_worker_count = int(kwargs.get("cluster_worker_count", 2) or 2)
+        self.scan_parallelism = _runtime["scan_parallelism"]
+        self.cluster_memory_gb = int(kwargs.get("cluster_memory_gb", _runtime["cluster_memory_gb"]) or _runtime["cluster_memory_gb"])
+        self.cluster_worker_count = int(kwargs.get("cluster_worker_count", _runtime["cluster_worker_count"]) or _runtime["cluster_worker_count"])
         
-        # === Use unstructured data flag (from Generation Options) ===
         self.use_unstructured_data = kwargs.get("use_unstructured_data", "yes").lower() == "yes"
         
-        # === Technical exclusion strategy (from Generation Options) ===
         raw_technical_exclusion_strategy = kwargs.get("technical_exclusion_strategy", "Aggressive")
         if not raw_technical_exclusion_strategy or str(raw_technical_exclusion_strategy).strip().lower() == "none":
             raw_technical_exclusion_strategy = "Aggressive"
         self.technical_exclusion_strategy = raw_technical_exclusion_strategy
         
-        # === Operation Mode (NEW - controls main operation) ===
         self.operation_mode = kwargs.get("operation_mode", "Discover Usecases")
         
-        # === SQL Code Generation Flag (from Generation Options) ===
+        self.table_election_mode = kwargs.get("table_election_mode", "Let Inspire Decides")
+        if self.table_election_mode not in ("Let Inspire Decides", "All Tables", "Transactional Only"):
+            self.table_election_mode = "Let Inspire Decides"
+        
+        self.use_cases_quality = kwargs.get("use_cases_quality", "High Quality")
+        if self.use_cases_quality not in ("Good Quality", "High Quality", "Very High Quality"):
+            self.use_cases_quality = "High Quality"
+        
         self.generate_sql_code = "SQL Code" in self.generate_choices
         if not self.generate_sql_code:
             log_print("ℹ️ SQL Code generation DISABLED - notebooks will have placeholder SQL")
         
-        # === Sample Results Flag (from Generation Options) ===
         self.generate_sample_result = "Sample Results" in self.generate_choices
         
-        # === SQL Model Serving (model endpoint for ai_query in generated SQL) ===
         self.sql_model_serving = kwargs.get("sql_model_serving", "databricks-gpt-oss-120b").strip()
         if not self.sql_model_serving:
             self.sql_model_serving = "databricks-gpt-oss-120b"
-        
-        # === Quality Level (controls quality filtering) ===
-        self.quality_level = kwargs.get("quality_level", "Extreme Quality").strip()
-        if not self.quality_level:
-            self.quality_level = "Extreme Quality"
-        self.extreme_quality_mode = (self.quality_level == "Extreme Quality")
+        _quality_filter_map = {
+            "Good Quality": None,
+            "High Quality": {'Medium', 'High', 'Very High', 'Ultra High'},
+            "Very High Quality": {'High', 'Very High', 'Ultra High'},
+        }
+        self.quality_filter_acceptable = _quality_filter_map.get(self.use_cases_quality)
 
-        # === NEW: Global LLM timeout and retry controls ===
-        # User requested explicit global timeout of 300 seconds
-        self.llm_timeout_seconds = 300 
-        # Base timeout for SQL generation - will be adjusted adaptively based on CTE count
-        self.sql_generation_base_timeout = 180  # Base: 3 minutes
-        self.sql_generation_per_cte_timeout = 30  # Add 30s per CTE
-        self.sql_generation_max_timeout = 360  # Cap at 6 minutes
-        # max_retry represents how many times to retry after the first attempt
-        self.max_retry_attempts = max(0, int(kwargs.get("max_retry", 1)))
+        _sql_per_domain_raw = str(kwargs.get("sql_generation_per_domain", "0")).strip()
+        if _sql_per_domain_raw.lower() == "all":
+            self.max_sql_ucs_per_domain = None
+        else:
+            try:
+                _sql_limit = int(_sql_per_domain_raw)
+            except Exception:
+                _sql_limit = 0
+            self.max_sql_ucs_per_domain = max(0, min(5, _sql_limit))
+        self.min_total_for_sql_limiting = 15
+
+        self.llm_timeout_seconds = _runtime["llm_timeout_seconds"]
+        self.sql_generation_base_timeout = _runtime["sql_generation_base_timeout"]
+        self.sql_generation_per_cte_timeout = _runtime["sql_generation_per_cte_timeout"]
+        self.sql_generation_max_timeout = _runtime["sql_generation_max_timeout"]
+        self.max_retry_attempts = max(0, _runtime["max_retry_attempts"])
         
         # === NEW: Initialize merged business context ===
         self.merged_business_context = {}
         
         # === NEW: JSON file path for docs-only mode ===
         self.json_file_path = kwargs.get("json_file_path", None)
+        self.final_inspire_results_json = {}
         
         # === Inspire Database (user-provided catalog.database for all result tables) ===
         self.inspire_database = kwargs.get("inspire_database", "")
@@ -14598,15 +16884,39 @@ class DatabricksInspire:
             self.inspire_database = self.inspire_database.strip()
         
         # === Session ID (unique per inspire session for tracking) ===
-        import uuid as _uuid_mod
-        _MAX_SIGNED_INT64 = 9223372036854775807
-        self.session_id = (_uuid_mod.uuid4().int >> 64) & _MAX_SIGNED_INT64
+        _user_session_id = kwargs.get("session_id", "")
+        if _user_session_id:
+            try:
+                self.session_id = int(_user_session_id)
+            except ValueError:
+                import hashlib as _hashlib_mod
+                _MAX_SIGNED_INT64 = 9223372036854775807
+                _hash_int = int(_hashlib_mod.sha256(_user_session_id.encode()).hexdigest(), 16)
+                self.session_id = _hash_int & _MAX_SIGNED_INT64
+        else:
+            import uuid as _uuid_mod
+            _MAX_SIGNED_INT64 = 9223372036854775807
+            self.session_id = (_uuid_mod.uuid4().int >> 64) & _MAX_SIGNED_INT64
+
+        self._prompt_progress_lock = threading.Lock()
+        self._prompt_entities_seen = {}
+        self._prompt_progress_emitted = {}
+
+        self.atomic_writer = AtomicWriter(
+            spark=self.spark,
+            logger=logging.getLogger("AtomicWriterBootstrap"),
+            inspire_database=kwargs.get("inspire_database", ""),
+            session_id=self.session_id,
+            widget_values=dict(kwargs)
+        )
         
         # === Use case tracking table infrastructure ===
         import threading as _threading_mod
         self._tracking_lock = _threading_mod.Lock()
         self._tracking_table_created = False
         self._tracking_table_name = f"{self.inspire_database}.__inspire_usecases" if self.inspire_database else ""
+
+        self._cached_schema_markdown = None
 
         # --- Setup Logging & Output ---
         self.sanitized_customer_name = self._sanitize_name(self.business_name)
@@ -14633,6 +16943,11 @@ class DatabricksInspire:
 
         setup_logging(self.local_log_output_dir) 
         self.logger = logging.getLogger(self.__class__.__name__)
+        _root_logger = logging.getLogger()
+        if not any(isinstance(_f, DuplicateMessageFilter) for _f in _root_logger.filters):
+            _root_logger.addFilter(DuplicateMessageFilter(window_seconds=1.5))
+        if not any(isinstance(_f, DuplicateMessageFilter) for _f in self.logger.filters):
+            self.logger.addFilter(DuplicateMessageFilter(window_seconds=1.5))
         
         # Initialize memory-efficient storage manager
         self.storage_manager = IntermediateStorageManager(base_path="/tmp", logger=self.logger)
@@ -14675,7 +16990,7 @@ class DatabricksInspire:
                 self.w_client.workspace.mkdirs(self.docs_output_dir)
                 self.logger.info(f"Successfully created all output directories.")
         except Exception as e:
-            self.logger.error(f"Failed to create workspace directories: {e}")
+            self.logger.error(f"Failed to create workspace directories: {get_clean_error_message(e)}")
         
         if 'PROMPT_TEMPLATES' not in globals():
             self.logger.critical("CRITICAL ERROR: 'PROMPT_TEMPLATES' dictionary is not defined. Please run the cell defining it.")
@@ -14688,8 +17003,10 @@ class DatabricksInspire:
             judge_llm_config=AI_MODEL_NAME,
             prompt_templates=PROMPT_TEMPLATES,
             default_timeout_seconds=self.llm_timeout_seconds,
-            max_retry_attempts=self.max_retry_attempts
+            max_retry_attempts=self.max_retry_attempts,
+            status_emitter=self._emit_prompt_status
         )
+        self.ai_agent.enable_llm_cache(self.session_id)
         
         self.translation_service = TranslationService(ai_agent=self.ai_agent, logger=self.logger)
         
@@ -14732,19 +17049,14 @@ class DatabricksInspire:
                     )
         
     def _ensure_inspire_database_exists(self):
-        """Create the inspire database (schema) if it does not exist. Called once at the start of run().
-        NOTE: Does NOT create catalogs — the catalog must already exist in Unity Catalog.
-        """
+        """Create the inspire database if it does not exist. Called once at the start of run()."""
         if not self.inspire_database:
             return
         try:
-            # Use CREATE SCHEMA which works within an existing catalog
-            self.spark.sql(f"CREATE SCHEMA IF NOT EXISTS {self.inspire_database}")
+            self.spark.sql(f"CREATE DATABASE IF NOT EXISTS {self.inspire_database}")
             self.logger.info(f"✅ Ensured inspire database exists: {self.inspire_database}")
-            log_print(f"✅ Ensured inspire database exists: {self.inspire_database}")
         except Exception as e:
-            self.logger.error(f"Failed to create inspire database {self.inspire_database}: {e}")
-            log_print(f"❌ Failed to create inspire database {self.inspire_database}: {e}", level="ERROR")
+            self.logger.error(f"Failed to create inspire database {self.inspire_database}: {get_clean_error_message(e)}")
             raise
 
     def _create_tracking_table(self):
@@ -14799,10 +17111,8 @@ class DatabricksInspire:
                 self.spark.sql(create_sql)
                 self._tracking_table_created = True
                 self.logger.info(f"✅ Tracking table created: {self._tracking_table_name}")
-                log_print(f"✅ Tracking table created: {self._tracking_table_name}")
             except Exception as e:
-                self.logger.error(f"Failed to create tracking table {self._tracking_table_name}: {e}")
-                log_print(f"❌ Failed to create tracking table {self._tracking_table_name}: {e}", level="ERROR")
+                self.logger.error(f"Failed to create tracking table {self._tracking_table_name}: {get_clean_error_message(e)}")
 
     def _tracking_unique_view(self, prefix: str) -> str:
         """Generate a session-unique temp view name to avoid any cross-thread collision."""
@@ -14844,6 +17154,13 @@ class DatabricksInspire:
                     ))
                 if not rows:
                     return
+                # Deduplicate by merge key (session_id[0], use_case[4]) — keep last occurrence
+                seen = {}
+                for idx, row in enumerate(rows):
+                    seen[(row[0], row[4])] = idx
+                if len(seen) < len(rows):
+                    self.logger.warning(f"Deduplicating {len(rows) - len(seen)} duplicate use-case names in tracking merge batch")
+                    rows = [rows[i] for i in sorted(seen.values())]
                 schema = StructType([
                     StructField("session_id", LongType(), False),
                     StructField("id", StringType(), True),
@@ -14903,10 +17220,8 @@ class DatabricksInspire:
                 self.spark.sql(merge_sql)
                 self.spark.catalog.dropTempView(view_name)
                 self.logger.info(f"✅ MERGED {len(rows)} use cases into tracking table (immediate)")
-                log_print(f"✅ MERGED {len(rows)} use cases into tracking table (immediate)")
             except Exception as e:
-                self.logger.error(f"Failed to merge use cases into tracking table: {e}")
-                log_print(f"❌ Failed to merge use cases into tracking table: {e}", level="ERROR")
+                self.logger.error(f"Failed to merge use cases into tracking table: {get_clean_error_message(e)}")
 
     def _tracking_replace_session(self, use_cases: list):
         """Delete all rows for this session and re-insert with final IDs.
@@ -15007,10 +17322,8 @@ class DatabricksInspire:
                 df = self.spark.createDataFrame(rows, schema=schema)
                 df.write.format("delta").mode("append").saveAsTable(self._tracking_table_name)
                 self.logger.info(f"✅ Replaced session rows: {len(rows)} use cases with final IDs")
-                log_print(f"✅ Tracking table: replaced session rows with {len(rows)} final-ID use cases")
             except Exception as e:
-                self.logger.error(f"Failed to replace session rows in tracking table: {e}")
-                log_print(f"❌ Failed to replace session rows in tracking table: {e}", level="ERROR")
+                self.logger.error(f"Failed to replace session rows in tracking table: {get_clean_error_message(e)}")
 
     def _tracking_update_scores(self, use_cases: list):
         """MERGE scoring columns into the tracking table after scoring is complete.
@@ -15098,10 +17411,8 @@ class DatabricksInspire:
                 self.spark.sql(merge_sql)
                 self.spark.catalog.dropTempView(view_name)
                 self.logger.info(f"✅ MERGED scores for {len(rows)} use cases in tracking table")
-                log_print(f"✅ Tracking table: MERGED scores for {len(rows)} use cases")
             except Exception as e:
-                self.logger.error(f"Failed to merge scores in tracking table: {e}")
-                log_print(f"❌ Failed to merge scores in tracking table: {e}", level="ERROR")
+                self.logger.error(f"Failed to merge scores in tracking table: {get_clean_error_message(e)}")
 
     def _tracking_update_quality(self, use_cases: list):
         """MERGE quality and justification columns after quality scoring.
@@ -15143,10 +17454,8 @@ class DatabricksInspire:
                 self.spark.sql(merge_sql)
                 self.spark.catalog.dropTempView(view_name)
                 self.logger.info(f"✅ MERGED quality for {len(rows)} use cases in tracking table")
-                log_print(f"✅ Tracking table: MERGED quality for {len(rows)} use cases")
             except Exception as e:
-                self.logger.error(f"Failed to merge quality in tracking table: {e}")
-                log_print(f"❌ Failed to merge quality in tracking table: {e}", level="ERROR")
+                self.logger.error(f"Failed to merge quality in tracking table: {get_clean_error_message(e)}")
 
     def _tracking_update_sql(self, use_cases: list):
         """MERGE generated SQL and result table after SQL generation.
@@ -15191,10 +17500,8 @@ class DatabricksInspire:
                 self.spark.sql(merge_sql)
                 self.spark.catalog.dropTempView(view_name)
                 self.logger.info(f"✅ MERGED SQL for {len(rows)} use cases in tracking table")
-                log_print(f"✅ Tracking table: MERGED SQL for {len(rows)} use cases")
             except Exception as e:
-                self.logger.error(f"Failed to merge SQL in tracking table: {e}")
-                log_print(f"❌ Failed to merge SQL in tracking table: {e}", level="ERROR")
+                self.logger.error(f"Failed to merge SQL in tracking table: {get_clean_error_message(e)}")
 
     def _calculate_dynamic_parallelism(self, total_tables, total_schema_chars, safe_context_limit, base_prompt_size):
         memory_pool = max(1, self.cluster_memory_gb * max(self.cluster_worker_count, 1))
@@ -15356,7 +17663,7 @@ class DatabricksInspire:
             return context_data
             
         except Exception as e:
-            self.logger.error(f"Failed to get business context from LLM: {e}")
+            self.logger.error(f"Failed to get business context from LLM: {get_clean_error_message(e)}")
             return {}
     
     def _merge_business_contexts(self, llm_context: dict, user_context_str: str) -> dict:
@@ -15543,27 +17850,49 @@ Start your response with the CSV header line: use_case_id,domain
             
             final_use_cases_with_subdomains = []
             
-            self.logger.info(f"🔄 Processing {len(domain_usecases_map)} domains sequentially for subdomain discovery...")
+            subdomain_workers = min(subdomain_parallelism, len(domain_usecases_map))
+            self.logger.info(f"🚀 Processing {len(domain_usecases_map)} domains in parallel (workers={subdomain_workers}) for subdomain discovery...")
             import time as _time
-            for idx, (domain_name, domain_use_cases) in enumerate(domain_usecases_map.items(), 1):
+            
+            domain_items = list(domain_usecases_map.items())
+            total_d = len(domain_items)
+            
+            def _detect_subdomain_task(args):
+                idx, (domain_name, domain_use_cases) = args
                 domain_start = _time.time()
-                self.logger.info(f"🔄 [{idx}/{len(domain_usecases_map)}] Domain '{domain_name}' ({len(domain_use_cases)} use cases)...")
-                log_print(f"🔄 [{idx}/{len(domain_usecases_map)}] Subdomain discovery: '{domain_name}'")
+                self.logger.info(f"🔄 [{idx}/{total_d}] Domain '{domain_name}' ({len(domain_use_cases)} use cases)...")
+                log_print(f"🔄 [{idx}/{total_d}] Subdomain discovery: '{domain_name}'")
                 try:
                     result = self._detect_subdomains_for_domain(domain_name, domain_use_cases, language)
                     elapsed = _time.time() - domain_start
                     if result:
-                        final_use_cases_with_subdomains.extend(result)
-                        self.logger.info(f"✅ [{idx}/{len(domain_usecases_map)}] Domain '{domain_name}' complete in {elapsed:.1f}s ({len(result)} use cases)")
+                        self.logger.info(f"✅ [{idx}/{total_d}] Domain '{domain_name}' complete in {elapsed:.1f}s ({len(result)} use cases)")
+                        return result
                     else:
                         fallback = self._assign_default_subdomains(domain_use_cases, domain_name)
-                        final_use_cases_with_subdomains.extend(fallback)
-                        self.logger.warning(f"⚠️ [{idx}/{len(domain_usecases_map)}] Domain '{domain_name}': empty after {elapsed:.1f}s, used defaults")
+                        self.logger.warning(f"⚠️ [{idx}/{total_d}] Domain '{domain_name}': empty after {elapsed:.1f}s, used defaults")
+                        return fallback
                 except Exception as e:
                     elapsed = _time.time() - domain_start
-                    self.logger.error(f"❌ [{idx}/{len(domain_usecases_map)}] Domain '{domain_name}' failed after {elapsed:.1f}s: {e}")
+                    self.logger.error(f"❌ [{idx}/{total_d}] Domain '{domain_name}' failed after {elapsed:.1f}s: {get_clean_error_message(e)}")
                     fallback = self._assign_default_subdomains(domain_use_cases, domain_name)
-                    final_use_cases_with_subdomains.extend(fallback)
+                    return fallback
+            
+            _subdomain_total_timeout = self.llm_timeout_seconds * 3 * len(domain_items) + 120
+            with _SafeExecutorContext(max_workers=subdomain_workers, thread_name_prefix="subdomain", logger=self.logger, name="SubdomainDetection") as ctx:
+                futures = {ctx.submit(_detect_subdomain_task, (i, item)): i 
+                           for i, item in enumerate(domain_items, 1)}
+                try:
+                    for future in safe_as_completed(futures, timeout=_subdomain_total_timeout):
+                        try:
+                            result_ucs = future.result(timeout=self.llm_timeout_seconds * 3)
+                            if result_ucs:
+                                final_use_cases_with_subdomains.extend(result_ucs)
+                        except Exception as exc:
+                            self.logger.error(f"Subdomain detection task failed: {get_clean_error_message(exc)}")
+                except concurrent.futures.TimeoutError:
+                    ctx.mark_timed_out()
+                    self.logger.error(f"Subdomain detection timed out globally ({_subdomain_total_timeout}s)")
             
             self.logger.info(f"✅ Domain assignment and subdomain discovery complete! {len(final_use_cases_with_subdomains)} use cases processed")
             
@@ -15576,7 +17905,7 @@ Start your response with the CSV header line: use_case_id,domain
             return final_use_cases_with_subdomains
             
         except Exception as e:
-            self.logger.error(f"Failed to assign user domains via LLM: {e}. Using fallback distribution with subdomain discovery.")
+            self.logger.error(f"Failed to assign user domains via LLM: {get_clean_error_message(e)}. Using fallback distribution with subdomain discovery.")
             
             # Fallback: distribute use cases evenly across user domains
             for idx, uc in enumerate(use_cases):
@@ -15593,18 +17922,32 @@ Start your response with the CSV header line: use_case_id,domain
                     domain_usecases_map[domain].append(uc)
             
             final_use_cases = []
-            for domain_name, domain_use_cases in domain_usecases_map.items():
+            fallback_workers = min(4, len(domain_usecases_map))
+            
+            def _fallback_subdomain_task(domain_name, domain_use_cases):
                 try:
-                    use_cases_with_subdomains = self._detect_subdomains_for_domain(
-                        domain_name, domain_use_cases, language
-                    )
-                    final_use_cases.extend(use_cases_with_subdomains)
+                    return self._detect_subdomains_for_domain(domain_name, domain_use_cases, language)
                 except Exception as sub_e:
                     self.logger.error(f"Subdomain detection failed for domain '{domain_name}': {sub_e}")
-                    # Last resort: set subdomain = "General [Domain]"
                     for uc in domain_use_cases:
                         uc['Subdomain'] = f"General {domain_name}"
-                    final_use_cases.extend(domain_use_cases)
+                    return domain_use_cases
+            
+            _fb_total_timeout = self.llm_timeout_seconds * 3 * len(domain_usecases_map) + 120
+            with _SafeExecutorContext(max_workers=fallback_workers, thread_name_prefix="fb_subdomain", logger=self.logger, name="FallbackSubdomain") as ctx:
+                fb_futures = {ctx.submit(_fallback_subdomain_task, dn, ducs): dn 
+                              for dn, ducs in domain_usecases_map.items()}
+                try:
+                    for future in safe_as_completed(fb_futures, timeout=_fb_total_timeout):
+                        try:
+                            result = future.result(timeout=self.llm_timeout_seconds * 3)
+                            if result:
+                                final_use_cases.extend(result)
+                        except Exception as exc:
+                            self.logger.error(f"Fallback subdomain task failed: {get_clean_error_message(exc)}")
+                except concurrent.futures.TimeoutError:
+                    ctx.mark_timed_out()
+                    self.logger.error(f"Fallback subdomain detection timed out globally ({_fb_total_timeout}s)")
             
             return final_use_cases if final_use_cases else use_cases
     
@@ -16065,7 +18408,7 @@ Start your response with the CSV header line: use_case_id,domain
                 return (True, None)
                 
         except Exception as e:
-            self.logger.debug(f"[{use_case_id}] ⚠️  Remote API validation error: {e}")
+            self.logger.debug(f"[{use_case_id}] ⚠️  Remote API validation error: {get_clean_error_message(e, max_chars=2000)}")
             return (True, None)
     
     def _execute_sql_for_validation(self, sql_query: str, use_case_id: str) -> tuple:
@@ -16238,7 +18581,7 @@ Start your response with the CSV header line: use_case_id,domain
                 return (True, None)
             
         except Exception as e:
-            error_msg = str(e)
+            error_msg = get_clean_error_message(e)
             self.logger.debug(f"[{use_case_id}] ❌ Execution validation failed (exception): {error_msg[:100]}...")
             return (False, error_msg)
     
@@ -16299,7 +18642,14 @@ Start your response with the CSV header line: use_case_id,domain
         
         response_stripped = response_stripped.strip()
         
-        if response_stripped.startswith('--') or response_stripped.upper().startswith('WITH ') or response_stripped.upper().startswith('SELECT '):
+        sql_start_match = re.search(
+            r'^(--|CREATE\b|WITH\b|SELECT\b)',
+            response_stripped,
+            re.MULTILINE | re.IGNORECASE
+        )
+        if sql_start_match:
+            if sql_start_match.start() > 0:
+                response_stripped = response_stripped[sql_start_match.start():]
             sql_text = response_stripped
             for line in response_stripped.splitlines():
                 if line.strip().upper().startswith("COLUMNS_USED"):
@@ -16939,53 +19289,77 @@ Start your response with the CSV header line: use_case_id,domain
 
     def _validate_unquoted_coalesce_defaults(self, sql_clean: str, use_case_id: str) -> list:
         warnings = []
-        sql_no_comments = re.sub(r'--[^\n]*', '', sql_clean)
-        sql_no_strings = re.sub(r"'(?:[^']|'')*'", "''", sql_no_comments)
-        multi_word_pattern = re.compile(
-            r',\s*([A-Za-z_]\w*(?:\s+[A-Za-z_]\w*)+)\s*\)'
-        )
-        single_word_pattern = re.compile(
-            r',\s*([A-Za-z_]\w*)\s*\)\s+AS\s+',
-            re.IGNORECASE
-        )
+        clean = self._position_preserving_clean(sql_clean)
+
         known_string_defaults = {
             'unknown', 'none', 'unspecified', 'unassigned', 'undefined', 'missing',
             'usd', 'eur', 'gbp', 'aed', 'sar', 'egp', 'inr', 'cny', 'jpy',
         }
-        sql_keywords_skip = {
-            'AS', 'IS', 'NOT', 'NULL', 'AND', 'OR', 'IN', 'TRUE', 'FALSE',
-            'END', 'CASE', 'WHEN', 'THEN', 'ELSE', 'OVER', 'BY', 'BETWEEN',
-            'ROWS', 'RANGE', 'UNBOUNDED', 'PRECEDING', 'FOLLOWING', 'CURRENT', 'ROW',
+        sql_keywords_safe = {
+            'null', 'true', 'false', 'current_date', 'current_timestamp',
         }
-        skip_phrases = {
-            'IS NOT NULL', 'IS NULL', 'NOT NULL', 'AS STRING',
-            'AS DOUBLE', 'AS INT', 'AS BOOLEAN', 'AS DECIMAL',
-            'AS DATE', 'AS TIMESTAMP', 'AS BIGINT', 'AS FLOAT',
-            'ORDER BY', 'GROUP BY', 'PARTITION BY', 'ROWS BETWEEN',
-        }
-        for line_num, line in enumerate(sql_no_strings.split('\n'), 1):
-            line_stripped = line.strip()
-            if 'COALESCE' not in line_stripped.upper():
+
+        coalesce_re = re.compile(r'\bCOALESCE\s*\(', re.IGNORECASE)
+
+        for m in coalesce_re.finditer(clean):
+            paren_open = m.end() - 1
+            depth = 1
+            p = paren_open + 1
+            while p < len(clean) and depth > 0:
+                if clean[p] == '(':
+                    depth += 1
+                elif clean[p] == ')':
+                    depth -= 1
+                p += 1
+            if depth != 0:
                 continue
-            for match in multi_word_pattern.finditer(line_stripped):
-                unquoted_text = match.group(1).strip()
-                if unquoted_text.upper() in skip_phrases:
-                    continue
-                words = unquoted_text.split()
-                if all(w.upper() in sql_keywords_skip for w in words):
-                    continue
+            paren_close = p - 1
+
+            args_text = clean[paren_open + 1:paren_close]
+            last_comma = -1
+            inner_depth = 0
+            for ci, ch in enumerate(args_text):
+                if ch == '(':
+                    inner_depth += 1
+                elif ch == ')':
+                    inner_depth -= 1
+                elif ch == ',' and inner_depth == 0:
+                    last_comma = ci
+            if last_comma < 0:
+                continue
+
+            default_text = args_text[last_comma + 1:].strip()
+            if not default_text:
+                continue
+            if default_text.startswith("'") or default_text.startswith('"'):
+                continue
+            try:
+                float(default_text)
+                continue
+            except ValueError:
+                pass
+            if default_text.lower() in sql_keywords_safe:
+                continue
+            if re.match(r'^-?\d+\.?\d*$', default_text):
+                continue
+            if '(' in default_text:
+                continue
+
+            line_num = clean[:m.start()].count('\n') + 1
+            is_multi_word = len(default_text.split()) > 1
+            is_known_single = default_text.lower() in known_string_defaults
+
+            if is_multi_word:
                 warnings.append(
-                    f"Line ~{line_num}: PARSE_SYNTAX_ERROR — Unquoted string default '{unquoted_text}' in COALESCE. "
-                    f"FIX: Add single quotes → COALESCE(..., '{unquoted_text}')"
+                    f"Line ~{line_num}: PARSE_SYNTAX_ERROR — Unquoted string default '{default_text}' in COALESCE. "
+                    f"FIX: Add single quotes → COALESCE(..., '{default_text}')"
                 )
-            for match in single_word_pattern.finditer(line_stripped):
-                word = match.group(1).strip()
-                if word.lower() in known_string_defaults:
-                    warnings.append(
-                        f"Line ~{line_num}: Likely unquoted string default '{word}' in COALESCE. "
-                        f"This will cause UNRESOLVED_COLUMN '{word}'. "
-                        f"FIX: Add single quotes → COALESCE(..., '{word}')"
-                    )
+            elif is_known_single:
+                warnings.append(
+                    f"Line ~{line_num}: Likely unquoted string default '{default_text}' in COALESCE. "
+                    f"This will cause UNRESOLVED_COLUMN '{default_text}'. "
+                    f"FIX: Add single quotes → COALESCE(..., '{default_text}')"
+                )
         return warnings
 
     def _validate_lateral_alias_in_window(self, sql_clean: str, use_case_id: str) -> list:
@@ -18491,6 +20865,114 @@ Start your response with the CSV header line: use_case_id,domain
 
         return warnings
 
+    def _auto_fix_ai_forecast_col_quoting(self, sql_text: str, use_case_id: str) -> tuple:
+        """Auto-fix unquoted column names in AI_FORECAST time_col/value_col/group_col.
+
+        AI_FORECAST expects string literals for column reference parameters:
+          time_col  => 'ds'           (not ds)
+          value_col => 'revenue'      (not revenue)
+          group_col => ARRAY('a','b') (not ARRAY(a, b))
+
+        Bare identifiers cause [UNRESOLVED_COLUMN] because SQL tries to resolve
+        them in the current scope rather than passing them as strings to the TVF.
+
+        Returns (fixed_sql, list_of_fix_descriptions).
+        """
+        fixes = []
+        clean = self._position_preserving_clean(sql_text)
+
+        forecast_re = re.compile(r'\bAI_FORECAST\s*\(', re.IGNORECASE)
+        col_param_re = re.compile(
+            r'\b(time_col|value_col|group_col)\s*=>\s*',
+            re.IGNORECASE,
+        )
+
+        edits = []
+        for fm in forecast_re.finditer(clean):
+            paren_start = fm.end() - 1
+            depth = 1
+            p = paren_start + 1
+            while p < len(clean) and depth > 0:
+                if clean[p] == '(':
+                    depth += 1
+                elif clean[p] == ')':
+                    depth -= 1
+                p += 1
+            if depth != 0:
+                continue
+            forecast_end = p
+            forecast_body = clean[paren_start + 1:forecast_end - 1]
+            body_offset = paren_start + 1
+
+            for cm in col_param_re.finditer(forecast_body):
+                val_start = body_offset + cm.end()
+                remaining = clean[val_start:forecast_end - 1].lstrip()
+                ws_skip = val_start + (len(clean[val_start:forecast_end - 1]) - len(remaining))
+
+                if remaining.startswith("'") or remaining.startswith('"'):
+                    continue
+
+                param_name = cm.group(1)
+
+                if remaining.upper().startswith('ARRAY'):
+                    arr_match = re.match(r'ARRAY\s*\(', remaining, re.IGNORECASE)
+                    if not arr_match:
+                        continue
+                    arr_paren = ws_skip + arr_match.end() - 1
+                    depth2 = 1
+                    p2 = arr_paren + 1
+                    while p2 < len(clean) and depth2 > 0:
+                        if clean[p2] == '(':
+                            depth2 += 1
+                        elif clean[p2] == ')':
+                            depth2 -= 1
+                        p2 += 1
+                    if depth2 != 0:
+                        continue
+                    arr_close = p2 - 1
+                    inner_text = sql_text[arr_paren + 1:arr_close]
+                    items = [item.strip() for item in inner_text.split(',')]
+                    needs_fix = False
+                    fixed_items = []
+                    for item in items:
+                        stripped = item.strip()
+                        if stripped and not stripped.startswith("'") and not stripped.startswith('"'):
+                            needs_fix = True
+                            fixed_items.append(f"'{stripped}'")
+                        else:
+                            fixed_items.append(stripped)
+                    if needs_fix:
+                        replacement = f"ARRAY({', '.join(fixed_items)})"
+                        original = sql_text[ws_skip:arr_close + 1]
+                        edits.append((ws_skip, arr_close + 1, replacement, param_name, original))
+                else:
+                    end_match = re.match(r'([A-Za-z_][A-Za-z0-9_]*)', remaining)
+                    if not end_match:
+                        continue
+                    ident = end_match.group(1)
+                    ident_start = ws_skip
+                    ident_end = ident_start + len(ident)
+                    replacement = f"'{ident}'"
+                    edits.append((ident_start, ident_end, replacement, param_name, ident))
+
+        if not edits:
+            return sql_text, fixes
+
+        result = sql_text
+        offset = 0
+        for start, end, replacement, param_name, original in sorted(edits, key=lambda x: x[0]):
+            adj_start = start + offset
+            adj_end = end + offset
+            result = result[:adj_start] + replacement + result[adj_end:]
+            offset += len(replacement) - (end - start)
+            fixes.append(
+                f"[{use_case_id}] AUTO-FIX AI_FORECAST {param_name}: "
+                f"quoted '{original}' → {replacement} — "
+                f"AI_FORECAST column parameters must be string literals"
+            )
+
+        return result, fixes
+
     def _validate_format_string_column_availability(self, sql_clean: str, use_case_id: str) -> list:
         """Validate that column args in format_string exist in the CTE's available columns.
 
@@ -19061,6 +21543,164 @@ Start your response with the CSV header line: use_case_id,domain
             pass
         return warnings
 
+    def _validate_ai_query_params(self, sql_clean: str, use_case_id: str) -> list:
+        """Validate that ai_query calls only use valid named parameters.
+        Databricks ai_query only accepts: modelParameters, responseFormat.
+        LLMs commonly hallucinate OpenAI-style params like systemPrompt, system_prompt,
+        max_tokens, stop, top_p etc. as direct ai_query named args.
+        Returns list of warning messages. Empty list means no issues found."""
+        warnings = []
+        sql_no_comments = re.sub(r'--[^\n]*', '', sql_clean)
+        VALID_AI_QUERY_PARAMS = {'modelparameters', 'responseformat'}
+        BANNED_PARAMS = {
+            'systemprompt': 'systemPrompt',
+            'system_prompt': 'system_prompt',
+            'systemmessage': 'systemMessage',
+            'system_message': 'system_message',
+            'max_tokens': 'max_tokens',
+            'maxtokens': 'maxTokens',
+            'top_p': 'top_p',
+            'topp': 'topP',
+            'stop': 'stop',
+            'temperature': 'temperature',
+            'stream': 'stream',
+            'n': 'n',
+            'frequency_penalty': 'frequency_penalty',
+            'presence_penalty': 'presence_penalty',
+        }
+        for call_match in re.finditer(r'ai_query\s*\(', sql_no_comments, re.IGNORECASE):
+            start = call_match.end()
+            depth = 0
+            end = start
+            for i in range(start, len(sql_no_comments)):
+                if sql_no_comments[i] == '(':
+                    depth += 1
+                elif sql_no_comments[i] == ')':
+                    if depth == 0:
+                        end = i
+                        break
+                    depth -= 1
+            call_body = sql_no_comments[start:end]
+            for pm in re.finditer(r'(\w+)\s*=>', call_body):
+                param_name = pm.group(1)
+                param_lower = param_name.lower()
+                if param_lower in VALID_AI_QUERY_PARAMS:
+                    continue
+                if param_lower in BANNED_PARAMS:
+                    display_name = BANNED_PARAMS[param_lower]
+                    if param_lower == 'temperature':
+                        warnings.append(
+                            f"INVALID ai_query PARAMETER: '{display_name}' is NOT a direct ai_query parameter. "
+                            f"Temperature must be set inside modelParameters: "
+                            f"ai_query('endpoint', prompt, modelParameters => named_struct('temperature', 0.4)). "
+                            f"FIX: Move temperature inside modelParameters => named_struct(...)."
+                        )
+                    elif param_lower in ('systemprompt', 'system_prompt', 'systemmessage', 'system_message'):
+                        warnings.append(
+                            f"INVALID ai_query PARAMETER: '{display_name}' does NOT exist in Databricks ai_query. "
+                            f"ai_query only accepts: (endpoint, request, modelParameters =>, responseFormat =>). "
+                            f"FIX: Embed the system prompt into the main prompt text via format_string. "
+                            f"Use the 6-section structure (# Persona, # Task, # Input, # Output, # Constraints, # Remarks) "
+                            f"in the format_string template instead of a separate systemPrompt parameter."
+                        )
+                    else:
+                        warnings.append(
+                            f"INVALID ai_query PARAMETER: '{display_name}' is NOT a valid ai_query named parameter. "
+                            f"ai_query only accepts: (endpoint, request, modelParameters =>, responseFormat =>). "
+                            f"FIX: Remove '{display_name}' parameter. If needed, set it inside "
+                            f"modelParameters => named_struct('{param_lower}', value)."
+                        )
+                else:
+                    warnings.append(
+                        f"UNRECOGNIZED ai_query PARAMETER: '{param_name}' is not a valid ai_query parameter. "
+                        f"ai_query only accepts: (endpoint, request, modelParameters =>, responseFormat =>). "
+                        f"FIX: Remove this parameter or move it inside modelParameters => named_struct(...)."
+                    )
+            positional_param_pattern = re.compile(
+                r"""(['"])(modelParameters|responseFormat)\1\s*,""",
+                re.IGNORECASE
+            )
+            for pp_match in positional_param_pattern.finditer(call_body):
+                param_name = pp_match.group(2)
+                warnings.append(
+                    f"POSITIONAL STRING PARAM in ai_query: '{param_name}' is passed as a positional "
+                    f"string argument instead of using named parameter syntax. This causes "
+                    f"UNEXPECTED_INPUT_TYPE error because Databricks interprets positional arg 3 as "
+                    f"returnType (STRING) and arg 4 as failOnError (BOOLEAN). "
+                    f"FIX: Change '{param_name}', value → {param_name} => value. "
+                    f"CORRECT: ai_query('endpoint', prompt, {param_name} => named_struct(...)). "
+                    f"WRONG: ai_query('endpoint', prompt, '{param_name}', named_struct(...))."
+                )
+        return warnings
+
+    _QUOTED_DT_UNIT_VALIDATOR_PATTERN = re.compile(
+        r"""(?:date_add|date_sub|timestampadd|timestampdiff)\s*\(\s*(['"])(\w+)\1""",
+        re.IGNORECASE,
+    )
+
+    def _validate_quoted_datetime_units(self, sql_clean: str, use_case_id: str) -> list:
+        """Validate that date_add/date_sub/timestampadd/timestampdiff do NOT quote the unit.
+
+        Databricks requires UNQUOTED keywords: date_add(MONTH, -36, d).
+        Quoted units like date_add('MONTH', -36, d) cause INVALID_PARAMETER_VALUE.DATETIME_UNIT.
+        Note: date_trunc('month', d) and date_part('month', d) DO use quoted strings — those
+        are NOT flagged by this validator.
+        Returns list of warning messages. Empty list means no issues found.
+        """
+        warnings = []
+        sql_no_comments = re.sub(r'--[^\n]*', '', sql_clean)
+        valid_units = self._VALID_DATETIME_UNITS
+        for m in self._QUOTED_DT_UNIT_VALIDATOR_PATTERN.finditer(sql_no_comments):
+            unit = m.group(2).upper()
+            if unit in valid_units:
+                snippet = sql_no_comments[max(0, m.start() - 10):m.end() + 30].replace('\n', ' ').strip()
+                warnings.append(
+                    f"QUOTED DATETIME UNIT: '{m.group(2)}' in {m.group(0).strip()} — "
+                    f"datetime unit must be UNQUOTED keyword (e.g., date_add({unit}, ...)). "
+                    f"FIX: Remove quotes → date_add({unit}, ...). "
+                    f"See Anti-Pattern #23. Near: ...{snippet}..."
+                )
+        return warnings
+
+    _DIVISION_PRONE_VALIDATOR_PATTERN = re.compile(
+        r'\b(CORR|REGR_SLOPE|REGR_R2|REGR_INTERCEPT|REGR_COUNT|REGR_AVGX|REGR_AVGY'
+        r'|REGR_SXX|REGR_SYY|REGR_SXY|COVAR_SAMP)\s*\(',
+        re.IGNORECASE,
+    )
+
+    def _validate_division_functions_ansi_mode(self, sql_clean: str, use_case_id: str) -> list:
+        """Validate that SQL with CORR/REGR_*/COVAR_SAMP has SET ansi_mode = false.
+
+        These aggregate window functions internally divide by stddev/variance.
+        When all values in the window are identical (common with LIMIT 10),
+        stddev = 0 → DIVIDE_BY_ZERO.  Cannot protect with NULLIF since the
+        division is inside the function.  SET ansi_mode = false makes
+        division-by-zero return NULL; the COALESCE wrapper handles the rest.
+        Returns list of warning messages. Empty list means no issues found.
+        """
+        warnings = []
+        sql_no_comments = re.sub(r'--[^\n]*', '', sql_clean)
+        found_funcs = self._DIVISION_PRONE_VALIDATOR_PATTERN.findall(sql_no_comments)
+        if not found_funcs:
+            return warnings
+        has_set = re.search(
+            r'SET\s+ansi_mode\s*=\s*false\s*;',
+            sql_no_comments, re.IGNORECASE
+        )
+        if has_set:
+            return warnings
+        unique_funcs = sorted(set(f.upper() for f in found_funcs))
+        warnings.append(
+            f"MISSING SET ansi_mode = false: SQL uses division-prone aggregate functions "
+            f"({', '.join(unique_funcs)}) but does NOT have 'SET ansi_mode = false;' "
+            f"before the CREATE statement. These functions internally divide by stddev/variance "
+            f"which is 0 when all values in the window are identical (very common with LIMIT 10). "
+            f"COALESCE alone does NOT help — the DIVIDE_BY_ZERO error fires before COALESCE evaluates. "
+            f"FIX: Prepend 'SET ansi_mode = false;' BEFORE the CREATE DATABASE statement. "
+            f"See Anti-Pattern #24."
+        )
+        return warnings
+
     def _validate_limit_in_first_cte(self, sql_clean: str, use_case_id: str) -> list:
         """Validate that the first CTE contains LIMIT 10.
         The first data-loading CTE MUST end with LIMIT 10 for development/testing.
@@ -19474,15 +22114,14 @@ Start your response with the CSV header line: use_case_id,domain
         return sql_text, fixes
 
     def _auto_fix_ensure_create_database(self, sql_text: str, use_case_id: str) -> str:
-        """Prepend CREATE SCHEMA IF NOT EXISTS for the inspire database.
-        Ensures every generated SQL creates the target schema before the table.
-        NOTE: Uses CREATE SCHEMA (not CREATE CATALOG) to avoid metastore storage errors.
+        """Prepend CREATE DATABASE IF NOT EXISTS for the inspire database.
+        Ensures every generated SQL creates the target database before the table.
         """
         if not self.inspire_database:
             return sql_text
         if re.search(r'\bCREATE\s+(DATABASE|SCHEMA)\b', sql_text, re.IGNORECASE):
             return sql_text
-        create_db_stmt = f"CREATE SCHEMA IF NOT EXISTS {self.inspire_database};\n"
+        create_db_stmt = f"CREATE DATABASE IF NOT EXISTS {self.inspire_database};\n"
         return create_db_stmt + sql_text.strip()
 
     _USE_CASE_HEADER_RE = re.compile(
@@ -19891,6 +22530,7 @@ Start your response with the CSV header line: use_case_id,domain
         """
         sql_text, _ = self._auto_fix_unquoted_coalesce_defaults(sql_text, use_case_id)
         sql_text = self._auto_fix_parameters_quoting_inline(sql_text)
+        sql_text, _ = self._auto_fix_format_string_overescaped_quotes(sql_text, use_case_id)
         sql_text, _ = self._auto_fix_invalid_format_conversions(sql_text, use_case_id)
         sql_text, _ = self._auto_fix_format_string_excess_placeholders(sql_text, use_case_id)
         sql_text, _ = self._auto_fix_repeated_with_keywords(sql_text, use_case_id)
@@ -19901,12 +22541,255 @@ Start your response with the CSV header line: use_case_id,domain
         sql_text, _ = self._auto_fix_window_over_in_group_by_cte(sql_text, use_case_id)
         sql_text, _ = self._auto_fix_window_inside_aggregate(sql_text, use_case_id)
         sql_text, _ = self._auto_fix_ai_forecast_named_struct(sql_text, use_case_id)
+        sql_text, _ = self._auto_fix_ai_forecast_col_quoting(sql_text, use_case_id)
         sql_text, _ = self._auto_fix_parameters_quoting(sql_text, use_case_id)
         if result_table:
             sql_text, _ = self._auto_fix_missing_create_table(sql_text, use_case_id, result_table)
         sql_text = self._auto_fix_strip_duplicate_use_case_header(sql_text, use_case_id)
         sql_text = self._auto_fix_ensure_create_database(sql_text, use_case_id)
+        sql_text, _ = self._auto_fix_wrong_model_endpoint(sql_text, use_case_id)
+        sql_text, _ = self._auto_fix_ai_query_positional_params(sql_text, use_case_id)
+        sql_text, _ = self._auto_fix_quoted_datetime_units(sql_text, use_case_id)
+        sql_text, _ = self._auto_fix_ansi_mode_for_division_functions(sql_text, use_case_id)
+        sql_text = self._strip_ansi_mode_true_statements(sql_text, use_case_id)
+        sql_text = self._strip_internal_metadata_comments(sql_text)
         return sql_text
+
+    _VALID_DATETIME_UNITS = {
+        'YEAR', 'QUARTER', 'MONTH', 'WEEK', 'DAY', 'DAYOFYEAR',
+        'HOUR', 'MINUTE', 'SECOND', 'MILLISECOND', 'MICROSECOND',
+    }
+    _QUOTED_DATETIME_UNIT_PATTERN = re.compile(
+        r"""((?:date_add|date_sub|timestampadd|timestampdiff)\s*\(\s*)(['"])(\w+)\2""",
+        re.IGNORECASE,
+    )
+
+    def _auto_fix_quoted_datetime_units(self, sql_text: str, use_case_id: str) -> tuple:
+        """Auto-fix quoted datetime unit literals in date_add / date_sub / timestampadd / timestampdiff.
+
+        Databricks SQL requires UNQUOTED unit keywords:
+            date_add(MONTH, -36, d)     ✅
+            date_add('MONTH', -36, d)   ❌  INVALID_PARAMETER_VALUE.DATETIME_UNIT
+
+        This does NOT touch date_trunc / date_part which correctly take quoted strings.
+        """
+        fixes = []
+        valid = self._VALID_DATETIME_UNITS
+
+        def _replace(m):
+            prefix = m.group(1)
+            unit = m.group(3).upper()
+            if unit in valid:
+                fixes.append(
+                    f"[{use_case_id}] AUTO-FIX QUOTED DATETIME UNIT: "
+                    f"'{m.group(3)}' → {unit} (must be unquoted keyword)"
+                )
+                return f"{prefix}{unit}"
+            return m.group(0)
+
+        result = self._QUOTED_DATETIME_UNIT_PATTERN.sub(_replace, sql_text)
+        for fix in fixes:
+            self.logger.info(f"🔧 {fix}")
+        return result, fixes
+
+    _INTERNAL_COMMENT_PATTERNS = re.compile(
+        r'^--\s*(?:HONESTY_SCORE:|HONESTY_JUSTIFICATION:|Error fixed:).*$\n?',
+        re.MULTILINE | re.IGNORECASE
+    )
+
+    def _strip_internal_metadata_comments(self, sql_text: str) -> str:
+        """Strip internal LLM metadata comments that should never appear in user-facing SQL.
+        Removes: -- HONESTY_SCORE:, -- HONESTY_JUSTIFICATION:, -- Error fixed: lines."""
+        return self._INTERNAL_COMMENT_PATTERNS.sub('', sql_text)
+
+    _DIVISION_PRONE_FUNCTIONS = re.compile(
+        r'\b(?:CORR|REGR_SLOPE|REGR_R2|REGR_INTERCEPT|REGR_COUNT|REGR_AVGX|REGR_AVGY'
+        r'|REGR_SXX|REGR_SYY|REGR_SXY|COVAR_SAMP)\s*\(',
+        re.IGNORECASE,
+    )
+    _SET_ANSI_MODE_PATTERN = re.compile(
+        r'^\s*SET\s+ansi_mode\s*=\s*(true|false)\s*;',
+        re.IGNORECASE | re.MULTILINE,
+    )
+
+    def _auto_fix_ansi_mode_for_division_functions(self, sql_text: str, use_case_id: str) -> tuple:
+        """Prepend SET ansi_mode = false when SQL uses aggregate functions that internally divide.
+
+        CORR, REGR_SLOPE, REGR_R2, REGR_INTERCEPT, COVAR_SAMP etc. divide by
+        stddev or variance internally.  When all values in the window are identical
+        (common with LIMIT 10), stddev = 0 → DIVIDE_BY_ZERO.  There is no way to
+        protect this with NULLIF because the division happens inside the function.
+
+        SET ansi_mode = false makes division-by-zero return NULL; the existing
+        COALESCE(..., 0.0) wrappers then coerce it to a safe default.
+
+        DESIGN DECISION — why SET ansi_mode = false and not TRY() wrapper:
+        Databricks SQL has try_avg, try_sum, try_divide but does NOT have
+        try_corr, try_regr_slope, try_regr_r2, try_covar_samp.  There is also
+        no generic TRY(expression) wrapper function.  Therefore SET ansi_mode = false
+        is the ONLY viable approach for these functions.  The setting is session-scoped
+        and resets naturally when the notebook cell finishes execution.
+        """
+        fixes = []
+        if not self._DIVISION_PRONE_FUNCTIONS.search(sql_text):
+            return sql_text, fixes
+
+        existing = self._SET_ANSI_MODE_PATTERN.search(sql_text)
+        if existing:
+            if existing.group(1).lower() == 'true':
+                sql_text = sql_text[:existing.start(1)] + 'false' + sql_text[existing.end(1):]
+                fixes.append(
+                    f"[{use_case_id}] AUTO-FIX ANSI_MODE: "
+                    f"Changed SET ansi_mode = true → false "
+                    f"(CORR/REGR/COVAR functions can divide by zero)"
+                )
+            return sql_text, fixes
+
+        insert_point = 0
+        create_match = re.search(r'(?:^|\n)\s*CREATE\s', sql_text, re.IGNORECASE)
+        if create_match:
+            insert_point = create_match.start()
+            if sql_text[insert_point] == '\n':
+                insert_point += 1
+
+        set_stmt = 'SET ansi_mode = false;\n\n'
+        sql_text = sql_text[:insert_point] + set_stmt + sql_text[insert_point:]
+        fixes.append(
+            f"[{use_case_id}] AUTO-FIX ANSI_MODE: "
+            f"Prepended SET ansi_mode = false before CREATE "
+            f"(SQL contains CORR/REGR/COVAR functions that can DIVIDE_BY_ZERO "
+            f"when all values in window are identical)"
+        )
+        return sql_text, fixes
+
+    _ANSI_MODE_TRUE_PATTERN = re.compile(
+        r'\s*SET\s+ansi_mode\s*=\s*true\s*;\s*',
+        re.IGNORECASE,
+    )
+
+    def _strip_ansi_mode_true_statements(self, sql_text: str, use_case_id: str) -> str:
+        """Remove all SET ansi_mode = true statements from SQL.
+
+        The SELECT * FROM result_table MUST be the absolute last statement in the
+        notebook cell so the user sees the query results. Any SET statement after
+        it causes Databricks to display the SET result instead of the data.
+
+        SET ansi_mode = false at the TOP (before CREATE) is kept — it's needed for
+        CORR/REGR/COVAR functions. The session resets naturally when the cell finishes.
+        """
+        original = sql_text
+        sql_text = self._ANSI_MODE_TRUE_PATTERN.sub('', sql_text)
+        if sql_text != original:
+            self.logger.info(
+                f"[{use_case_id}] STRIPPED SET ansi_mode = true: "
+                f"SELECT FROM result table must be the last statement"
+            )
+        return sql_text
+
+    _OVERESCAPED_APOSTROPHE_PATTERN = re.compile(
+        r"(?<=[A-Za-z])'{4}(?=[A-Za-z])"
+    )
+    _QUINTUPLE_QUOTE_OPEN_PATTERN = re.compile(
+        r"(format_string\s*\(\s*)'{5,}",
+        re.IGNORECASE,
+    )
+    _QUINTUPLE_QUOTE_CLOSE_PATTERN = re.compile(
+        r"'{5,}(\s*,)",
+    )
+
+    def _auto_fix_format_string_overescaped_quotes(self, sql_text: str, use_case_id: str) -> tuple:
+        """Auto-fix over-escaped single quotes inside format_string templates.
+
+        The LLM sometimes uses '''' (4 quotes) for apostrophes instead of the
+        correct '' (2 quotes). It also uses ''''' (5+ quotes) as format_string
+        string delimiters instead of normal single quotes.
+
+        Patterns fixed:
+        1. word''''word  ->  word''word   (apostrophe: Moody''''s -> Moody''s)
+        2. format_string('''''...  ->  format_string('...   (opening delimiter)
+        3. ...'''''',  ->  ...',   (closing delimiter)
+        """
+        fixes = []
+
+        new_sql = self._OVERESCAPED_APOSTROPHE_PATTERN.sub("''", sql_text)
+        if new_sql != sql_text:
+            apostrophe_count = len(self._OVERESCAPED_APOSTROPHE_PATTERN.findall(sql_text))
+            fixes.append(
+                f"[{use_case_id}] AUTO-FIX OVERESCAPED QUOTES: "
+                f"Reduced '''' to '' for {apostrophe_count} apostrophe(s) "
+                f"(e.g., Moody''''s -> Moody''s)"
+            )
+            sql_text = new_sql
+
+        new_sql = self._QUINTUPLE_QUOTE_OPEN_PATTERN.sub(r"\1'", sql_text)
+        if new_sql != sql_text:
+            fixes.append(
+                f"[{use_case_id}] AUTO-FIX OVERESCAPED QUOTES: "
+                f"Normalized format_string opening delimiter from 5+ quotes to 1"
+            )
+            sql_text = new_sql
+
+        new_sql = self._QUINTUPLE_QUOTE_CLOSE_PATTERN.sub(r"'\1", sql_text)
+        if new_sql != sql_text:
+            fixes.append(
+                f"[{use_case_id}] AUTO-FIX OVERESCAPED QUOTES: "
+                f"Normalized format_string closing delimiter from 5+ quotes to 1"
+            )
+            sql_text = new_sql
+
+        for fix_desc in fixes:
+            self.logger.info(fix_desc)
+
+        return sql_text, fixes
+
+    def _auto_fix_wrong_model_endpoint(self, sql_text: str, use_case_id: str) -> tuple:
+        """Auto-fix hallucinated model endpoint names in ai_query calls.
+        LLMs commonly hallucinate model names like 'databricks-meta-llama-3-1-70b-instruct'
+        instead of using the configured endpoint. This replaces any wrong model name
+        inside ai_query() calls with the correct self.sql_model_serving."""
+        fixes = []
+        correct_model = self.sql_model_serving
+        ai_query_model_pattern = re.compile(
+            r"(ai_query\s*\(\s*)'([^']+)'",
+            re.IGNORECASE
+        )
+        def replace_model(match):
+            prefix = match.group(1)
+            found_model = match.group(2)
+            if found_model != correct_model:
+                fixes.append(
+                    f"[{use_case_id}] AUTO-FIX WRONG MODEL ENDPOINT: "
+                    f"'{found_model}' → '{correct_model}'"
+                )
+                return f"{prefix}'{correct_model}'"
+            return match.group(0)
+        result = ai_query_model_pattern.sub(replace_model, sql_text)
+        for fix in fixes:
+            self.logger.info(f"🔧 {fix}")
+        return result, fixes
+
+    def _auto_fix_ai_query_positional_params(self, sql_text: str, use_case_id: str) -> tuple:
+        """Auto-fix ai_query calls that pass named parameters as positional strings.
+        LLMs sometimes generate 'modelParameters', named_struct(...) instead of
+        modelParameters => named_struct(...). The positional form causes
+        UNEXPECTED_INPUT_TYPE errors because Databricks interprets the 3rd positional
+        arg as returnType (STRING) and the 4th as failOnError (BOOLEAN)."""
+        fixes = []
+        pattern = re.compile(
+            r"""(['"])(modelParameters|responseFormat)\1\s*,""",
+            re.IGNORECASE
+        )
+        def replace_positional(match):
+            param_name = match.group(2)
+            fixes.append(
+                f"[{use_case_id}] AUTO-FIX POSITIONAL PARAM: "
+                f"'{param_name}', ... → {param_name} => ..."
+            )
+            return f'{param_name} =>'
+        result = pattern.sub(replace_positional, sql_text)
+        for fix in fixes:
+            self.logger.info(f"🔧 {fix}")
+        return result, fixes
 
     _VALID_FORMAT_SPECIFIER_CHARS = frozenset('sdfeEgGnbBhHoxXcCtTaA%0123456789-+. #,')
 
@@ -20459,10 +23342,7 @@ Start your response with the CSV header line: use_case_id,domain
                 f"-- Empty LLM response\n"
                 f"-- Tables Involved: {tables_involved_str}\n"
                 f"SELECT 'Empty LLM Response' AS error_message;\n"
-                f"-- If you run the query and it was not valid, set IsValid to No and run Inspire again with 'Generate = SQL Regeneration', and Inspire will regenerate a new query for you to validate. You can also pass special instruction in below field:\n"
-                f"--SQL Generation Instructions Begin\n"
-                f"--\n"
-                f"--SQL Generation Instructions End"
+                f"-- SQL failed to generate, set regenerate_sql:Yes and run Inspire again with Operation = 'SQL Regeneration', and Inspire will regenerate a new query."
             )
             return use_case
         sql_text, columns_from_response = self._extract_sql_and_columns_from_response(sql_response)
@@ -20478,67 +23358,12 @@ Start your response with the CSV header line: use_case_id,domain
                 f"-- Empty SQL after cleaning\n"
                 f"-- Tables Involved: {tables_involved_str}\n"
                 f"SELECT 'Empty SQL after cleaning' AS error_message;\n"
-                f"-- If you run the query and it was not valid, set IsValid to No and run Inspire again with 'Generate = SQL Regeneration', and Inspire will regenerate a new query for you to validate. You can also pass special instruction in below field:\n"
-                f"--SQL Generation Instructions Begin\n"
-                f"--\n"
-                f"--SQL Generation Instructions End"
+                f"-- SQL failed to generate, set regenerate_sql:Yes and run Inspire again with Operation = 'SQL Regeneration', and Inspire will regenerate a new query."
             )
             return use_case
         use_case['sql_generation_status'] = 'succeeded'
-        auto_fix_log = []
-        sql_clean, ifc_fixes = self._auto_fix_invalid_format_conversions(sql_clean, use_case_id)
-        if ifc_fixes:
-            auto_fix_log.extend(ifc_fixes)
-            for f in ifc_fixes:
-                self.logger.info(f"✅ {f}")
-        sql_clean, fs_fixes = self._auto_fix_format_string_excess_placeholders(sql_clean, use_case_id)
-        if fs_fixes:
-            auto_fix_log.extend(fs_fixes)
-            for f in fs_fixes:
-                self.logger.info(f"✅ {f}")
-        sql_clean, rw_fixes = self._auto_fix_repeated_with_keywords(sql_clean, use_case_id)
-        if rw_fixes:
-            auto_fix_log.extend(rw_fixes)
-            for f in rw_fixes:
-                self.logger.info(f"✅ {f}")
-        sql_clean, pii_fixes = self._auto_fix_pii_in_format_string(sql_clean, use_case_id)
-        if pii_fixes:
-            auto_fix_log.extend(pii_fixes)
-            for f in pii_fixes:
-                self.logger.info(f"✅ {f}")
-        sql_clean, scalar_fixes = self._auto_fix_window_over_in_scalar_subquery(sql_clean, use_case_id)
-        if scalar_fixes:
-            auto_fix_log.extend(scalar_fixes)
-            for f in scalar_fixes:
-                self.logger.info(f"✅ {f}")
-        sql_clean, gb_over_fixes = self._auto_fix_window_over_in_group_by_cte(sql_clean, use_case_id)
-        if gb_over_fixes:
-            auto_fix_log.extend(gb_over_fixes)
-            for f in gb_over_fixes:
-                self.logger.info(f"✅ {f}")
-        sql_clean, ns_param_fixes = self._auto_fix_ai_forecast_named_struct(sql_clean, use_case_id)
-        if ns_param_fixes:
-            auto_fix_log.extend(ns_param_fixes)
-            for f in ns_param_fixes:
-                self.logger.info(f"✅ {f}")
-        sql_clean, params_fixes = self._auto_fix_parameters_quoting(sql_clean, use_case_id)
-        if params_fixes:
-            auto_fix_log.extend(params_fixes)
-            for f in params_fixes:
-                self.logger.info(f"✅ {f}")
         result_table = use_case.get('result_table', '')
-        sql_clean, create_table_fixes = self._auto_fix_missing_create_table(sql_clean, use_case_id, result_table)
-        if create_table_fixes:
-            auto_fix_log.extend(create_table_fixes)
-            for f in create_table_fixes:
-                self.logger.info(f"✅ {f}")
-        sql_clean = self._auto_fix_strip_duplicate_use_case_header(sql_clean, use_case_id)
-        sql_clean = self._auto_fix_ensure_create_database(sql_clean, use_case_id)
-        if auto_fix_log:
-            use_case['_auto_fixes_applied'] = auto_fix_log
-            self.logger.info(
-                f"[{use_case_id}] 🔧 Applied {len(auto_fix_log)} deterministic auto-fix(es) to generated SQL"
-            )
+        sql_clean = self._apply_sql_auto_fixes(sql_clean, use_case_id, result_table)
         use_case['SQL'] = sql_clean
         static_validation_errors = []
         cte_chaining_warnings = self._validate_cte_chaining(sql_clean, use_case_id)
@@ -20646,6 +23471,21 @@ Start your response with the CSV header line: use_case_id,domain
             for afw in ai_function_warnings:
                 self.logger.warning(f"[{use_case_id}] 🚨 STRUCTURAL: {afw}")
             static_validation_errors.extend(ai_function_warnings)
+        ai_query_param_warnings = self._validate_ai_query_params(sql_clean, use_case_id)
+        if ai_query_param_warnings:
+            for aqw in ai_query_param_warnings:
+                self.logger.warning(f"[{use_case_id}] 🚨 INVALID AI_QUERY PARAM: {aqw}")
+            static_validation_errors.extend(ai_query_param_warnings)
+        quoted_dt_warnings = self._validate_quoted_datetime_units(sql_clean, use_case_id)
+        if quoted_dt_warnings:
+            for qdw in quoted_dt_warnings:
+                self.logger.warning(f"[{use_case_id}] 🚨 QUOTED DATETIME UNIT: {qdw}")
+            static_validation_errors.extend(quoted_dt_warnings)
+        ansi_mode_warnings = self._validate_division_functions_ansi_mode(sql_clean, use_case_id)
+        if ansi_mode_warnings:
+            for amw in ansi_mode_warnings:
+                self.logger.warning(f"[{use_case_id}] 🚨 MISSING ANSI_MODE: {amw}")
+            static_validation_errors.extend(ansi_mode_warnings)
         limit_warnings = self._validate_limit_in_first_cte(sql_clean, use_case_id)
         if limit_warnings:
             for lw in limit_warnings:
@@ -20704,6 +23544,12 @@ Start your response with the CSV header line: use_case_id,domain
             use_case['create_table_warnings'] = create_table_warnings
             use_case['ai_functions_status'] = 'failed' if ai_function_warnings else 'passed'
             use_case['ai_functions_warnings'] = ai_function_warnings
+            use_case['ai_query_params_status'] = 'failed' if ai_query_param_warnings else 'passed'
+            use_case['ai_query_params_warnings'] = ai_query_param_warnings
+            use_case['quoted_datetime_unit_status'] = 'failed' if quoted_dt_warnings else 'passed'
+            use_case['quoted_datetime_unit_warnings'] = quoted_dt_warnings
+            use_case['ansi_mode_division_status'] = 'failed' if ansi_mode_warnings else 'passed'
+            use_case['ansi_mode_division_warnings'] = ansi_mode_warnings
             use_case['limit_first_cte_status'] = 'failed' if limit_warnings else 'passed'
             use_case['limit_first_cte_warnings'] = limit_warnings
             use_case['mandatory_output_cols_status'] = 'failed' if mandatory_cols_warnings else 'passed'
@@ -20745,7 +23591,7 @@ Start your response with the CSV header line: use_case_id,domain
                 use_case['validated'] = 'Y'
         except Exception as validation_error:
             use_case['sql_validation_status'] = 'skipped'
-            use_case['sql_validation_error'] = str(validation_error)[:200]
+            use_case['sql_validation_error'] = get_clean_error_message(validation_error)
             use_case['validated'] = 'D'
         return use_case
     
@@ -20788,15 +23634,20 @@ Start your response with the CSV header line: use_case_id,domain
             r'^###\s+Table:\s*(.+)$',              # Markdown H3: "### Table: name"
             r'^##\s+Table:\s*(.+)$',               # Markdown H2: "## Table: name"
             r'^\*\*Table:\*\*\s*(.+)$',            # Bold markdown: "**Table:** name"
-            r'^###\s+`?([^`]+)`?\s*$',             # Markdown H3 with backticks: "### `catalog.schema.table`"
+            r'^###\s+(`[^`]+`(?:\.\s*`[^`]+`)*)\s*$',  # Markdown H3 with backtick-delimited FQTN: "### `cat`.`sch`.`tbl`"
+            r'^###\s+`?([^`\n]+)`?\s*$',           # Markdown H3 with optional single backtick pair
             r'^--\s*Table:\s*(.+)$',               # SQL comment: "-- Table: name"
         ]
         
+        pipe_header_re = re.compile(r'^\|\s*column\s*\|', re.IGNORECASE)
+        pipe_separator_re = re.compile(r'^\|\s*-+\s*\|')
+        
         # Column definition patterns (multiple formats supported)
+        # NOTE: pipe header/separator rows are filtered BEFORE this check
         column_patterns = [
             r'^\s+-\s+\w+',                        # Markdown list: "  - column_name"
             r'^\s+\*\s+\w+',                       # Markdown asterisk: "  * column_name"
-            r'^\|\s*\w+\s*\|',                     # Pipe table: "| column_name |"
+            r'^\|\s*[^|\s][^|]*\s*\|',             # Pipe table: "| col_name |" (any non-empty first cell)
             r'^\s+\d+\.\s+\w+',                    # Numbered list: "  1. column_name"
             r'^\s{2,}\w+\s*[\(\:]',                # Indented with type: "    column_name (TYPE)"
             r'^\s{2,}\w+\s*$',                     # Plain indented: "    column_name"
@@ -20831,6 +23682,11 @@ Start your response with the CSV header line: use_case_id,domain
             # Check for "Columns:" header (plain text format)
             if stripped.lower() == 'columns:':
                 in_columns_section = True
+                result_lines.append(line)
+                continue
+            
+            # Skip pipe-delimited header and separator rows (structural, not data columns)
+            if current_table and (pipe_header_re.match(stripped) or pipe_separator_re.match(stripped)):
                 result_lines.append(line)
                 continue
             
@@ -21022,16 +23878,18 @@ Start your response with the CSV header line: use_case_id,domain
             
             # === PERFORMANCE OPTIMIZATION: Use schema index for O(1) lookups ===
             if schema_index:
-                # Fast path: Use pre-built index for instant lookups
                 self.logger.debug(f"[{use_case_id}] Using schema index for fast lookup...")
+                seen_table_ids = set()
                 for involved_table in directly_involved_tables:
-                    # Try both with and without backticks
+                    canonical = involved_table.replace('`', '')
+                    if canonical in seen_table_ids:
+                        continue
                     table_details = schema_index.get(involved_table, [])
                     if not table_details:
-                        # Try without backticks
-                        table_no_backticks = involved_table.replace('`', '')
-                        table_details = schema_index.get(table_no_backticks, [])
-                    directly_involved_details.extend(table_details)
+                        table_details = schema_index.get(canonical, [])
+                    if table_details:
+                        seen_table_ids.add(canonical)
+                        directly_involved_details.extend(table_details)
                 
                 # Get all other tables for additional context
                 all_tables_in_schema = set()
@@ -21407,6 +24265,58 @@ Start your response with the CSV header line: use_case_id,domain
                 
                 self.logger.debug(f"Use case {use_case_id}: Estimated prompt size: {estimated_prompt_size:,} chars (OK)")
                 
+                fallback_cascade = get_model_cascade_for_prompt("USE_CASE_SQL_GEN_PROMPT")
+                if len(fallback_cascade) > 1:
+                    smallest_fallback = min(fallback_cascade[1:], key=lambda m: m.get("llm_input_context_tokens_count", 999999))
+                    fallback_token_limit = smallest_fallback.get("llm_input_context_tokens_count", 131000)
+                    fallback_char_limit = int(fallback_token_limit * CONSERVATIVE_CHAR_TOKEN_RATIO)
+                    current_prompt = self.ai_agent._load_and_format_prompt("USE_CASE_SQL_GEN_PROMPT", prompt_vars)
+                    current_prompt_size = len(current_prompt)
+                    del current_prompt
+                    
+                    if current_prompt_size > fallback_char_limit:
+                        self.logger.warning(
+                            f"⚠️  [{use_case_id}] Fallback pre-flight: prompt ({current_prompt_size:,} chars) exceeds "
+                            f"smallest fallback model '{smallest_fallback.get('name')}' limit ({fallback_char_limit:,} chars). "
+                            f"Proactively reducing schema to avoid cascade timeout waste..."
+                        )
+                        fallback_reduction_steps = [100, 75, 50, 25, 15, 10]
+                        fallback_preflight_fixed = False
+                        for max_cols in fallback_reduction_steps:
+                            truncated = self._truncate_schema_columns(available_schema_out, max_cols)
+                            prompt_vars["directly_involved_schema"] = truncated
+                            test_prompt_fb = self.ai_agent._load_and_format_prompt("USE_CASE_SQL_GEN_PROMPT", prompt_vars)
+                            fb_size = len(test_prompt_fb)
+                            del test_prompt_fb
+                            if fb_size <= fallback_char_limit:
+                                available_schema_out = truncated
+                                use_case['_directly_involved_schema'] = available_schema_out
+                                self.logger.info(
+                                    f"✅ [{use_case_id}] Fallback pre-flight: schema reduced to {max_cols} cols/table "
+                                    f"({fb_size:,} chars, fits fallback limit {fallback_char_limit:,})"
+                                )
+                                fallback_preflight_fixed = True
+                                break
+                        
+                        if not fallback_preflight_fixed:
+                            prompt_vars["directly_involved_schema"] = ""
+                            test_min = self.ai_agent._load_and_format_prompt("USE_CASE_SQL_GEN_PROMPT", prompt_vars)
+                            min_size = len(test_min)
+                            del test_min
+                            if min_size <= fallback_char_limit:
+                                self.logger.warning(
+                                    f"⚠️  [{use_case_id}] Fallback pre-flight: sending with EMPTY schema "
+                                    f"({min_size:,} chars) to fit fallback model"
+                                )
+                                available_schema_out = ""
+                                use_case['_directly_involved_schema'] = ""
+                            else:
+                                self.logger.warning(
+                                    f"⚠️  [{use_case_id}] Fallback pre-flight: even empty schema ({min_size:,} chars) "
+                                    f"exceeds fallback limit ({fallback_char_limit:,}). Primary model must succeed."
+                                )
+                                prompt_vars["directly_involved_schema"] = available_schema_out
+                
                 # Check if schema is empty (but allow for volume paths in ai_parse_document use cases)
                 is_volume_path = tables_involved_str.startswith('/Volumes')
                 if (not directly_involved_schema or directly_involved_schema.strip() == "") and not is_volume_path:
@@ -21459,6 +24369,7 @@ Start your response with the CSV header line: use_case_id,domain
                 needs_retry = False
                 retry_error = None
                 
+                skip_llm_cache = bool(use_case.get('_skip_llm_cache'))
                 try:
                     sql_response = self.ai_agent.run_worker(
                         step_name=f"Generate_SQL_{use_case_id}_Wave",
@@ -21466,12 +24377,18 @@ Start your response with the CSV header line: use_case_id,domain
                         prompt_vars=prompt_vars,
                         response_schema=None,
                         timeout_override=adaptive_timeout,
-                        max_retries_override=0
+                        max_retries_override=0,
+                        skip_cache=skip_llm_cache
                     )
-                except (InputTooLongError, TruncatedResponseError) as e:
+                except (InputTooLongError, TruncatedResponseError, CascadeRebatchError) as e:
                     needs_retry = True
                     retry_error = e
-                    error_type = "Input too long" if isinstance(e, InputTooLongError) else "Response truncated"
+                    if isinstance(e, CascadeRebatchError):
+                        error_type = "Cascade rebatch (prompt too large for fallback models)"
+                    elif isinstance(e, InputTooLongError):
+                        error_type = "Input too long"
+                    else:
+                        error_type = "Response truncated"
                     self.logger.warning(f"⚠️  [{use_case_id}] {error_type} on main call - will retry with reduced context: {str(e)[:200]}")
                 except Exception as e:
                     error_msg_lower = str(e).lower()
@@ -21480,7 +24397,7 @@ Start your response with the CSV header line: use_case_id,domain
                         any(kw in error_msg_lower for kw in [
                             'input is too long', 'too long for requested model', 'input length',
                             'exceeds context limit', 'context window', 'token limit exceeded',
-                            'maximum context length'
+                            'maximum context length', 'rebatch'
                         ])
                     ) or (
                         any(kw in error_msg_lower for kw in ['bad_request', '400'])
@@ -21512,55 +24429,65 @@ Start your response with the CSV header line: use_case_id,domain
                 # RETRY LOOP: Only if main call failed with context/truncation error
                 # Use percentage-based column reduction on retries
                 if needs_retry:
-                    # Progressive retry strategy with PERCENTAGE-based column reduction
-                    # Retry 1: Remove additional tables, keep 100% of columns
-                    # Retry 2: Keep 75% of columns per table
-                    # Retry 3: Keep 50% of columns per table
-                    # Retry 4: Keep 25% of columns per table
                     MAX_RETRIES = 4
-                    column_reduction_percentages = [1.0, 0.75, 0.50, 0.25]  # Percentage of columns to KEEP
+                    column_reduction_percentages = [1.0, 0.75, 0.50, 0.25]
                     
-                    # Count total columns in schema to calculate percentage-based limits
                     original_schema = directly_involved_schema
-                    total_columns = original_schema.count('\n  -') + original_schema.count('\n- ')  # Rough column count
+                    total_columns = original_schema.count('\n  -') + original_schema.count('\n- ')
+                    
+                    _retry_start_from_model = None
+                    if isinstance(retry_error, CascadeRebatchError):
+                        _retry_start_from_model = getattr(retry_error, 'target_model_endpoint', None)
+                        _target_limit = getattr(retry_error, 'target_context_limit_chars', None)
+                        if _target_limit:
+                            self.logger.info(
+                                f"🎯 [{use_case_id}] CascadeRebatch: target model limit is {_target_limit:,} chars. "
+                                f"Retries will target this limit to avoid re-triggering cascade timeouts."
+                            )
                     
                     for retry_attempt in range(MAX_RETRIES):
                         try:
                             reduction_pct = column_reduction_percentages[retry_attempt]
                             
                             if retry_attempt == 0:
-                                # First retry: Remove additional tables only, keep all columns
                                 self.logger.warning(f"⚠️  [{use_case_id}] Retry {retry_attempt+1}/{MAX_RETRIES}: Removing additional tables (keeping 100% columns)")
                                 prompt_vars["additional_schema"] = ""
                             else:
-                                # Subsequent retries: Also reduce columns by percentage
-                                # Calculate max columns as percentage of estimated columns per table
-                                # Assume average of 100 columns per table as baseline
                                 max_cols_per_table = max(10, int(100 * reduction_pct))
                                 self.logger.warning(f"⚠️  [{use_case_id}] Retry {retry_attempt+1}/{MAX_RETRIES}: Keeping {int(reduction_pct*100)}% columns (max {max_cols_per_table} per table)")
                                 truncated_schema = self._truncate_schema_columns(original_schema, max_cols_per_table)
                                 prompt_vars["directly_involved_schema"] = truncated_schema
                                 prompt_vars["additional_schema"] = ""
                             
-                            sql_response = self.ai_agent.run_worker(
-                                step_name=f"Generate_SQL_{use_case_id}_Wave_Retry{retry_attempt+1}_{int(reduction_pct*100)}pct",
-                                worker_prompt_path="USE_CASE_SQL_GEN_PROMPT",
-                                prompt_vars=prompt_vars,
-                                response_schema=None,
-                                timeout_override=adaptive_timeout,
-                                max_retries_override=0
-                            )
+                            _retry_kwargs = {
+                                "step_name": f"Generate_SQL_{use_case_id}_Wave_Retry{retry_attempt+1}_{int(reduction_pct*100)}pct",
+                                "worker_prompt_path": "USE_CASE_SQL_GEN_PROMPT",
+                                "prompt_vars": prompt_vars,
+                                "response_schema": None,
+                                "timeout_override": adaptive_timeout,
+                                "max_retries_override": 0,
+                                "skip_cache": skip_llm_cache,
+                            }
+                            if _retry_start_from_model:
+                                _retry_kwargs["start_from_model"] = _retry_start_from_model
                             
-                            # Success!
+                            sql_response = self.ai_agent.run_worker(**_retry_kwargs)
+                            
                             self.logger.info(f"✅ [{use_case_id}] Retry {retry_attempt+1} succeeded with {int(reduction_pct*100)}% columns")
+                            _retry_start_from_model = None
                             break
                             
-                        except (InputTooLongError, TruncatedResponseError) as e:
-                            error_type = "Input too long" if isinstance(e, InputTooLongError) else "Response truncated"
+                        except (InputTooLongError, TruncatedResponseError, CascadeRebatchError) as e:
+                            if isinstance(e, CascadeRebatchError):
+                                error_type = "Cascade rebatch"
+                                _retry_start_from_model = getattr(e, 'target_model_endpoint', _retry_start_from_model)
+                            elif isinstance(e, InputTooLongError):
+                                error_type = "Input too long"
+                            else:
+                                error_type = "Response truncated"
                             self.logger.warning(f"⚠️  [{use_case_id}] {error_type} on retry {retry_attempt+1}/{MAX_RETRIES}: {str(e)[:200]}")
                             
                             if retry_attempt >= MAX_RETRIES - 1:
-                                # All retries exhausted
                                 self.logger.error(f"❌ [{use_case_id}] All {MAX_RETRIES} retries exhausted")
                                 use_case['SQL'] = (
                                     f"-- ❌ SQL GENERATION FAILED ({error_type.upper()})\n"
@@ -21584,7 +24511,7 @@ Start your response with the CSV header line: use_case_id,domain
                                 any(kw in error_msg_lower for kw in [
                                     'input is too long', 'too long for requested model', 'input length',
                                     'exceeds context limit', 'context window', 'token limit exceeded',
-                                    'maximum context length'
+                                    'maximum context length', 'rebatch'
                                 ])
                             ) or (
                                 any(kw in error_msg_lower for kw in ['bad_request', '400'])
@@ -21653,13 +24580,10 @@ Start your response with the CSV header line: use_case_id,domain
             return processed_use_case
             
         except Exception as e:
-            import traceback
             elapsed = time.time() - start_time if 'start_time' in locals() else 0
-            error_msg = str(e)[:200]
+            error_msg = get_clean_error_message(e)
             error_lower = error_msg.lower()
-            stack_trace = traceback.format_exc()[:500]
             self.logger.error(f"✗ Failed to generate SQL for {use_case_id} after {elapsed:.1f}s: {error_msg}")
-            self.logger.debug(f"Stack trace for {use_case_id}: {stack_trace}")
             
             is_timeout = any(kw in error_lower for kw in ['timeout', 'timed out', 'deadline'])
             
@@ -21670,10 +24594,7 @@ Start your response with the CSV header line: use_case_id,domain
                     f"-- SQL generation timed out\n"
                     f"-- Tables Involved: {tables_involved_str}\n"
                     f"SELECT 'SQL Generation Timeout' AS error_message;\n"
-                    f"-- If you run the query and it was not valid, set IsValid to No and run Inspire again with 'Generate = SQL Regeneration', and Inspire will regenerate a new query for you to validate. You can also pass special instruction in below field:\n"
-                    f"--SQL Generation Instructions Begin\n"
-                    f"--\n"
-                    f"--SQL Generation Instructions End"
+                    f"-- SQL failed to generate, set regenerate_sql:Yes and run Inspire again with Operation = 'SQL Regeneration', and Inspire will regenerate a new query."
                 )
                 use_case['sql_generation_status'] = 'timeout'
                 use_case['generated'] = 'N'
@@ -21684,10 +24605,7 @@ Start your response with the CSV header line: use_case_id,domain
                     f"-- SQL generation exception: {error_msg[:100]}\n"
                     f"-- Tables Involved: {tables_involved_str}\n"
                     f"SELECT 'SQL Generation Exception' AS error_message;\n"
-                    f"-- If you run the query and it was not valid, set IsValid to No and run Inspire again with 'Generate = SQL Regeneration', and Inspire will regenerate a new query for you to validate. You can also pass special instruction in below field:\n"
-                    f"--SQL Generation Instructions Begin\n"
-                    f"--\n"
-                    f"--SQL Generation Instructions End"
+                    f"-- SQL failed to generate, set regenerate_sql:Yes and run Inspire again with Operation = 'SQL Regeneration', and Inspire will regenerate a new query."
                 )
                 use_case['sql_generation_status'] = 'failed'
                 use_case['generated'] = 'N'
@@ -21701,12 +24619,38 @@ Start your response with the CSV header line: use_case_id,domain
         directly_involved_schema = use_case.get('_directly_involved_schema', '')
         directly_involved_tables = set(use_case.get('_directly_involved_tables') or [])
         
-        # Check if this is a "force static check" mode (no execution error)
+        # When the gen path sent empty schema (context overflow), rebuild from full_schema_details
+        # so the fix LLM can actually see the columns and correct hallucinations
+        if not directly_involved_schema and directly_involved_tables and full_schema_details:
+            self.logger.info(f"[{use_case_id}] Fix path: rebuilding schema from full_schema_details (was empty from gen)")
+            rebuild_details = []
+            normalized_involved = set(self._normalize_table_name(t) for t in directly_involved_tables)
+            for detail in full_schema_details:
+                fqtn = f"{detail[0]}.{detail[1]}.{detail[2]}"
+                if self._normalize_table_name(fqtn) in normalized_involved:
+                    rebuild_details.append(detail)
+            if rebuild_details:
+                directly_involved_schema = self._format_schema_for_prompt(rebuild_details, load_column_tracking=True)
+                use_case['_directly_involved_schema'] = directly_involved_schema
+                self.logger.info(f"[{use_case_id}] Fix path: rebuilt schema with {len(rebuild_details)} columns ({len(directly_involved_schema):,} chars)")
+        
         is_static_check = use_case.get('_force_static_check', False)
         explain_error_msg = use_case.get('sql_validation_error') or "SQL validation failed"
         
         if is_static_check:
             explain_error_msg = "Please perform a static code analysis on the query. Check for: 1) Syntax errors 2) References to columns that do not exist in the schema provided 3) Logic issues. Return the FIXED query."
+
+        original_sql = use_case.get('SQL', '')
+        estimated_fix_chars = len(original_sql) + len(directly_involved_schema) + len(explain_error_msg) + 5000
+        max_context_chars = int(get_model_cascade_for_prompt("USE_CASE_SQL_FIX_PROMPT")[0].get("llm_input_context_tokens_count", 200000) * 3.2)
+
+        if estimated_fix_chars > max_context_chars * 0.85:
+            self.logger.warning(
+                f"⚠️  [{use_case_id}] Fix prompt too large ({estimated_fix_chars:,} chars, "
+                f"limit ~{max_context_chars:,}). Skipping fix — will regenerate from scratch."
+            )
+            use_case['_fix_skipped_context_too_large'] = True
+            return use_case
 
         reviewer_prompt_vars = {
             "use_case_id": use_case_id,
@@ -21715,19 +24659,30 @@ Start your response with the CSV header line: use_case_id,domain
             "statement": use_case.get('Statement', ''),
             "tables_involved": tables_involved_str,
             "directly_involved_schema": directly_involved_schema,
-            "original_sql": use_case.get('SQL', ''),
+            "original_sql": original_sql,
             "explain_error": explain_error_msg,
             "use_case_columns": use_case.get('Involved Columns') or use_case.get('Columns Involved') or ""
         }
         adaptive_timeout = self._calculate_adaptive_sql_timeout(use_case)
-        fixed_sql = self.ai_agent.run_worker(
-            step_name=f"Fix_SQL_Execution_{use_case_id}_WaveRetry",
-            worker_prompt_path="USE_CASE_SQL_FIX_PROMPT",
-            prompt_vars=reviewer_prompt_vars,
-            response_schema=None,
-            timeout_override=adaptive_timeout,
-            max_retries_override=self.max_retry_attempts
-        )
+        skip_llm_cache = bool(use_case.get('_skip_llm_cache'))
+        try:
+            fixed_sql = self.ai_agent.run_worker(
+                step_name=f"Fix_SQL_Execution_{use_case_id}_WaveRetry",
+                worker_prompt_path="USE_CASE_SQL_FIX_PROMPT",
+                prompt_vars=reviewer_prompt_vars,
+                response_schema=None,
+                timeout_override=adaptive_timeout,
+                max_retries_override=self.max_retry_attempts,
+                skip_cache=skip_llm_cache
+            )
+        except (InputTooLongError, CascadeRebatchError) as e:
+            self.logger.warning(
+                f"⚠️  [{use_case_id}] Fix prompt exceeded context limit: {get_clean_error_message(e)}. "
+                f"Skipping fix — will regenerate from scratch."
+            )
+            use_case['_fix_skipped_context_too_large'] = True
+            return use_case
+
         return self._process_sql_candidate(
             use_case,
             fixed_sql,
@@ -21756,7 +24711,7 @@ Start your response with the CSV header line: use_case_id,domain
                 "2. ALL subsequent CTEs MUST use FROM <previous_cte_name>.\n"
                 "3. If a later CTE needs to JOIN additional tables, move those JOINs into the FIRST CTE "
                 "and use SELECT * in intermediate CTEs to carry all columns through.\n"
-                "4. Column aliases (e.g., `i.total_amount AS invoice_freight_cost`) only exist in the CTE "
+                "4. Column aliases (e.g., `t.amount AS total_cost`) only exist in the CTE "
                 "where they were defined. Re-querying the raw table loses these aliases.\n"
                 "5. For aggregation CTEs that need tier/group summaries, reference an earlier CTE (not raw tables) "
                 "and JOIN the aggregation result back in a subsequent CTE.\n\n"
@@ -21807,12 +24762,16 @@ Start your response with the CSV header line: use_case_id,domain
                 "columns don't exist - either remove the %s from the prompt or fix the CTE chain first.\n"
                 "7. CRITICAL NARRATIVE %s BUG: If the prompt template contains instructional text like "
                 "'format specifier %s' or 'Use %s to indicate...', OR output examples like "
-                "'Successful collection of AED %s overdue...' or 'Daily cash flow impact: AED %s', "
-                "these are LITERAL text — NOT substitution placeholders. You MUST escape them as %%s "
-                "(double percent) so format_string treats them as literal text, NOT as placeholders "
-                "requiring arguments. SEARCH the entire template for the word 'Example:' or 'Format:' — "
-                "any %s/%d/%f inside example/format instruction text MUST be escaped to %%s/%%d/%%f. "
+                "'Successful collection of $%s overdue...' or 'Daily cash flow impact: $%s', "
+                "these are LITERAL text — NOT substitution placeholders. You MUST replace them with "
+                "bracket placeholders like [Name], [Position], [Amount] — NOT escape them as %%s. "
+                "SEARCH the entire template for the word 'Example:' or 'Format:' — "
+                "any %s/%d/%f inside example/format instruction text MUST be replaced with [bracket_name]. "
                 "Similarly, 'confidence at 85%' must be '85%%' to avoid consuming an argument.\n"
+                "   🚨 #1 SNEAKIEST TRAP: NARRATIVE FIELDS example text like "
+                "'Entity %s (Category: %s, Region: %s, Risk Tier: %s) exhibits...' "
+                "has 4 hidden %s that consume arguments! Fix: use bracket placeholders: "
+                "'[Name] (Category: [Category], Region: [Region], Risk Tier: [Tier]) exhibits...'\n"
                 "8. STEP-BY-STEP COUNTING METHOD: To fix, go through the ENTIRE template string character by character. "
                 "For each %s/%d/%f that is NOT preceded by another %, count it as a placeholder. "
                 "Then count the exact number of column arguments after the template. "
@@ -21877,7 +24836,7 @@ Start your response with the CSV header line: use_case_id,domain
                 "2. Determine WHERE the column is actually defined (which CTE computes it via GROUP BY).\n"
                 "3. Choose one of these fixes:\n"
                 "   a) COMPUTE INLINE: Replace the column reference with the full expression. "
-                "Example: Replace AVG(cost_per_kg) with SUM(freight_cost)/NULLIF(SUM(weight_kg),0).\n"
+                "Example: Replace AVG(cost_per_unit) with SUM(total_cost)/NULLIF(SUM(quantity),0).\n"
                 "   b) CHANGE SOURCE: Reference the CTE that has the derived column instead of the base CTE.\n"
                 "4. Verify the fix by checking that every column in SELECT and aggregate functions exists "
                 "in the source CTE's explicit column alias list.\n"
@@ -22142,6 +25101,166 @@ Start your response with the CSV header line: use_case_id,domain
                 "7. After fixing, verify that EVERY column reference in the CTE "
                 "exists in its source CTE's output columns."
             )
+        create_table_warnings = use_case.get('create_table_warnings', [])
+        if create_table_warnings:
+            parts.append(
+                "🚨 MISSING CREATE OR REPLACE TABLE STATEMENT 🚨\n"
+                "The SQL does not contain a CREATE OR REPLACE TABLE statement. "
+                "Every generated SQL MUST create a table — a bare SELECT is never acceptable.\n\n"
+                "SPECIFIC VIOLATIONS:\n" +
+                "\n".join(f"  - {w}" for w in create_table_warnings) +
+                "\n\nMANDATORY FIX:\n"
+                "1. Add 'CREATE DATABASE IF NOT EXISTS <inspire_database>;' before the main query.\n"
+                "2. Add 'CREATE OR REPLACE TABLE <result_table> AS' before the WITH clause.\n"
+                "3. The result_table name is provided in the use case metadata.\n"
+                "4. The final SELECT * FROM final_output must be part of the CREATE TABLE AS statement.\n"
+                "5. Add a standalone SELECT * FROM <result_table> after the CREATE statement for verification."
+            )
+        ai_functions_warnings = use_case.get('ai_functions_warnings', [])
+        if ai_functions_warnings:
+            parts.append(
+                "🚨🚨🚨 CRITICAL: MISSING AI FUNCTIONS — SQL IS FUNDAMENTALLY INCOMPLETE 🚨🚨🚨\n"
+                "The SQL contains NO AI functions (ai_query, ai_classify, ai_extract, ai_forecast, "
+                "ai_similarity). Every use case MUST include AI-driven analysis. The SQL appears to be "
+                "a bare analytical query without AI enrichment.\n\n"
+                "SPECIFIC VIOLATIONS:\n" +
+                "\n".join(f"  - {w}" for w in ai_functions_warnings) +
+                "\n\nMANDATORY FIX — THE SQL MUST BE FUNDAMENTALLY RESTRUCTURED:\n"
+                "1. KEEP existing analytical CTEs (base_data, metrics) but they are only the FOUNDATION.\n"
+                "2. ADD a prompt_generation CTE that uses format_string() to build an AI prompt:\n"
+                "   prompt_generation AS (\n"
+                "     SELECT *,\n"
+                "       format_string(\n"
+                "         '# Persona\\nYou are a [ROLE] working for {business_name}...\\n"
+                "# Task\\n...\\n# Input\\nAnalyze: %s...\\n# Output\\n...\\n"
+                "# Constraints\\n...\\n# Remarks\\n...',\n"
+                "         col1, col2, ...) AS ai_sys_prompt\n"
+                "     FROM metrics_cte)\n"
+                "3. ADD an AI analysis CTE that calls ai_query with the configured model:\n"
+                "   ai_analysis AS (\n"
+                "     SELECT *,\n"
+                "       ai_query('{sql_model_serving}', ai_sys_prompt,\n"
+                "         modelParameters => named_struct('temperature', 0.4)) AS ai_response_json\n"
+                "     FROM prompt_generation)\n"
+                "   ⛔ NEVER hardcode model names like 'databricks-meta-llama-3-1-70b-instruct' — use '{sql_model_serving}' ONLY!\n"
+                "   ⛔ NEVER use CONCAT() for AI prompts — use format_string() with %s placeholders ONLY!\n"
+                "4. ADD JSON extraction in final_output using get_json_object for ai_cat_, ai_txt_, ai_sys_ fields.\n"
+                "5. The prompt MUST follow the 6-section structure: Persona, Task, Input, Output, Constraints, Remarks.\n"
+                "6. The prompt MUST pass ALL available metrics/columns to the AI via %s placeholders.\n"
+                "7. The final output MUST include mandatory last 7+1 columns: ai_txt_business_outcome, "
+                "ai_txt_executive_summary, ai_sys_importance, ai_sys_urgency, ai_sys_confidence, "
+                "ai_sys_feedback, ai_sys_missing_data, ai_sys_prompt (LAST).\n"
+                "8. This is NOT a minor fix — the SQL needs 3-4 additional CTEs for AI enrichment."
+            )
+        limit_warnings = use_case.get('limit_first_cte_warnings', [])
+        if limit_warnings:
+            parts.append(
+                "🚨 MISSING LIMIT 10 IN FIRST CTE 🚨\n"
+                "The first data-loading CTE does not contain LIMIT 10.\n\n"
+                "SPECIFIC VIOLATIONS:\n" +
+                "\n".join(f"  - {w}" for w in limit_warnings) +
+                "\n\nMANDATORY FIX:\n"
+                "1. Add 'LIMIT 10' as the LAST clause in the first CTE's SELECT statement.\n"
+                "2. LIMIT must come AFTER WHERE, GROUP BY, and ORDER BY clauses.\n"
+                "3. Only the FIRST CTE (right after WITH) should have LIMIT 10.\n"
+                "4. Do NOT add LIMIT to any other CTEs."
+            )
+        mandatory_cols_warnings = use_case.get('mandatory_output_cols_warnings', [])
+        if mandatory_cols_warnings:
+            parts.append(
+                "🚨 MISSING MANDATORY OUTPUT COLUMNS 🚨\n"
+                "The SQL output is missing mandatory ai_sys_* and ai_txt_* columns that every "
+                "use case MUST include.\n\n"
+                "SPECIFIC VIOLATIONS:\n" +
+                "\n".join(f"  - {w}" for w in mandatory_cols_warnings) +
+                "\n\nMANDATORY FIX:\n"
+                "1. Add AI analysis via ai_query with format_string prompt that produces these fields.\n"
+                "2. Extract fields from the AI JSON response using get_json_object in final_output.\n"
+                "3. MANDATORY LAST 7+1 FIELDS (in this exact order in final_output):\n"
+                "   - ai_txt_business_outcome (calculated measurable impact with Daily/Weekly/Monthly/Yearly breakdown + DISCLAIMER)\n"
+                "   - ai_txt_executive_summary (2-3 sentence summary referencing business outcome numbers)\n"
+                "   - ai_sys_importance (Very Low|Low|Medium|High|Very High|Critical — INDEPENDENT from urgency)\n"
+                "   - ai_sys_urgency (Very Low|Low|Medium|High|Very High|Critical — INDEPENDENT from importance)\n"
+                "   - ai_sys_confidence (0.0-1.0 decimal)\n"
+                "   - ai_sys_feedback ('I assessed my confidence at [X]%% because...')\n"
+                "   - ai_sys_missing_data ('I can get higher confidence than [X]%% if...' + JSON)\n"
+                "   - ai_sys_prompt (the exact prompt used — MUST be LAST column)\n"
+                "4. All fields must have COALESCE defaults in the get_json_object extraction.\n"
+                "5. ai_sys_confidence must use TRY_CAST to DECIMAL(3,2)."
+            )
+        ai_query_param_warnings = use_case.get('ai_query_params_warnings', [])
+        if ai_query_param_warnings:
+            parts.append(
+                "🚨 INVALID ai_query NAMED PARAMETERS — UNRECOGNIZED_PARAMETER_NAME 🚨\n"
+                "The ai_query function call uses invalid named parameters that do NOT exist "
+                "in the Databricks ai_query function signature.\n"
+                "Error: [UNRECOGNIZED_PARAMETER_NAME]\n\n"
+                "SPECIFIC VIOLATIONS:\n" +
+                "\n".join(f"  - {w}" for w in ai_query_param_warnings) +
+                "\n\nMANDATORY FIX:\n"
+                "1. Databricks ai_query ONLY accepts these named parameters:\n"
+                "   ai_query(endpoint, request, modelParameters => named_struct(...), responseFormat => '...')\n"
+                "   - endpoint: STRING — the model serving endpoint name (use '{sql_model_serving}')\n"
+                "   - request: STRING — the prompt text (built via format_string)\n"
+                "   - modelParameters => named_struct('temperature', 0.4) — optional model params\n"
+                "   - responseFormat => '{...}' — optional JSON schema for structured output\n"
+                "2. BANNED PARAMETERS (do NOT exist in ai_query):\n"
+                "   - systemPrompt / system_prompt — embed system prompt in the main prompt text\n"
+                "   - temperature — must be INSIDE modelParameters => named_struct('temperature', X)\n"
+                "   - max_tokens — must be INSIDE modelParameters => named_struct('max_tokens', X)\n"
+                "   - top_p, stop, stream, n — must be INSIDE modelParameters if supported\n"
+                "3. CORRECT PATTERN:\n"
+                "   ai_query(\n"
+                "     '{sql_model_serving}',\n"
+                "     ai_sys_prompt,\n"
+                "     modelParameters => named_struct('temperature', 0.4)\n"
+                "   ) AS insights_json\n"
+                "4. The system prompt / persona MUST be embedded in the format_string template\n"
+                "   using the 6-section structure (# Persona, # Task, # Input, # Output, # Constraints, # Remarks).\n"
+                "5. Do NOT use responseFormat => 'JSON' — the AI model is instructed to output JSON\n"
+                "   via the prompt itself ('Output ONLY a JSON object').\n"
+                "6. NEVER pass named params as positional strings! (See Anti-Pattern #22)\n"
+                "   WRONG: ai_query('endpoint', prompt, 'modelParameters', named_struct(...))\n"
+                "   CORRECT: ai_query('endpoint', prompt, modelParameters => named_struct(...))\n"
+                "   The string 'modelParameters' becomes returnType (arg 3), and named_struct becomes\n"
+                "   failOnError (arg 4, expects BOOLEAN) causing UNEXPECTED_INPUT_TYPE error."
+            )
+        quoted_dt_warnings = use_case.get('quoted_datetime_unit_warnings', [])
+        if quoted_dt_warnings:
+            parts.append(
+                "🚨 QUOTED DATETIME UNIT — INVALID_PARAMETER_VALUE.DATETIME_UNIT 🚨\n"
+                "One or more date_add/date_sub/timestampadd/timestampdiff calls use a QUOTED "
+                "string for the datetime unit. Databricks requires an UNQUOTED keyword.\n\n"
+                "SPECIFIC VIOLATIONS:\n" +
+                "\n".join(f"  - {w}" for w in quoted_dt_warnings) +
+                "\n\nMANDATORY FIX:\n"
+                "1. Remove the quotes from the datetime unit in ALL occurrences:\n"
+                "   WRONG: date_add('MONTH', -36, CURRENT_DATE())\n"
+                "   CORRECT: date_add(MONTH, -36, CURRENT_DATE())\n"
+                "2. This applies to: date_add, date_sub, timestampadd, timestampdiff.\n"
+                "3. Note: date_trunc('month', d) and date_part('month', d) DO use quoted strings — "
+                "do NOT change those.\n"
+                "4. See Anti-Pattern #23."
+            )
+        ansi_mode_warnings = use_case.get('ansi_mode_division_warnings', [])
+        if ansi_mode_warnings:
+            parts.append(
+                "🚨 MISSING SET ansi_mode = false — DIVIDE_BY_ZERO 🚨\n"
+                "SQL uses aggregate window functions (CORR, REGR_SLOPE, REGR_R2, etc.) that "
+                "internally divide by stddev/variance. When all values in the window are identical "
+                "(very common with LIMIT 10), stddev = 0 → DIVIDE_BY_ZERO. COALESCE alone does "
+                "NOT help — the error fires before COALESCE can evaluate.\n\n"
+                "SPECIFIC VIOLATIONS:\n" +
+                "\n".join(f"  - {w}" for w in ansi_mode_warnings) +
+                "\n\nMANDATORY FIX:\n"
+                "1. Prepend 'SET ansi_mode = false;' BEFORE the CREATE DATABASE statement:\n"
+                "   SET ansi_mode = false;\n"
+                "   CREATE DATABASE IF NOT EXISTS catalog._inspire;\n"
+                "   CREATE OR REPLACE TABLE ... AS ...\n"
+                "2. This makes division-by-zero return NULL instead of throwing an error.\n"
+                "3. The existing COALESCE(..., 0.0) wrappers will then coerce NULL to a safe default.\n"
+                "4. See Anti-Pattern #24."
+            )
         return "\n\n".join(parts)
 
     def _run_sql_task_wrapper(self, use_case: dict, full_schema_details: list, unstructured_docs_markdown: str, schema_index: dict) -> dict:
@@ -22168,7 +25287,16 @@ Start your response with the CSV header line: use_case_id,domain
             uc_with_sql.get('window_over_group_by_status') == 'failed' or
             uc_with_sql.get('ai_forecast_named_struct_status') == 'failed' or
             uc_with_sql.get('fs_col_availability_status') == 'failed' or
-            uc_with_sql.get('cte_col_ref_status') == 'failed'
+            uc_with_sql.get('cte_col_ref_status') == 'failed' or
+            uc_with_sql.get('create_table_status') == 'failed' or
+            uc_with_sql.get('ai_functions_status') == 'failed' or
+            uc_with_sql.get('limit_first_cte_status') == 'failed' or
+            uc_with_sql.get('mandatory_output_cols_status') == 'failed' or
+            uc_with_sql.get('invalid_format_conversion_status') == 'failed' or
+            uc_with_sql.get('params_quoting_status') == 'failed' or
+            uc_with_sql.get('ai_query_params_status') == 'failed' or
+            uc_with_sql.get('quoted_datetime_unit_status') == 'failed' or
+            uc_with_sql.get('ansi_mode_division_status') == 'failed'
         )
         already_retried = uc_with_sql.get('_static_validation_retry_done', False)
         if has_static_failure and not already_retried:
@@ -22192,6 +25320,13 @@ Start your response with the CSV header line: use_case_id,domain
             fixed_result = self._fix_sql_after_validation_failure(
                 uc_with_sql, full_schema_details, unstructured_docs_markdown, schema_index
             )
+            if fixed_result.get('_fix_skipped_context_too_large'):
+                self.logger.info(
+                    f"[{use_case_id}] 🔄 Fix skipped (context too large) — returning original for wave-level regeneration"
+                )
+                uc_with_sql['_static_validation_retry_done'] = False
+                return uc_with_sql
+
             fix_still_failed = (
                 fixed_result.get('cte_chaining_status') == 'failed' or
                 fixed_result.get('repeated_with_status') == 'failed' or
@@ -22210,7 +25345,16 @@ Start your response with the CSV header line: use_case_id,domain
                 fixed_result.get('window_over_group_by_status') == 'failed' or
                 fixed_result.get('ai_forecast_named_struct_status') == 'failed' or
                 fixed_result.get('fs_col_availability_status') == 'failed' or
-                fixed_result.get('cte_col_ref_status') == 'failed'
+                fixed_result.get('cte_col_ref_status') == 'failed' or
+                fixed_result.get('create_table_status') == 'failed' or
+                fixed_result.get('ai_functions_status') == 'failed' or
+                fixed_result.get('limit_first_cte_status') == 'failed' or
+                fixed_result.get('mandatory_output_cols_status') == 'failed' or
+                fixed_result.get('invalid_format_conversion_status') == 'failed' or
+                fixed_result.get('params_quoting_status') == 'failed' or
+                fixed_result.get('ai_query_params_status') == 'failed' or
+                fixed_result.get('quoted_datetime_unit_status') == 'failed' or
+                fixed_result.get('ansi_mode_division_status') == 'failed'
             )
             if fix_still_failed:
                 self.logger.warning(
@@ -22237,7 +25381,7 @@ Start your response with the CSV header line: use_case_id,domain
                 future = executor.submit(self._run_sql_task_wrapper, uc, full_schema_details, unstructured_docs_markdown, schema_index)
                 future_to_uc[future] = uc
             try:
-                for future in concurrent.futures.as_completed(future_to_uc, timeout=_sql_gen_total_timeout):
+                for future in safe_as_completed(future_to_uc, timeout=_sql_gen_total_timeout):
                     uc_ref = future_to_uc[future]
                     try:
                         result = future.result(timeout=60)
@@ -22280,10 +25424,7 @@ Start your response with the CSV header line: use_case_id,domain
                                 f"-- SQL generation timed out\n"
                                 f"-- Tables Involved: {tables_involved_str}\n"
                                 f"SELECT 'SQL Generation Timeout' AS error_message;\n"
-                                f"-- If you run the query and it was not valid, set IsValid to No and run Inspire again with 'Generate = SQL Regeneration', and Inspire will regenerate a new query for you to validate. You can also pass special instruction in below field:\n"
-                                f"--SQL Generation Instructions Begin\n"
-                                f"--\n"
-                                f"--SQL Generation Instructions End"
+                                f"-- SQL failed to generate, set regenerate_sql:Yes and run Inspire again with Operation = 'SQL Regeneration', and Inspire will regenerate a new query."
                             )
                             uc_ref['sql_generation_status'] = 'timeout'
                         else:
@@ -22293,10 +25434,7 @@ Start your response with the CSV header line: use_case_id,domain
                                 f"-- SQL generation failed: {msg[:100]}\n"
                                 f"-- Tables Involved: {tables_involved_str}\n"
                                 f"SELECT 'SQL Generation Error' AS error_message;\n"
-                                f"-- If you run the query and it was not valid, set IsValid to No and run Inspire again with 'Generate = SQL Regeneration', and Inspire will regenerate a new query for you to validate. You can also pass special instruction in below field:\n"
-                                f"--SQL Generation Instructions Begin\n"
-                                f"--\n"
-                                f"--SQL Generation Instructions End"
+                                f"-- SQL failed to generate, set regenerate_sql:Yes and run Inspire again with Operation = 'SQL Regeneration', and Inspire will regenerate a new query."
                             )
                         uc_ref['generated'] = 'N'
                         uc_ref['validated'] = 'D'
@@ -22374,6 +25512,43 @@ Start your response with the CSV header line: use_case_id,domain
         
         return use_cases_with_sql
     
+    def _build_placeholder_sql(self, uc: dict, reason: str) -> str:
+        """Build a placeholder SQL with technical design comment for use cases where SQL was not generated.
+        
+        Layout order is deliberate — the notebook assembly header-stripping logic strips
+        consecutive '--' lines at the top until it hits a line containing a keyword like 'with'.
+        The dummy-SQL message contains '...again with Operation...' which stops the stripping,
+        ensuring everything from that line onward (including the technical design block) is preserved.
+        """
+        tables_involved = uc.get('Tables Involved', 'your_table')
+        first_table = tables_involved.split(',')[0].strip() if tables_involved else 'your_table'
+        technical_design = uc.get('Technical Design', '')
+        
+        td_comment = ""
+        if technical_design:
+            formatted_td = technical_design.strip()
+            formatted_td = re.sub(r'\s*(?=\bCTE\d+\s*(?:\([^)]*\))?\s*:)', '\n\n', formatted_td)
+            formatted_td = re.sub(r'\s*(?=\bStep\s+\d+\s*:)', '\n\n', formatted_td)
+            formatted_td = re.sub(r'\s*(?=Using columns:)', '\n\n', formatted_td, flags=re.IGNORECASE)
+            td_lines = formatted_td.strip().split('\n')
+            td_comment = "\n/**Technical Design (from LLM):\n"
+            for td_line in td_lines:
+                stripped = td_line.strip()
+                if stripped:
+                    td_comment += f"  {stripped}\n"
+                else:
+                    td_comment += "\n"
+            td_comment += "**/\n"
+        
+        placeholder_sql = (
+            f"-- {reason}\n"
+            f"-- Tables Involved: {tables_involved}\n"
+            f"--This is a dummy SQL, if you want to generate SQL for this use case, update the variable above regenerate_sql to Yes, and run Inspire again with Operation = Re-generate SQL\n"
+            f"{td_comment}\n"
+            f"SELECT * FROM {first_table} LIMIT 10;"
+        )
+        return placeholder_sql
+
     def _generate_sql_parallel(self, use_cases: list, full_schema_details: list, unstructured_docs_markdown: str, is_retry: bool = False) -> list:
         """
         Generate SQL for all use cases in parallel using max_parallelism.
@@ -22390,18 +25565,11 @@ Start your response with the CSV header line: use_case_id,domain
             log_print(f"\n⚠️ SQL Code generation DISABLED - using placeholder SQL")
             
             for uc in use_cases:
-                tables_involved = uc.get('Tables Involved', 'your_table')
-                first_table = tables_involved.split(',')[0].strip() if tables_involved else 'your_table'
-                placeholder_sql = (
-                    f"-- TODO: SQL Code generation was disabled\n"
-                    f"-- To generate SQL: Run 'Re-generate SQL' operation mode\n"
-                    f"-- Tables Involved: {tables_involved}\n"
-                    f"SELECT * FROM {first_table} LIMIT 10;"
-                )
-                uc['SQL'] = placeholder_sql
+                uc['SQL'] = self._build_placeholder_sql(uc, "TODO: SQL Code generation was disabled — To generate SQL: Run 'Re-generate SQL' operation mode")
                 uc['generated'] = 'N'
                 uc['validated'] = 'N'
                 if 'result_table' not in uc:
+                    tables_involved = uc.get('Tables Involved', 'your_table')
                     uc['result_table'] = compute_result_table_name(uc.get('No', 'unknown'), uc.get('Name', 'unknown'), tables_involved, inspire_database=self.inspire_database)
             
             return use_cases
@@ -22416,7 +25584,8 @@ Start your response with the CSV header line: use_case_id,domain
             num_items=total_use_cases,
             total_columns=total_columns,
             avg_prompt_chars=avg_prompt_chars,
-            is_llm_operation=True, logger=self.logger
+            is_llm_operation=True, logger=self.logger,
+            estimated_mb_per_worker=10.0
         )
         
         log_print(f"\n{'='*80}")
@@ -22455,7 +25624,16 @@ Start your response with the CSV header line: use_case_id,domain
             (5, max(1, (sql_parallelism + 2) // 3))
         ]
         final_results = {}
-        backlog = sort_backlog(use_cases)
+        sql_candidates = [uc for uc in use_cases if uc.get('generated') != 'N']
+        skip_sql_ucs = [uc for uc in use_cases if uc.get('generated') == 'N']
+        for uc in skip_sql_ucs:
+            _limit_label = "All" if self.max_sql_ucs_per_domain is None else str(self.max_sql_ucs_per_domain)
+            uc['SQL'] = self._build_placeholder_sql(uc, f"SQL generation skipped (per-domain limit: {_limit_label}) — To generate: Run 'Re-generate SQL' operation mode")
+            uc['validated'] = 'N'
+            final_results[uc.get('No', 'UNKNOWN')] = uc
+        if skip_sql_ucs:
+            self.logger.info(f"⏭️ Skipped SQL for {len(skip_sql_ucs)} use cases (per-domain limit)")
+        backlog = sort_backlog(sql_candidates)
         for wave_id, wave_workers in wave_parallelism:
             if not backlog:
                 break
@@ -22524,6 +25702,7 @@ Start your response with the CSV header line: use_case_id,domain
                     del uc['_needs_fix']
                 else:
                     uc['_needs_fix'] = True
+                uc['_skip_llm_cache'] = True
 
             # Build backlog for next wave: include BOTH validation failures AND timeouts for retry
             # Reset timeout status for timed_out items so they get retried
@@ -22617,6 +25796,67 @@ Start your response with the CSV header line: use_case_id,domain
         
         return ordered_results
 
+    def _apply_sql_generation_selection(self, use_cases: list):
+        """
+        Pre-marks each use case with generated='Y' or generated='N' based on:
+        - Whether SQL Code generation is enabled
+        - Per-domain limit (self.max_sql_ucs_per_domain)
+        - If max_sql_ucs_per_domain * num_domains < min_total_for_sql_limiting,
+          generate ALL (the total is small enough).
+        """
+        if not self.generate_sql_code:
+            for uc in use_cases:
+                uc['generated'] = 'N'
+            self.logger.info(f"🏷️ SQL generation disabled — all {len(use_cases)} use cases marked as 'N'")
+            return
+
+        if self.max_sql_ucs_per_domain is None:
+            for uc in use_cases:
+                uc['generated'] = 'Y'
+            self.logger.info(f"🏷️ SQL generation per domain = All — generating ALL {len(use_cases)} use cases")
+            return
+
+        if self.max_sql_ucs_per_domain <= 0:
+            for uc in use_cases:
+                uc['generated'] = 'N'
+            self.logger.info(f"🏷️ SQL generation per domain = 0 — all {len(use_cases)} use cases marked as 'N'")
+            return
+
+        grouped = {}
+        for uc in use_cases:
+            domain = uc.get('Business Domain', 'Other')
+            grouped.setdefault(domain, []).append(uc)
+
+        num_domains = len(grouped)
+        total_if_limited = self.max_sql_ucs_per_domain * num_domains
+
+        if total_if_limited < self.min_total_for_sql_limiting:
+            for uc in use_cases:
+                uc['generated'] = 'Y'
+            self.logger.info(
+                f"🏷️ Per-domain limit ({self.max_sql_ucs_per_domain}) × {num_domains} domains "
+                f"= {total_if_limited} < {self.min_total_for_sql_limiting} threshold — "
+                f"generating ALL {len(use_cases)} use cases"
+            )
+            return
+
+        selected_count = 0
+        skipped_count = 0
+        for domain, ucs in grouped.items():
+            sorted_ucs = sorted(ucs, key=lambda x: float(x.get('Priority', 0)), reverse=True)
+            for i, uc in enumerate(sorted_ucs):
+                if i < self.max_sql_ucs_per_domain:
+                    uc['generated'] = 'Y'
+                    selected_count += 1
+                else:
+                    uc['generated'] = 'N'
+                    skipped_count += 1
+
+        self.logger.info(
+            f"🏷️ Per-domain limit applied: {self.max_sql_ucs_per_domain}/domain × {num_domains} domains "
+            f"→ {selected_count} selected for SQL, {skipped_count} skipped"
+        )
+
     def _generate_sql_and_notebooks_by_domain(self, all_use_cases: list, full_schema_details: list, 
                                                unstructured_docs_markdown: str, translations: dict, 
                                                summary_dict: dict = None) -> list:
@@ -22653,18 +25893,11 @@ Start your response with the CSV header line: use_case_id,domain
             
             # Set placeholder SQL for all use cases
             for uc in all_use_cases:
-                tables_involved = uc.get('Tables Involved', 'your_table')
-                first_table = tables_involved.split(',')[0].strip() if tables_involved else 'your_table'
-                placeholder_sql = (
-                    f"-- TODO: SQL Code generation was disabled\n"
-                    f"-- To generate SQL: Run 'Re-generate SQL' operation mode\n"
-                    f"-- Tables Involved: {tables_involved}\n"
-                    f"SELECT * FROM {first_table} LIMIT 10;"
-                )
-                uc['SQL'] = placeholder_sql
+                uc['SQL'] = self._build_placeholder_sql(uc, "TODO: SQL Code generation was disabled — To generate SQL: Run 'Re-generate SQL' operation mode")
                 uc['generated'] = 'N'
-                uc['validated'] = 'N'  # Mark as needing regeneration (regenerate_sql:Yes)
+                uc['validated'] = 'N'
                 if 'result_table' not in uc:
+                    tables_involved = uc.get('Tables Involved', 'your_table')
                     uc['result_table'] = compute_result_table_name(uc.get('No', 'unknown'), uc.get('Name', 'unknown'), tables_involved, inspire_database=self.inspire_database)
             
             # Still need to create notebooks - proceed to notebook assembly
@@ -22704,7 +25937,7 @@ Start your response with the CSV header line: use_case_id,domain
                     )
                     log_print(f"   ✅ {notebook_name}.ipynb created")
                 except Exception as e:
-                    self.logger.error(f"Failed to create notebook for domain '{domain_name}': {e}")
+                    self.logger.error(f"Failed to create notebook for domain '{domain_name}': {get_clean_error_message(e)}")
                     log_print(f"   ❌ Failed to create notebook: {str(e)[:100]}")
             
             log_print(f"\n✅ All notebooks created with placeholder SQL")
@@ -22767,56 +26000,79 @@ Start your response with the CSV header line: use_case_id,domain
         
         uc_id_to_domain = {}
         original_uc_order = []
-        original_uc_map = {}
         for uc in all_use_cases:
             uc_id = uc.get('No', 'UNKNOWN')
             uc_id_to_domain[uc_id] = uc.get('Business Domain', 'Other')
             original_uc_order.append(uc_id)
-            original_uc_map[uc_id] = uc
         del all_use_cases
         _force_gc(self.logger, "freed all_use_cases flat list inside domain-by-domain SQL gen")
         
         notebooks_created = []
         overall_start_time = time.time()
-        cumulative_use_cases_done = 0
+        _progress_lock = threading.Lock()
+        _cumulative_use_cases_done = [0]
+        _domains_completed = [0]
         
-        for domain_idx, domain_name in enumerate(sorted_domains, start=1):
+        domain_parallelism, domain_par_reason = calculate_adaptive_parallelism(
+            "domain_sql_notebooks", self.max_parallelism,
+            num_items=total_use_cases,
+            num_domains=total_domains,
+            is_llm_operation=True, logger=self.logger,
+            estimated_mb_per_worker=10.0
+        )
+        domain_workers = max(2, min(domain_parallelism, total_domains, 4))
+        log_print(f"🚀 Domain-level parallelism: {domain_workers} concurrent domains")
+        log_adaptive_parallelism_decision("domain_sql_notebooks", domain_workers, self.max_parallelism, domain_par_reason)
+        
+        priority_order = {
+            "ultra high": 0, "very high": 1, "high": 2, "medium": 3,
+            "low": 4, "very low": 5, "ultra low": 6
+        }
+        
+        def sort_backlog(items):
+            return [uc for _, uc in sorted(
+                enumerate(items),
+                key=lambda pair: (priority_order.get(str(pair[1].get('Quality', '')).strip().lower(), len(priority_order)), pair[0])
+            )]
+        
+        def _process_domain(domain_idx_name_pair):
+            domain_idx, domain_name = domain_idx_name_pair
             domain_use_cases = grouped_by_domain[domain_name]
             domain_uc_count = len(domain_use_cases)
-            # Get the actual prefix from use case IDs (matches notebook name)
             actual_prefix = domain_prefix_map.get(domain_name, (domain_idx, f"N{domain_idx:02d}"))[1]
             
             log_print(f"\n{'='*80}")
             log_print(f"🏢 DOMAIN {domain_idx}/{total_domains}: {domain_name.upper()} (Notebook: {actual_prefix})")
             log_print(f"{'='*80}")
             log_print(f"   📊 Use cases in this domain: {domain_uc_count}")
-            log_print(f"   🔄 Progress: {cumulative_use_cases_done}/{total_use_cases} use cases completed so far")
             
             domain_start_time = time.time()
             self.logger.info(f"\n🏢 [{domain_idx}/{total_domains}] Starting domain: {domain_name} ({actual_prefix}, {domain_uc_count} use cases)")
             
-            log_print(f"\n   📝 PHASE 1: Generating SQL for {domain_uc_count} use cases (wave pattern)...")
+            domain_final_results = {}
+
+            sql_candidates = [uc for uc in domain_use_cases if uc.get('generated') != 'N']
+            skip_sql_ucs = [uc for uc in domain_use_cases if uc.get('generated') == 'N']
+
+            if skip_sql_ucs:
+                for uc in skip_sql_ucs:
+                    _limit_label = "All" if self.max_sql_ucs_per_domain is None else str(self.max_sql_ucs_per_domain)
+                    uc['SQL'] = self._build_placeholder_sql(uc, f"SQL generation skipped (per-domain limit: {_limit_label}) — To generate: Run 'Re-generate SQL' operation mode")
+                    uc['validated'] = 'N'
+                    domain_final_results[uc.get('No', 'UNKNOWN')] = uc
+                self.logger.info(f"   ⏭️ [{domain_name}] Skipped SQL for {len(skip_sql_ucs)} use cases (per-domain limit)")
+
+            sql_candidate_count = len(sql_candidates)
+            log_print(f"\n   📝 PHASE 1: Generating SQL for {sql_candidate_count} use cases (wave pattern)...")
             
-            # ADAPTIVE PARALLELISM: Calculate based on domain use cases and schema size
             sql_parallelism, reason = calculate_adaptive_parallelism(
                 "sql_generation", self.max_parallelism,
-                num_items=domain_uc_count,
+                num_items=sql_candidate_count,
                 total_columns=len(full_schema_details),
                 avg_prompt_chars=len(full_schema_details) * 50,
-                is_llm_operation=True, logger=self.logger
+                is_llm_operation=True, logger=self.logger,
+                estimated_mb_per_worker=10.0
             )
-            log_adaptive_parallelism_decision("sql_generation", sql_parallelism, self.max_parallelism, reason)
-            
-            priority_order = {
-                "ultra high": 0, "very high": 1, "high": 2, "medium": 3,
-                "low": 4, "very low": 5, "ultra low": 6
-            }
-            
-            def sort_backlog(items):
-                return [uc for _, uc in sorted(
-                    enumerate(items),
-                    key=lambda pair: (priority_order.get(str(pair[1].get('Quality', '')).strip().lower(), len(priority_order)), pair[0])
-                )]
             
             wave_parallelism = [
                 (1, sql_parallelism),
@@ -22826,8 +26082,7 @@ Start your response with the CSV header line: use_case_id,domain
                 (5, max(1, (sql_parallelism + 2) // 3))
             ]
             
-            domain_final_results = {}
-            backlog = sort_backlog(domain_use_cases)
+            backlog = sort_backlog(sql_candidates)
             
             for wave_id, wave_workers in wave_parallelism:
                 if not backlog:
@@ -22835,20 +26090,18 @@ Start your response with the CSV header line: use_case_id,domain
                 backlog = sort_backlog(backlog)
                 wave_start_time = time.time()
                 
-                self.logger.info(f"   🔁 Wave {wave_id}: processing {len(backlog)} use cases with parallelism {wave_workers}")
-                log_print(f"      ▶️ Wave {wave_id}: {len(backlog)} use cases, parallelism {wave_workers}")
+                self.logger.info(f"   🔁 [{domain_name}] Wave {wave_id}: processing {len(backlog)} use cases with parallelism {wave_workers}")
+                log_print(f"      ▶️ [{actual_prefix}] Wave {wave_id}: {len(backlog)} use cases, parallelism {wave_workers}")
                 
                 results, timed_out, validation_failed = self._run_sql_wave(
                     wave_id, backlog, full_schema_details, unstructured_docs_markdown, schema_by_table, wave_workers
                 )
                 
-                wave_end_time = time.time()
-                wave_duration = wave_end_time - wave_start_time
-                
+                wave_duration = time.time() - wave_start_time
                 wave_succeeded = sum(1 for uc in results if uc.get('generated') == 'Y' and uc.get('validated') in ['Y', 'D'])
                 wave_failed = len(results) - wave_succeeded
                 
-                log_print(f"      ✅ Wave {wave_id} done in {wave_duration:.1f}s: {wave_succeeded} OK, {wave_failed} Failed")
+                log_print(f"      ✅ [{actual_prefix}] Wave {wave_id} done in {wave_duration:.1f}s: {wave_succeeded} OK, {wave_failed} Failed")
                 
                 for uc in results:
                     domain_final_results[uc.get('No', 'UNKNOWN')] = uc
@@ -22867,7 +26120,6 @@ Start your response with the CSV header line: use_case_id,domain
                 retry_items = validation_failed + timed_out
                 backlog = sort_backlog(retry_items)
                 del results, timed_out, validation_failed
-                gc.collect()
             
             for uc in backlog:
                 if uc.get('sql_generation_status') == 'timeout':
@@ -22892,14 +26144,12 @@ Start your response with the CSV header line: use_case_id,domain
             domain_failed = len(domain_ordered_results) - domain_success
             
             sql_duration = time.time() - domain_start_time
-            log_print(f"\n   ✅ SQL Generation Complete: {domain_success} succeeded, {domain_failed} failed ({sql_duration:.1f}s)")
+            log_print(f"\n   ✅ [{actual_prefix}] SQL Generation Complete: {domain_success} succeeded, {domain_failed} failed ({sql_duration:.1f}s)")
             
-            log_print(f"\n   📓 PHASE 2: Creating notebook for domain '{domain_name}'...")
+            log_print(f"\n   📓 [{actual_prefix}] PHASE 2: Creating notebook for domain '{domain_name}'...")
             
             notebook_start_time = time.time()
             sorted_cases = sorted(domain_ordered_results, key=self._natural_sort_key)
-            # CRITICAL FIX: Use prefix from use case IDs, not from loop index
-            # This ensures N15-AI01 use cases go into N15-xxx.ipynb, not N06-xxx.ipynb
             domain_prefix = domain_prefix_map.get(domain_name, (domain_idx, f"N{domain_idx:02d}"))[1]
             notebook_name = f"{domain_prefix}-{self._sanitize_name(domain_name)}"
             
@@ -22915,12 +26165,12 @@ Start your response with the CSV header line: use_case_id,domain
                 notebooks_created.append((domain_idx, notebook_name, True))
                 notebook_duration = time.time() - notebook_start_time
                 
+                total_domain_time = time.time() - domain_start_time
                 log_print(f"\n{'*'*80}")
                 log_print(f"🎉 DOMAIN '{domain_name.upper()}' COMPLETE!")
                 log_print(f"{'*'*80}")
                 log_print(f"   📓 Notebook: {notebook_name}.ipynb")
                 log_print(f"   📊 Use cases: {domain_uc_count} ({domain_success} SQL OK, {domain_failed} SQL Failed)")
-                total_domain_time = time.time() - domain_start_time
                 log_print(f"   ⏱️  Total time: {total_domain_time:.1f}s (SQL: {sql_duration:.1f}s, Notebook: {notebook_duration:.1f}s)")
                 log_print(f"   ✅ READY FOR TESTING!")
                 log_print(f"{'*'*80}\n")
@@ -22929,28 +26179,49 @@ Start your response with the CSV header line: use_case_id,domain
                 
             except Exception as e:
                 notebooks_created.append((domain_idx, notebook_name, False))
-                self.logger.error(f"❌ [{domain_idx}/{total_domains}] Failed to create notebook for domain '{domain_name}': {e}")
-                log_print(f"   ❌ Notebook creation failed: {str(e)[:100]}")
+                self.logger.error(f"❌ [{domain_idx}/{total_domains}] Failed to create notebook for domain '{domain_name}': {get_clean_error_message(e)}")
+                log_print(f"   ❌ [{actual_prefix}] Notebook creation failed: {str(e)[:100]}")
             
-            # === MEMORY OPTIMIZATION: Save domain results to disk, free from memory ===
             for uc in domain_ordered_results:
                 _strip_transient_fields(uc)
             self.storage_manager.save_domain_results(domain_name, domain_ordered_results)
-            del domain_ordered_results
-            del domain_final_results
-            del backlog
-            del grouped_by_domain[domain_name]
-            _force_gc(self.logger, f"after domain '{domain_name}' ({domain_uc_count} UCs)")
+            del domain_ordered_results, domain_final_results, backlog
             
-            cumulative_use_cases_done += domain_uc_count
+            with _progress_lock:
+                _cumulative_use_cases_done[0] += domain_uc_count
+                _domains_completed[0] += 1
+                done_ucs = _cumulative_use_cases_done[0]
+                done_doms = _domains_completed[0]
             
-            remaining_domains = total_domains - domain_idx
+            remaining_domains = total_domains - done_doms
             if remaining_domains > 0:
-                avg_time_per_uc = (time.time() - overall_start_time) / cumulative_use_cases_done if cumulative_use_cases_done > 0 else 0
-                remaining_ucs = total_use_cases - cumulative_use_cases_done
+                elapsed = time.time() - overall_start_time
+                avg_time_per_uc = elapsed / done_ucs if done_ucs > 0 else 0
+                remaining_ucs = total_use_cases - done_ucs
                 eta_seconds = avg_time_per_uc * remaining_ucs
-                log_print(f"   📈 Progress: {cumulative_use_cases_done}/{total_use_cases} use cases ({cumulative_use_cases_done*100//total_use_cases}%)")
+                log_print(f"   📈 Progress: {done_ucs}/{total_use_cases} use cases ({done_ucs*100//total_use_cases}%)")
                 log_print(f"   ⏳ Estimated time remaining: {eta_seconds/60:.1f} minutes ({remaining_domains} domains left)")
+            
+            return domain_name
+        
+        domain_tasks = list(enumerate(sorted_domains, start=1))
+        
+        with _SafeExecutorContext(max_workers=domain_workers, thread_name_prefix="domain_sql", logger=self.logger, name="DomainSQL") as ctx:
+            future_to_domain = {ctx.submit(_process_domain, task): task for task in domain_tasks}
+            _bp_timeout = TECHNICAL_CONTEXT["runtime"]["batch_processing_timeout"]
+            total_domain_timeout = (total_use_cases * _bp_timeout) // max(1, domain_workers) + 1800
+            
+            try:
+                for future in safe_as_completed(future_to_domain, timeout=total_domain_timeout):
+                    task = future_to_domain[future]
+                    try:
+                        domain_name_done = future.result(timeout=_bp_timeout * 6)
+                        self.logger.info(f"✓ Domain '{domain_name_done}' pipeline completed")
+                    except Exception as exc:
+                        self.logger.error(f"❌ Domain task {task} raised exception: {get_clean_error_message(exc)}")
+            except concurrent.futures.TimeoutError:
+                ctx.mark_timed_out()
+                self.logger.error(f"⏱️ Overall domain SQL timeout ({total_domain_timeout}s). Proceeding with completed domains.")
         
         del schema_by_table
         del grouped_by_domain
@@ -22981,59 +26252,130 @@ Start your response with the CSV header line: use_case_id,domain
         
         ordered_results = []
         for uc_id in original_uc_order:
-            ordered_results.append(disk_results_map.get(uc_id, original_uc_map.get(uc_id, {'No': uc_id})))
+            if uc_id in disk_results_map:
+                ordered_results.append(disk_results_map[uc_id])
+            else:
+                self.logger.warning(f"⚠️ Use case {uc_id} not found in domain results after SQL generation")
         
         del disk_results_map
-        del original_uc_order
-        del original_uc_map
         
         return ordered_results
 
+    def _build_dedup_markdown(self, use_cases: list) -> str:
+        """
+        Build a markdown table for deduplication containing Name, Statement, Tables,
+        and optional scores if available. Shared by global and per-domain dedup (DRY).
+        """
+        pipe_esc = r'\|'
+        has_scores = any(uc.get('Return on Investment') for uc in use_cases)
+        
+        if has_scores:
+            header = "| ID | Name | Statement | Tables | ROI | Strat. Align |\n|---|---|---|---|---|---|\n"
+        else:
+            header = "| ID | Name | Statement | Tables |\n|---|---|---|---|\n"
+        
+        md_parts = [header]
+        for uc in use_cases:
+            name = str(uc.get('Name', '')).replace('|', pipe_esc)
+            statement = str(uc.get('Statement', '')).replace('|', pipe_esc)
+            tables = str(uc.get('Tables Involved', '')).replace('|', pipe_esc)
+            
+            if has_scores:
+                roi = str(uc.get('Return on Investment', 'N/A'))
+                strat_align = str(uc.get('Strategic Alignment', 'N/A'))
+                md_parts.append(f"| {uc['No']} | {name} | {statement} | {tables} | {roi} | {strat_align} |\n")
+            else:
+                md_parts.append(f"| {uc['No']} | {name} | {statement} | {tables} |\n")
+        
+        return "".join(md_parts)
+
+    def _parse_dedup_response(self, response_raw: str, all_use_cases: list, context_label: str) -> list:
+        """
+        Parse LLM dedup response CSV and return filtered use cases.
+        Shared by global and per-domain dedup (DRY).
+        Returns the filtered list, or raises on failure.
+        """
+        response_clean = clean_json_response(response_raw)
+        
+        csv_rows = CSVParser.parse_csv_string(
+            response_clean,
+            logger=self.logger,
+            context=context_label
+        )
+        ids_to_keep = set()
+        
+        for row in csv_rows:
+            uc_id = row.get('use_case_id', '').strip()
+            if uc_id:
+                ids_to_keep.add(uc_id)
+        
+        if not ids_to_keep:
+            raise ValueError(f"[{context_label}] CSV contains no use case IDs")
+        
+        removed_count = len(all_use_cases) - len(ids_to_keep)
+        removal_pct = (removed_count / len(all_use_cases)) * 100 if all_use_cases else 0
+        
+        self.logger.info(f"[{context_label}] Retained {len(ids_to_keep)} use cases, removed {removed_count} ({removal_pct:.1f}%)")
+        
+        if removed_count > 0:
+            from collections import defaultdict
+            domain_removal_counts = defaultdict(int)
+            for uc in all_use_cases:
+                if uc['No'] not in ids_to_keep:
+                    domain_removal_counts[uc.get('Business Domain', 'Unknown')] += 1
+            
+            for domain in sorted(domain_removal_counts.keys()):
+                self.logger.info(f"  - {domain}: {domain_removal_counts[domain]} use case(s) removed")
+        
+        return [uc for uc in all_use_cases if uc['No'] in ids_to_keep]
+
     def _deduplicate_use_cases(self, all_use_cases: list) -> list:
         """
-        Calls an LLM to perform AGGRESSIVE global deduplication on ALL use cases.
+        Global deduplication: attempts to deduplicate ALL use cases in one LLM call
+        using the thinker model (highest-capability model) for best cross-domain
+        duplicate detection.
         
-        🚨 ENHANCED: Now includes Business Value assessment to filter out low-value use cases.
+        Sends full Name, Statement, and Tables for each use case so the LLM can
+        assess table-based viability when choosing which duplicate to keep.
         
-        Deduplication criteria:
-        1. Semantic similarity of Names
-        2. Duplicate or trivial use cases
-        3. Low business value relative to industry/business context
-        4. Use cases with insufficient distinctiveness
+        Falls back to per-domain parallel deduplication on:
+        - Context window overflow (too many use cases for one prompt)
+        - Any LLM or parsing failure
         """
-        self.logger.info(f"Starting AGGRESSIVE global deduplication for {len(all_use_cases)} use cases...")
-        self.logger.info(f"Deduplication will analyze: Name similarity + Business Value + Distinctiveness")
+        self.logger.info(f"🌐 Attempting GLOBAL one-shot deduplication for {len(all_use_cases)} use cases (thinker model)...")
         
         if len(all_use_cases) < 2:
             self.logger.debug("Skipping deduplication, not enough use cases to compare.")
             return all_use_cases
         
         try:
-            # Create markdown table with ID, Name, and Business Value
-            md_parts = ["| ID | Name | Business Value | Tables |\n|---|---|---|---|\n"]
-            for uc in all_use_cases:
-                name = str(uc.get('Name', '')).replace('|', r'\|')
-                business_value = str(uc.get('Business Value', ''))[:100].replace('|', r'\|')
-                tables = str(uc.get('Tables Involved', ''))[:50].replace('|', r'\|')
-                md_parts.append(f"| {uc['No']} | {name} | {business_value} | {tables} |\n")
-            use_case_markdown = "".join(md_parts)
-            
-            self.logger.debug(f"Created deduplication markdown table with {len(all_use_cases)} use cases")
+            use_case_markdown = self._build_dedup_markdown(all_use_cases)
+            self.logger.debug(f"Built global dedup markdown table: {len(use_case_markdown):,} chars, {len(all_use_cases)} use cases")
         except Exception as e:
-            self.logger.error(f"Failed to create markdown for deduplication: {e}")
-            return all_use_cases
+            self.logger.error(f"Failed to create markdown for global dedup: {get_clean_error_message(e)}")
+            self.logger.info("⬇️  Falling back to per-domain parallel deduplication...")
+            return self._deduplicate_use_cases_by_domain_parallel(all_use_cases)
         
         try:
-            # Check if the use_case_markdown might exceed context limits (using model-specific limits)
-            review_context_limit = get_max_context_chars("English", "REVIEW_USE_CASES_PROMPT")
-            markdown_size = len(use_case_markdown)
-            prompt_template = self.ai_agent.prompt_templates.get("REVIEW_USE_CASES_PROMPT", "")
-            estimated_prompt_size = len(prompt_template) + markdown_size + 1000  # +1000 for other vars
+            thinker_cascade = get_models_by_type("thinker")
+            if not thinker_cascade:
+                self.logger.warning("No thinker models configured. Falling back to per-domain dedup...")
+                return self._deduplicate_use_cases_by_domain_parallel(all_use_cases)
             
-            if estimated_prompt_size > review_context_limit:
+            thinker_model = thinker_cascade[0]
+            thinker_endpoint = thinker_model["llm_endpoint_name"]
+            thinker_context_limit = get_context_limit_chars_for_model(
+                thinker_model, getattr(self, 'current_language', 'English')
+            )
+            
+            prompt_template = self.ai_agent.prompt_templates.get("REVIEW_USE_CASES_PROMPT", "")
+            estimated_prompt_size = len(prompt_template) + len(use_case_markdown) + 1000
+            
+            if estimated_prompt_size > thinker_context_limit:
                 self.logger.warning(
-                    f"Deduplication prompt size ({estimated_prompt_size:,} chars) exceeds model limit ({review_context_limit:,}). "
-                    f"Falling back to domain-level parallel deduplication..."
+                    f"Global dedup prompt ({estimated_prompt_size:,} chars) exceeds thinker model limit "
+                    f"({thinker_context_limit:,} chars for {thinker_model.get('name', thinker_endpoint)}). "
+                    f"Falling back to per-domain parallel deduplication..."
                 )
                 return self._deduplicate_use_cases_by_domain_parallel(all_use_cases)
             
@@ -23042,79 +26384,35 @@ Start your response with the CSV header line: use_case_id,domain
                 "total_count": len(all_use_cases)
             }
             
-            self.logger.info(f"⏳ Waiting for LLM response (deduplicating {len(all_use_cases)} use cases)...")
-            
-            response_raw = self.ai_agent.run_worker(
-                step_name="Deduplicate_Use_Cases",
-                worker_prompt_path="REVIEW_USE_CASES_PROMPT",
-                prompt_vars=prompt_vars,
-                response_schema=None
+            self.logger.info(
+                f"⏳ Sending {len(all_use_cases)} use cases to thinker model "
+                f"({thinker_model.get('name', thinker_endpoint)}, {estimated_prompt_size:,} chars)..."
             )
             
-            self.logger.info(f"✅ Received LLM response, parsing deduplication results...")
+            response_raw = self.ai_agent.run_worker(
+                step_name="Deduplicate_Global",
+                worker_prompt_path="REVIEW_USE_CASES_PROMPT",
+                prompt_vars=prompt_vars,
+                response_schema=None,
+                model_override=thinker_endpoint
+            )
             
-            # Clean response (remove markdown fences if present)
-            response_clean = clean_json_response(response_raw)
+            self.logger.info(f"✅ Received global dedup response, parsing results...")
             
-            # Parse CSV
-            try:
-                # Parse CSV using centralized utility
-                csv_rows = CSVParser.parse_csv_string(
-                    response_clean,
-                    logger=self.logger,
-                    context="Deduplication"
-                )
-                ids_to_keep = []
-                
-                for row in csv_rows:
-                    # Handle column name
-                    uc_id = row.get('use_case_id', '').strip()
-                    if uc_id:
-                        ids_to_keep.append(uc_id)
-                
-                if not ids_to_keep:
-                    raise ValueError("CSV contains no use case IDs")
-                
-                ids_to_keep_set = set(ids_to_keep)
-                    
-            except Exception as csv_err:
-                self.logger.error(f"CSV parsing failed: {csv_err}. Raw response (first 500 chars): {response_raw[:500]}")
-                raise
-            
-            # 🚨 NEW: AGGRESSIVE COVERAGE - Ensure at least 1 use case per business table
-            # Log which use cases were removed
-            removed_count = len(all_use_cases) - len(ids_to_keep_set)
-            removal_pct = (removed_count / len(all_use_cases)) * 100 if all_use_cases else 0
-            
-            self.logger.info(f"Deduplication complete: Retained {len(ids_to_keep_set)} use cases, removed {removed_count} ({removal_pct:.1f}%)")
-            
-            # Log count of removed use cases per domain
-            if removed_count > 0:
-                removed_use_cases = [uc for uc in all_use_cases if uc['No'] not in ids_to_keep_set]
-                
-                # Group removed use cases by domain
-                from collections import defaultdict
-                domain_removal_counts = defaultdict(int)
-                for uc in removed_use_cases:
-                    domain = uc.get('Business Domain', 'Unknown')
-                    domain_removal_counts[domain] += 1
-                
-                # Log counts per domain
-                self.logger.info(f"Removed use cases by domain:")
-                for domain in sorted(domain_removal_counts.keys()):
-                    count = domain_removal_counts[domain]
-                    self.logger.info(f"  - {domain}: {count} use case(s) removed")
-            
-            unique_use_cases = [uc for uc in all_use_cases if uc['No'] in ids_to_keep_set]
+            unique_use_cases = self._parse_dedup_response(response_raw, all_use_cases, "Global Deduplication")
             return unique_use_cases
             
         except Exception as e:
-            self.logger.error(f"Global use case deduplication failed: {e}. Proceeding with the full list of use cases.")
-            return all_use_cases
+            self.logger.error(
+                f"🌐 Global one-shot deduplication failed: {get_clean_error_message(e)}. "
+                f"Falling back to per-domain parallel deduplication..."
+            )
+            return self._deduplicate_use_cases_by_domain_parallel(all_use_cases)
 
     def _deduplicate_use_cases_by_domain_parallel(self, all_use_cases: list) -> list:
         """
-        Deduplicate use cases at domain level in parallel using scores for intelligent selection.
+        Deduplicate use cases at domain level in parallel.
+        Uses the same REVIEW_USE_CASES_PROMPT and shared markdown builder as global dedup (DRY).
         
         Args:
             all_use_cases: List of all use case dictionaries (should be scored first)
@@ -23123,13 +26421,11 @@ Start your response with the CSV header line: use_case_id,domain
             List of deduplicated use cases
         """
         from collections import defaultdict
-        from concurrent.futures import ThreadPoolExecutor, as_completed
         import concurrent.futures
         import time
         
-        self.logger.info(f"🔄 Starting intelligent domain-level deduplication for {len(all_use_cases)} scored use cases...")
+        self.logger.info(f"🔄 Starting domain-level parallel deduplication for {len(all_use_cases)} use cases...")
         
-        # Group use cases by domain
         domain_use_cases = defaultdict(list)
         for uc in all_use_cases:
             domain = uc.get('Business Domain', 'Unknown')
@@ -23137,54 +26433,28 @@ Start your response with the CSV header line: use_case_id,domain
         
         self.logger.info(f"📊 Grouped use cases into {len(domain_use_cases)} domains")
         
-        # Deduplicate each domain in parallel
         deduplicated_results = []
         
         def dedupe_domain(domain_name, domain_ucs):
-            """Deduplicate a single domain's use cases."""
+            """Deduplicate a single domain's use cases using the shared prompt."""
+            if len(domain_ucs) < 2:
+                self.logger.debug(f"[{domain_name}] Only {len(domain_ucs)} use case(s), skipping dedup.")
+                return domain_ucs
             try:
                 self.logger.info(f"[{domain_name}] Deduplicating {len(domain_ucs)} use cases...")
                 
-                # Create markdown table for this domain including scores
-                md_parts = ["| ID | Name | Business Value | Tables | ROI | Strat. Align |\n|---|---|---|---|---|---|\n"]
-                for uc in domain_ucs:
-                    name = str(uc.get('Name', '')).replace('|', r'\|')
-                    business_value = str(uc.get('Business Value', ''))[:100].replace('|', r'\|')
-                    tables = str(uc.get('Tables Involved', ''))[:50].replace('|', r'\|')
-                    roi = str(uc.get('Return on Investment', 'N/A'))
-                    strat_align = str(uc.get('Strategic Alignment', 'N/A'))
-                    
-                    md_parts.append(f"| {uc['No']} | {name} | {business_value} | {tables} | {roi} | {strat_align} |\n")
-                use_case_markdown = "".join(md_parts)
+                use_case_markdown = self._build_dedup_markdown(domain_ucs)
                 
-                # Check size (using model-specific limits from TECHNICAL_CONTEXT)
                 review_context_limit = get_max_context_chars("English", "REVIEW_USE_CASES_PROMPT")
                 prompt_template = self.ai_agent.prompt_templates.get("REVIEW_USE_CASES_PROMPT", "")
                 estimated_size = len(prompt_template) + len(use_case_markdown) + 1000
                 
                 if estimated_size > review_context_limit:
-                    self.logger.warning(f"[{domain_name}] Domain still too large ({estimated_size:,} chars). Keeping all {len(domain_ucs)} use cases without deduplication.")
+                    self.logger.warning(f"[{domain_name}] Domain too large ({estimated_size:,} chars). Keeping all {len(domain_ucs)} use cases.")
                     return domain_ucs
                 
-                # Append explicit instructions about score-based selection to the markdown context
-                context_notes = """
-                **CRITICAL DEDUPLICATION RULES**:
-                1. If two use cases are DUPLICATES (same intent/logic):
-                   - Keep the one with higher 'ROI' and 'Strat. Align'.
-                   - If scores are similar, keep the one with better detail.
-                2. If two use cases use IDENTICAL tables and have similar logic -> Treat as DUPLICATE.
-                3. If two use cases are similar but use DIFFERENT tables -> KEEP BOTH.
-                   - In this case, mark them as distinct.
-                   - Ensure they have IDENTICAL scores if logic is same.
-                   - Add note to Justification: "Very Similar to [Other_ID]"
-                
-                **HIGH PRIORITY**:
-                - Pay special attention to complex, high-value use cases that involve "Root Cause Analysis", "Predictive", "Optimization", "Anomaly Detection", or "Forecasting".
-                - DO NOT REMOVE high-value use cases unless they are EXACT duplicates.
-                """
-                
                 prompt_vars = {
-                    "use_case_markdown": use_case_markdown + "\n" + context_notes,
+                    "use_case_markdown": use_case_markdown,
                     "total_count": len(domain_ucs)
                 }
                 
@@ -23197,42 +26467,11 @@ Start your response with the CSV header line: use_case_id,domain
                     response_schema=None
                 )
                 
-                # Parse response
-                response_clean = clean_json_response(response_raw)
-                
-                # Parse CSV using centralized utility
-                csv_rows = CSVParser.parse_csv_string(
-                    response_clean,
-                    logger=self.logger,
-                    context=f"Domain deduplication for {domain_name}"
-                )
-                ids_to_keep = set()
-                
-                for row in csv_rows:
-                    uc_id = row.get('use_case_id', '').strip()
-                    if uc_id:
-                        ids_to_keep.add(uc_id)
-                
-                if not ids_to_keep:
-                    self.logger.warning(f"[{domain_name}] No IDs returned. Keeping all use cases.")
-                    return domain_ucs
-                
-                deduplicated = [uc for uc in domain_ucs if uc['No'] in ids_to_keep]
-                
-                # Logic to handle the "Same Logic, Different Tables" case (sync scores & justification)
-                # This requires parsing the FULL response if the LLM provided metadata, 
-                # but currently REVIEW_USE_CASES_PROMPT typically returns just a list of IDs.
-                # Since we can't easily sync scores without the LLM telling us which pairs match,
-                # we rely on the LLM's selection in the ID list for now.
-                
-                removed = len(domain_ucs) - len(deduplicated)
-                
-                self.logger.info(f"✅ [{domain_name}] Retained {len(deduplicated)} use cases, removed {removed}")
-                
+                deduplicated = self._parse_dedup_response(response_raw, domain_ucs, f"Domain:{domain_name}")
                 return deduplicated
                 
             except Exception as e:
-                self.logger.error(f"[{domain_name}] Deduplication failed: {e}. Keeping all {len(domain_ucs)} use cases.")
+                self.logger.error(f"[{domain_name}] Deduplication failed: {get_clean_error_message(e)}. Keeping all {len(domain_ucs)} use cases.")
                 return domain_ucs
         
         # ADAPTIVE PARALLELISM: Calculate based on domains and total use cases
@@ -23256,10 +26495,10 @@ Start your response with the CSV header line: use_case_id,domain
         log_print(f"Overall timeout: {overall_timeout}s ({overall_timeout//60} min)")
         log_print(f"{'='*80}\n")
         
-        with ThreadPoolExecutor(max_workers=dedup_parallelism, thread_name_prefix="DomainDedupe") as executor:
+        with _SafeExecutorContext(max_workers=dedup_parallelism, thread_name_prefix="DomainDedupe", logger=self.logger, name="DomainDedupe") as ctx:
             future_to_domain = {}
             for domain, domain_ucs in domain_use_cases.items():
-                future = executor.submit(dedupe_domain, domain, domain_ucs)
+                future = ctx.submit(dedupe_domain, domain, domain_ucs)
                 future_to_domain[future] = domain
             
             completed_count = 0
@@ -23267,7 +26506,7 @@ Start your response with the CSV header line: use_case_id,domain
             start_time = time.time()
             
             try:
-                for future in as_completed(future_to_domain, timeout=overall_timeout):
+                for future in safe_as_completed(future_to_domain, timeout=overall_timeout):
                     domain = future_to_domain[future]
                     elapsed = time.time() - start_time
                     try:
@@ -23281,10 +26520,11 @@ Start your response with the CSV header line: use_case_id,domain
                         deduplicated_results.extend(domain_use_cases.get(domain, []))
                         completed_domains.add(domain)
                     except Exception as e:
-                        self.logger.error(f"[{domain}] Failed to collect results: {e} - keeping original use cases")
+                        self.logger.error(f"[{domain}] Failed to collect results: {get_clean_error_message(e)} - keeping original use cases")
                         deduplicated_results.extend(domain_use_cases.get(domain, []))
                         completed_domains.add(domain)
             except concurrent.futures.TimeoutError:
+                ctx.mark_timed_out()
                 self.logger.error(f"⚠️  Overall deduplication timeout reached ({overall_timeout}s). {completed_count}/{len(domain_use_cases)} domains completed.")
                 log_print(f"[Deduplication] ⚠️  TIMEOUT - keeping original use cases for incomplete domains", level="WARNING")
                 for domain, domain_ucs in domain_use_cases.items():
@@ -23415,7 +26655,7 @@ Start your response with the CSV header line: use_case_id,domain
             self.logger.info(f"✅ GLOBAL scoring succeeded for {len(scored_use_cases)} use cases")
             return scored_use_cases
         except Exception as e:
-            self.logger.error(f"Global scoring failed, will fall back to domain-based scoring: {e}")
+            self.logger.error(f"Global scoring failed, will fall back to domain-based scoring: {get_clean_error_message(e)}")
             return None
 
     def _score_per_domain_parallel(self, all_use_cases: list, business_context: str = "",
@@ -23433,7 +26673,7 @@ Start your response with the CSV header line: use_case_id,domain
         """
         import time
         from collections import defaultdict
-        from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
+        from concurrent.futures import TimeoutError as FuturesTimeoutError
         
         # Group use cases by domain first to calculate adaptive parallelism
         domain_groups = defaultdict(list)
@@ -23493,7 +26733,7 @@ Start your response with the CSV header line: use_case_id,domain
                 return (domain_name, scored)
                 
             except Exception as e:
-                self.logger.error(f"❌ [{domain_name}] Scoring failed: {e}")
+                self.logger.error(f"❌ [{domain_name}] Scoring failed: {get_clean_error_message(e)}")
                 # Return with default scores - fix bug where 'Pending' priority was kept
                 for uc in domain_use_cases:
                     if uc.get('Quality') in (None, '', 'Pending'):
@@ -23506,10 +26746,10 @@ Start your response with the CSV header line: use_case_id,domain
         # Score all domains in parallel with reduced parallelism
         all_scored_use_cases = []
         
-        with ThreadPoolExecutor(max_workers=scoring_parallelism, thread_name_prefix="DomainScoring") as executor:
+        with _SafeExecutorContext(max_workers=scoring_parallelism, thread_name_prefix="DomainScoring", logger=self.logger, name="DomainScoring") as ctx:
             future_to_domain = {}
             for domain, domain_use_cases in domain_groups.items():
-                future = executor.submit(score_domain, domain, domain_use_cases)
+                future = ctx.submit(score_domain, domain, domain_use_cases)
                 future_to_domain[future] = domain
             
             completed_domains = 0
@@ -23518,13 +26758,11 @@ Start your response with the CSV header line: use_case_id,domain
             start_time = time.time()
             last_heartbeat = start_time
             
-            # SOLUTION 1: Add total timeout to as_completed to prevent infinite hangs
             try:
-                for future in as_completed(future_to_domain, timeout=TOTAL_SCORING_TIMEOUT):
+                for future in safe_as_completed(future_to_domain, timeout=TOTAL_SCORING_TIMEOUT):
                     domain = future_to_domain[future]
                     current_time = time.time()
                     
-                    # SOLUTION 1: Heartbeat logging to show progress
                     if current_time - last_heartbeat >= HEARTBEAT_INTERVAL:
                         elapsed = current_time - start_time
                         pending = total_domains - completed_domains - failed_domains
@@ -23546,11 +26784,11 @@ Start your response with the CSV header line: use_case_id,domain
                         log_print(f"✗ Timeout domain {completed_domains + failed_domains}/{total_domains}: {domain}", level="ERROR")
                     except Exception as e:
                         failed_domains += 1
-                        self.logger.error(f"❌ [{domain}] Failed to collect scoring results: {e}")
+                        self.logger.error(f"❌ [{domain}] Failed to collect scoring results: {get_clean_error_message(e)}")
                         log_print(f"✗ Failed domain {completed_domains + failed_domains}/{total_domains}: {domain}", level="ERROR")
                         
             except FuturesTimeoutError:
-                # SOLUTION 1: Handle total timeout - proceed with what we have
+                ctx.mark_timed_out()
                 elapsed = time.time() - start_time
                 pending = total_domains - completed_domains - failed_domains
                 self.logger.error(f"⚠️ TOTAL SCORING TIMEOUT reached after {elapsed:.0f}s. {completed_domains}/{total_domains} domains completed, {pending} still pending.")
@@ -23617,6 +26855,105 @@ Start your response with the CSV header line: use_case_id,domain
         self.logger.info(f"Applied priority normalization scale factor {scale:.2f} with target max {target_max:.2f}")
         return use_cases
     
+    def _score_use_cases_batched(self, use_cases_to_score, prompt_vars, domain_name, context_limit, start_from_model=None):
+        """
+        Score use cases in batches that fit within the given context limit.
+        Handles CascadeRebatchError by preserving partial progress and re-batching
+        remaining use cases for the smaller model.
+        
+        Returns (all_scoring_rows, last_model_used) where last_model_used can be
+        passed as start_from_model for subsequent retry calls.
+        """
+        MAX_CASCADE_RETRIES = 3
+        remaining = list(use_cases_to_score)
+        all_rows = []
+        effective_limit = context_limit
+        effective_model = start_from_model
+
+        for cascade_attempt in range(MAX_CASCADE_RETRIES):
+            if not remaining:
+                break
+
+            prompt_template_text = self.ai_agent.prompt_templates.get("USE_CASE_VALUE_SCORE_PROMPT", "")
+            prompt_overhead = len(prompt_template_text) + 2000
+            available_chars = effective_limit - prompt_overhead
+
+            total_md_len = len("| No | Name | Business Value |\n|---|---|---|\n")
+            for uc in remaining:
+                total_md_len += len(f"| {uc.get('No','')} | {uc.get('Name','')} | {uc.get('Business Value','')} |\n")
+            chars_per_uc = max(100, total_md_len // max(1, len(remaining)))
+            batch_size = max(10, int(available_chars / chars_per_uc * 0.7))
+
+            total_batches = (len(remaining) + batch_size - 1) // batch_size
+            self.logger.info(
+                f"📦 [{domain_name}] Scoring {len(remaining)} use cases in ~{total_batches} batches of ~{batch_size} "
+                f"(limit: {effective_limit:,} chars, model: {effective_model or 'default cascade'}, "
+                f"already scored: {len(all_rows)})"
+            )
+
+            cascade_triggered = False
+            cascade_error = None
+
+            for sb_idx in range(0, len(remaining), batch_size):
+                sb_use_cases = remaining[sb_idx:sb_idx + batch_size]
+                sb_num = (sb_idx // batch_size) + 1
+
+                sb_md_parts = ["| No | Name | Business Value |\n|---|---|---|\n"]
+                for uc in sb_use_cases:
+                    no = str(uc.get('No', '')).replace('|', r'\|')
+                    name = str(uc.get('Name', '')).replace('|', r'\|')
+                    bv = str(uc.get('Business Value', '')).replace('|', r'\|')
+                    sb_md_parts.append(f"| {no} | {name} | {bv} |\n")
+
+                sb_prompt_vars = dict(prompt_vars)
+                sb_prompt_vars["use_case_markdown"] = "".join(sb_md_parts)
+
+                try:
+                    sb_response = self.ai_agent.run_worker(
+                        step_name=f"Score_Use_Cases_{domain_name}_Batch{sb_num}of{total_batches}",
+                        worker_prompt_path="USE_CASE_VALUE_SCORE_PROMPT",
+                        prompt_vars=sb_prompt_vars,
+                        response_schema=None,
+                        start_from_model=effective_model
+                    )
+                    if sb_response and sb_response.strip():
+                        sb_clean = clean_json_response(sb_response)
+                        sb_rows = CSVParser.parse_csv_string(
+                            sb_clean,
+                            logger=self.logger,
+                            context=f"Scoring batch {sb_num}/{total_batches} for {domain_name}"
+                        )
+                        all_rows.extend(sb_rows)
+                        self.logger.info(
+                            f"✅ [{domain_name}] Scoring batch {sb_num}/{total_batches} "
+                            f"({len(sb_rows)} scores, {len(all_rows)} total)"
+                        )
+                except CascadeRebatchError as cre:
+                    self.logger.warning(
+                        f"🔄 [{domain_name}] Scoring batch {sb_num} triggered cascade rebatch → "
+                        f"'{cre.target_model_name}' ({cre.target_context_limit_chars:,} chars). "
+                        f"Preserving {len(all_rows)} scored, rebatching remaining."
+                    )
+                    cascade_triggered = True
+                    cascade_error = cre
+                    break
+                except Exception as sb_err:
+                    self.logger.error(f"❌ [{domain_name}] Scoring batch {sb_num}/{total_batches} failed: {sb_err}")
+
+            if cascade_triggered and cascade_error:
+                scored_nos = {row.get('No', '') for row in all_rows}
+                remaining = [uc for uc in remaining if str(uc.get('No', '')) not in scored_nos]
+                effective_limit = cascade_error.target_context_limit_chars
+                effective_model = cascade_error.target_model_endpoint
+                if not remaining:
+                    self.logger.info(f"📦 [{domain_name}] All use cases scored despite cascade trigger")
+                    break
+                continue
+
+            break
+
+        return all_rows, effective_model
+
     def _score_use_cases(self, all_use_cases: list, business_context: str = "", strategic_goals: list = None,
                          business_priorities: list = None, strategic_initiative: str = "",
                          value_chain: str = "", revenue_model: str = "") -> list:
@@ -23692,30 +27029,81 @@ Start your response with the CSV header line: use_case_id,domain
             }
             
             self.logger.info(f"⏳ [{domain_name}] Waiting for LLM response (scoring {len(all_use_cases)} use cases)...")
-            response_raw = self.ai_agent.run_worker(
-                step_name=f"Score_Use_Cases_{domain_name}",
-                worker_prompt_path="USE_CASE_VALUE_SCORE_PROMPT",
-                prompt_vars=prompt_vars,
-                response_schema=None
-            )
-            self.logger.info(f"✅ [{domain_name}] Received LLM response, processing results...")
             
-            # Parse CSV response using centralized utility
-            response_clean = clean_json_response(response_raw)
-            scoring_data = CSVParser.parse_csv_string(
-                response_clean,
-                logger=self.logger,
-                context=f"Scoring for domain {domain_name}"
-            )
+            scoring_start_from_model = None
+            scoring_data = None
             
+            scoring_cascade = get_model_cascade_for_prompt("USE_CASE_VALUE_SCORE_PROMPT")
+            prompt_template_text = self.ai_agent.prompt_templates.get("USE_CASE_VALUE_SCORE_PROMPT", "")
+            estimated_prompt_size = len(prompt_template_text) + len(use_case_markdown) + 2000
+            primary_model_limit = get_context_limit_chars_for_model(
+                scoring_cascade[0], getattr(self, 'current_language', 'English')
+            ) if scoring_cascade else 500000
+
+            if estimated_prompt_size > primary_model_limit:
+                best_model = max(scoring_cascade, key=lambda m: m.get("llm_input_context_tokens_count", 0)) if scoring_cascade else None
+                best_limit = get_context_limit_chars_for_model(
+                    best_model, getattr(self, 'current_language', 'English')
+                ) if best_model else primary_model_limit
+
+                if estimated_prompt_size > best_limit:
+                    self.logger.warning(
+                        f"📦 [{domain_name}] Scoring prompt ({estimated_prompt_size:,} chars) exceeds ALL models' "
+                        f"limits (best: {best_limit:,} chars). Proactively batching {len(all_use_cases)} use cases."
+                    )
+                    batch_rows, scoring_start_from_model = self._score_use_cases_batched(
+                        all_use_cases, prompt_vars, domain_name, best_limit
+                    )
+                    if batch_rows:
+                        scoring_data = batch_rows
+                        response_raw = None
+                else:
+                    self.logger.info(
+                        f"📊 [{domain_name}] Scoring prompt ({estimated_prompt_size:,} chars) exceeds primary model "
+                        f"({primary_model_limit:,} chars) but fits in cascade ({best_limit:,} chars). Using normal cascade."
+                    )
+
+            if scoring_data is None:
+                try:
+                    response_raw = self.ai_agent.run_worker(
+                        step_name=f"Score_Use_Cases_{domain_name}",
+                        worker_prompt_path="USE_CASE_VALUE_SCORE_PROMPT",
+                        prompt_vars=prompt_vars,
+                        response_schema=None
+                    )
+                except CascadeRebatchError as cre:
+                    self.logger.warning(
+                        f"🔄 [{domain_name}] Scoring cascade rebatch needed after '{cre.failed_model_name}' failed. "
+                        f"Splitting {len(all_use_cases)} use cases into smaller scoring batches for "
+                        f"model '{cre.target_model_name}' (limit: {cre.target_context_limit_chars:,} chars)"
+                    )
+                    batch_rows, scoring_start_from_model = self._score_use_cases_batched(
+                        all_use_cases, prompt_vars, domain_name,
+                        cre.target_context_limit_chars, cre.target_model_endpoint
+                    )
+                    if batch_rows:
+                        scoring_data = batch_rows
+                        response_raw = None
+                    else:
+                        raise Exception(f"All scoring batches failed for domain '{domain_name}' after cascade rebatch")
+
+            if scoring_data is None:
+                self.logger.info(f"✅ [{domain_name}] Received LLM response, processing results...")
+                response_clean = clean_json_response(response_raw)
+                scoring_data = CSVParser.parse_csv_string(
+                    response_clean,
+                    logger=self.logger,
+                    context=f"Scoring for domain {domain_name}"
+                )
+
             scoring_map = {item['No']: item for item in scoring_data}
             
             self.logger.info(f"Received scoring for {len(scoring_map)} use cases from LLM for domain '{domain_name}'")
             
-            # Check for missing scores and retry with progressive batch splitting
             missing_ids = [uc['No'] for uc in all_use_cases if uc['No'] not in scoring_map]
-            MAX_RETRY_ROUNDS = 3  # Maximum number of retry rounds
-            BATCH_SIZE_FOR_RETRY = 15  # Split into smaller batches for reliability
+            _rt = TECHNICAL_CONTEXT["runtime"]
+            MAX_RETRY_ROUNDS = _rt["value_scoring_max_retry_rounds"]
+            BATCH_SIZE_FOR_RETRY = _rt["value_scoring_retry_batch_size"]
             
             retry_round = 0
             while missing_ids and retry_round < MAX_RETRY_ROUNDS:
@@ -23730,8 +27118,10 @@ Start your response with the CSV header line: use_case_id,domain
                     self.logger.warning(f"⚠️ [{domain_name}] Round {retry_round}: Retrying {len(missing_ids)} missing use cases...")
                     batches = [missing_ucs]
                 
-                for batch_idx, batch_ucs in enumerate(batches):
-                    # Create a smaller prompt for this batch
+                _scoring_lock = threading.Lock()
+                num_retry_batches = len(batches)
+                
+                def _score_retry_batch(batch_idx, batch_ucs):
                     retry_md_parts = ["| No | Name | Business Value |\n|---|---|---|\n"]
                     for uc in batch_ucs:
                         no = str(uc.get('No', '')).replace('|', r'\|')
@@ -23751,13 +27141,14 @@ Start your response with the CSV header line: use_case_id,domain
                     }
                     
                     try:
-                        batch_label = f"Batch {batch_idx+1}/{len(batches)}" if len(batches) > 1 else ""
+                        batch_label = f"Batch {batch_idx+1}/{num_retry_batches}" if num_retry_batches > 1 else ""
                         self.logger.info(f"⏳ [{domain_name}] Round {retry_round} {batch_label}: Scoring {len(batch_ucs)} use cases...")
                         retry_response_raw = self.ai_agent.run_worker(
                             step_name=f"Score_Use_Cases_{domain_name}_Retry{retry_round}_B{batch_idx+1}",
                             worker_prompt_path="USE_CASE_VALUE_SCORE_PROMPT",
                             prompt_vars=retry_prompt_vars,
-                            response_schema=None
+                            response_schema=None,
+                            start_from_model=scoring_start_from_model
                         )
                         retry_response_clean = clean_json_response(retry_response_raw)
                         retry_scoring_data = CSVParser.parse_csv_string(
@@ -23766,17 +27157,35 @@ Start your response with the CSV header line: use_case_id,domain
                             context=f"Retry scoring for domain {domain_name} round {retry_round} batch {batch_idx+1}"
                         )
                         
-                        # Merge retry results into main scoring map
                         new_scores = 0
-                        for item in retry_scoring_data:
-                            if item.get('No') and item['No'] not in scoring_map:
-                                scoring_map[item['No']] = item
-                                new_scores += 1
+                        with _scoring_lock:
+                            for item in retry_scoring_data:
+                                if item.get('No') and item['No'] not in scoring_map:
+                                    scoring_map[item['No']] = item
+                                    new_scores += 1
                         
                         if new_scores > 0:
                             self.logger.info(f"✅ [{domain_name}] Round {retry_round} {batch_label}: Got {new_scores} new scores (total: {len(scoring_map)})")
                     except Exception as retry_err:
+                        batch_label = f"Batch {batch_idx+1}/{num_retry_batches}" if num_retry_batches > 1 else ""
                         self.logger.warning(f"[{domain_name}] Round {retry_round} {batch_label} failed: {str(retry_err)[:100]}")
+                
+                retry_workers = min(4, num_retry_batches)
+                if num_retry_batches <= 1:
+                    _score_retry_batch(0, batches[0])
+                else:
+                    _sr_total_timeout = self.llm_timeout_seconds * 2 * len(batches) + 120
+                    with _SafeExecutorContext(max_workers=retry_workers, thread_name_prefix="score_retry", logger=self.logger, name="ScoreRetry") as ctx:
+                        sr_futures = [ctx.submit(_score_retry_batch, i, b) for i, b in enumerate(batches)]
+                        try:
+                            for f in safe_as_completed(sr_futures, timeout=_sr_total_timeout):
+                                try:
+                                    f.result(timeout=self.llm_timeout_seconds * 2)
+                                except Exception as exc:
+                                    self.logger.warning(f"[{domain_name}] Retry scoring task failed: {get_clean_error_message(exc)}")
+                        except concurrent.futures.TimeoutError:
+                            ctx.mark_timed_out()
+                            self.logger.warning(f"[{domain_name}] Score retry timed out globally ({_sr_total_timeout}s)")
                 
                 # Update missing_ids for next round
                 missing_ids = [uc['No'] for uc in all_use_cases if uc['No'] not in scoring_map]
@@ -23904,7 +27313,7 @@ Start your response with the CSV header line: use_case_id,domain
             return scored_use_cases
             
         except Exception as e:
-            self.logger.error(f"Use case scoring failed: {e}. Proceeding without LLM scoring.")
+            self.logger.error(f"Use case scoring failed: {get_clean_error_message(e)}. Proceeding without LLM scoring.")
             for uc in all_use_cases:
                 uc['Strategic Alignment'] = 3.5
                 uc['Return on Investment'] = 3.5
@@ -23943,9 +27352,7 @@ Start your response with the CSV header line: use_case_id,domain
             self.logger.debug(f"Successfully processed all data for {lang}.")
             return (lang, lang_abbr, lang_translations, lang_grouped_data, lang_summary_dict, transliterated_name)
         except Exception as e:
-            self.logger.error(f"Failed to process translation artifacts for {lang}: {e}")
-            import traceback
-            self.logger.error(f"Full traceback for {lang}: {traceback.format_exc()}")
+            self.logger.error(f"Failed to process translation artifacts for {lang}: {get_clean_error_message(e)}")
             return (lang, lang_abbr, None, None, None, None) # Return Nones to signal failure
 
     def _generate_documents_for_all_languages(self, final_consolidated_use_cases: list, english_grouped_data: dict = None, summary_dict: dict = None, languages: list = None, skip_excel_langs: list = None):
@@ -23981,7 +27388,7 @@ Start your response with the CSV header line: use_case_id,domain
                     import weasyprint
                     self.logger.info("✓ PDF package (weasyprint) installed successfully.")
                 except Exception as e:
-                    self.logger.error(f"✗ Failed to install PDF dependencies: {e}")
+                    self.logger.error(f"✗ Failed to install PDF dependencies: {get_clean_error_message(e)}")
                     dependencies_ok = False
         
         if "Presentation" in self.generate_choices:
@@ -23997,7 +27404,7 @@ Start your response with the CSV header line: use_case_id,domain
                     import pptx
                     self.logger.info("✓ PPTX package (python-pptx) installed successfully.")
                 except Exception as e:
-                    self.logger.error(f"✗ Failed to install PPTX dependencies: {e}")
+                    self.logger.error(f"✗ Failed to install PPTX dependencies: {get_clean_error_message(e)}")
                     dependencies_ok = False
         
         # Always check Excel dependencies as they're used for all artifact generation
@@ -24013,7 +27420,7 @@ Start your response with the CSV header line: use_case_id,domain
                 import pandas, openpyxl
                 self.logger.info("✓ Excel packages (pandas, openpyxl) installed successfully.")
             except Exception as e:
-                self.logger.error(f"✗ Failed to install Excel dependencies: {e}")
+                self.logger.error(f"✗ Failed to install Excel dependencies: {get_clean_error_message(e)}")
                 dependencies_ok = False
         
         if not dependencies_ok:
@@ -24042,18 +27449,19 @@ Start your response with the CSV header line: use_case_id,domain
         translation_parallelism, reason = calculate_adaptive_parallelism(
             "translation", self.max_parallelism,
             num_items=num_use_cases,
-            num_domains=num_languages,  # Each language is like a domain
-            is_llm_operation=True, logger=self.logger
+            num_domains=num_languages,
+            is_llm_operation=True, logger=self.logger,
+            estimated_mb_per_worker=15.0
         )
         log_adaptive_parallelism_decision("translation", translation_parallelism, self.max_parallelism, reason)
         
         translation_futures = []
         translation_results = {}
         
-        with ThreadPoolExecutor(max_workers=translation_parallelism, thread_name_prefix="Translator") as translation_executor:
+        _lang_timed_out = False
+        with _SafeExecutorContext(max_workers=translation_parallelism, thread_name_prefix="Translator", logger=self.logger, name="LangPack") as ctx:
             for lang in target_languages:
                 if lang == "English":
-                    # No translation needed for English
                     self.logger.info("Preparing English artifacts (no translation needed).")
                     (summary_dict_en, transliterated_name_en) = self._get_salesy_summary(english_grouped_data, self.business_name, "English", english_translations)
                     lang_abbr = self._get_lang_abbr("English")
@@ -24061,35 +27469,33 @@ Start your response with the CSV header line: use_case_id,domain
                     continue
 
                 self.logger.info(f"Submitting translation & summary pack job for {lang}...")
-                f = translation_executor.submit(
+                f = ctx.submit(
                     self._translate_and_prepare_language_pack,
                     lang, flat_english_use_cases, english_grouped_data, self.business_name
                 )
                 translation_futures.append((f, lang))
 
             self.logger.info(f"Waiting for {len(translation_futures)} language packs to complete...")
-            # Add timeout: 30 minutes per language pack
             total_timeout = len(translation_futures) * 1800
             self.logger.info(f"Language pack processing timeout set to {total_timeout}s ({total_timeout//60} minutes)")
             
-            try:
-                for future, lang in translation_futures:
-                    try:
-                        result = future.result(timeout=1800)
-                        (lang, lang_abbr, lang_translations, lang_grouped_data, lang_summary_dict, transliterated_name) = result
-                        
-                        if lang_translations is None:
-                            self.logger.warning(f"Skipping artifact generation for {lang} due to translation/summary failure.")
-                            continue
+            for future, lang in translation_futures:
+                try:
+                    result = _safe_future_result(future, timeout=1800)
+                    (lang, lang_abbr, lang_translations, lang_grouped_data, lang_summary_dict, transliterated_name) = result
+                    
+                    if lang_translations is None:
+                        self.logger.warning(f"Skipping artifact generation for {lang} due to translation/summary failure.")
+                        continue
 
-                        self.logger.info(f"Translation pack for {lang} complete.")
-                        translation_results[lang] = result
-                    except concurrent.futures.TimeoutError:
-                        self.logger.error(f"Language pack processing timed out after 30 minutes for {lang}")
-                    except Exception as e:
-                        self.logger.error(f"Language pack processing failed for {lang}: {e}")
-            except concurrent.futures.TimeoutError:
-                self.logger.error(f"Overall language pack processing timeout reached ({total_timeout}s)")
+                    self.logger.info(f"Translation pack for {lang} complete.")
+                    translation_results[lang] = result
+                except (concurrent.futures.TimeoutError, TimeoutError):
+                    _lang_timed_out = True
+                    ctx.mark_timed_out()
+                    self.logger.error(f"Language pack processing timed out after 30 minutes for {lang}")
+                except Exception as e:
+                    self.logger.error(f"Language pack processing failed for {lang}: {get_clean_error_message(e)}")
         
         # STEP 2: Run artifact writing in parallel (separate, not nested)
         # ADAPTIVE PARALLELISM: Calculate based on number of artifacts to write
@@ -24103,7 +27509,7 @@ Start your response with the CSV header line: use_case_id,domain
         log_adaptive_parallelism_decision("artifact_writing", writing_parallelism, self.max_parallelism, reason)
         self.logger.info(f"Translations complete. Starting artifact generation for {len(translation_results)} languages...")
         
-        with ThreadPoolExecutor(max_workers=writing_parallelism, thread_name_prefix="Writer") as writer_executor:
+        with _SafeExecutorContext(max_workers=writing_parallelism, thread_name_prefix="Writer", logger=self.logger, name="ArtifactWriter") as writer_ctx:
             writing_futures = []
             
             for lang, result in translation_results.items():
@@ -24111,34 +27517,90 @@ Start your response with the CSV header line: use_case_id,domain
                 
                 self.logger.info(f"Submitting writing jobs for {lang}...")
                 
-                # ALWAYS generate .md and .csv files for English (fallback artifacts)
                 if lang == "English":
-                    f = writer_executor.submit(self._generate_markdown_catalog, lang, lang_abbr, lang_grouped_data, lang_summary_dict, transliterated_name)
-                    writing_futures.append((f, f"{lang} Markdown"))
-                    f = writer_executor.submit(self._generate_csv_catalog, lang, lang_abbr, lang_grouped_data)
-                    writing_futures.append((f, f"{lang} CSV"))
+                    f = writer_ctx.submit(self._generate_markdown_catalog, lang, lang_abbr, lang_grouped_data, lang_summary_dict, transliterated_name)
+                    step_id = self._emit_pipeline_status(
+                        stage_name="Excel Generation",
+                        step_name="Markdown Catalog",
+                        sub_step_name=lang,
+                        message=f"{lang} markdown generation started",
+                        status="started",
+                        progress_increment=1.0
+                    )
+                    writing_futures.append((f, f"{lang} Markdown", step_id, "Markdown Catalog", lang))
+                    f = writer_ctx.submit(self._generate_csv_catalog, lang, lang_abbr, lang_grouped_data)
+                    step_id = self._emit_pipeline_status(
+                        stage_name="Excel Generation",
+                        step_name="CSV Catalog",
+                        sub_step_name=lang,
+                        message=f"{lang} CSV generation started",
+                        status="started",
+                        progress_increment=1.0
+                    )
+                    writing_futures.append((f, f"{lang} CSV", step_id, "CSV Catalog", lang))
                 
                 if "PDF Catalog" in self.generate_choices or "Use Cases Catalog PDF" in self.generate_choices:
-                    f = writer_executor.submit(self.generate_catalog_pdf, lang, lang_abbr, lang_translations, lang_summary_dict, lang_grouped_data, transliterated_name)
-                    writing_futures.append((f, f"{lang} PDF"))
+                    f = writer_ctx.submit(self.generate_catalog_pdf, lang, lang_abbr, lang_translations, lang_summary_dict, lang_grouped_data, transliterated_name)
+                    step_id = self._emit_pipeline_status(
+                        stage_name="Document Generation",
+                        step_name="PDF Catalog",
+                        sub_step_name=lang,
+                        message=f"{lang} PDF generation started",
+                        status="started",
+                        progress_increment=1.0
+                    )
+                    writing_futures.append((f, f"{lang} PDF", step_id, "PDF Catalog", lang))
                 if "Presentation" in self.generate_choices:
-                    f = writer_executor.submit(self.generate_presentation_pptx, lang, lang_abbr, lang_translations, lang_summary_dict, lang_grouped_data, transliterated_name)
-                    writing_futures.append((f, f"{lang} PPTX"))
+                    f = writer_ctx.submit(self.generate_presentation_pptx, lang, lang_abbr, lang_translations, lang_summary_dict, lang_grouped_data, transliterated_name)
+                    step_id = self._emit_pipeline_status(
+                        stage_name="Document Generation",
+                        step_name="Presentation",
+                        sub_step_name=lang,
+                        message=f"{lang} presentation generation started",
+                        status="started",
+                        progress_increment=1.0
+                    )
+                    writing_futures.append((f, f"{lang} PPTX", step_id, "Presentation", lang))
                 if lang == "English" and lang not in skip_excel_langs:
-                    f = writer_executor.submit(self._generate_use_case_excel, lang, lang_abbr, lang_grouped_data)
-                    writing_futures.append((f, f"{lang} Excel"))
+                    f = writer_ctx.submit(self._generate_use_case_excel, lang, lang_abbr, lang_grouped_data)
+                    step_id = self._emit_pipeline_status(
+                        stage_name="Excel Generation",
+                        step_name="Use Case Excel",
+                        sub_step_name=lang,
+                        message=f"{lang} Excel generation started",
+                        status="started",
+                        progress_increment=1.0
+                    )
+                    writing_futures.append((f, f"{lang} Excel", step_id, "Use Case Excel", lang))
                 elif lang == "English":
                     self.logger.info(f"Skipping Excel generation for {lang} (already generated).")
                 else:
                     self.logger.info(f"Skipping Excel generation for {lang} (English only).")
             
-            # Wait for all writing jobs to complete
-            for future, job_name in writing_futures:
+            for future, job_name, step_id, step_name, lang in writing_futures:
                 try:
-                    future.result(timeout=600)
+                    _safe_future_result(future, timeout=600)
                     self.logger.info(f"✓ {job_name} completed")
+                    self._emit_pipeline_status(
+                        stage_name="Artifact Writing",
+                        step_name=step_name,
+                        sub_step_name=lang,
+                        message=f"{job_name} completed",
+                        status="ended_success",
+                        progress_increment=1.0,
+                        result_json={"job_name": job_name}
+                    )
                 except Exception as e:
-                    self.logger.error(f"✗ {job_name} failed: {e}")
+                    self.logger.error(f"✗ {job_name} failed: {get_clean_error_message(e)}")
+                    self._emit_pipeline_status(
+                        stage_name="Artifact Writing",
+                        step_name=step_name,
+                        sub_step_name=lang,
+                        message=f"{job_name} failed",
+                        status="ended_error",
+                        progress_increment=1.0,
+                        result_json={"job_name": job_name, "error": get_clean_error_message(e, max_chars=300)}
+                    )
         
         self.logger.info("All artifact writing jobs completed.")
 
@@ -24146,10 +27608,31 @@ Start your response with the CSV header line: use_case_id,domain
         self.logger.info(f"Starting tasks: {self.generate_choices}, Operation Mode: {self.operation_mode}")
         self.logger.info(f"🔑 Session ID: {self.session_id}")
         log_print(f"🔑 Inspire Session ID: {self.session_id}")
-        
         if self.inspire_database:
             self._ensure_inspire_database_exists()
             self._create_tracking_table()
+        if self.atomic_writer:
+            self.atomic_writer.logger = self.logger
+            self.atomic_writer.initialize_session()
+            self._emit_pipeline_status(
+                stage_name="Pipeline",
+                step_name="Execution",
+                sub_step_name="Start",
+                message="Inspire pipeline started",
+                status="started",
+                progress_increment=1.0,
+                result_json={"operation_mode": self.operation_mode, "session_id": self.session_id}
+            )
+        if self.inspire_database:
+            self._emit_pipeline_status(
+                stage_name="Initialization",
+                step_name="Database Setup",
+                sub_step_name=self.inspire_database,
+                message="Inspire database and tracking structures are ready",
+                status="ended_success",
+                progress_increment=1.0,
+                result_json={"database": self.inspire_database}
+            )
         
         if 'PROMPT_TEMPLATES' not in globals():
             self.logger.critical("CRITICAL ERROR: 'PROMPT_TEMPLATES' dictionary is not defined. Please run the cell defining it.")
@@ -24182,10 +27665,8 @@ Start your response with the CSV header line: use_case_id,domain
                 self._run_queries_fixing_mode()
                 return
             except Exception as e:
-                self.logger.critical(f"Failed to run Re-generate SQL mode: {e}")
-                log_print(f"❌ Error in Re-generate SQL mode: {e}", level="ERROR")
-                import traceback
-                traceback.print_exc()
+                self.logger.critical(f"Failed to run Re-generate SQL mode: {get_clean_error_message(e)}")
+                log_print(f"❌ Error in Re-generate SQL mode: {get_clean_error_message(e, max_chars=200)}", level="ERROR")
                 return
         
         if self.json_file_path:
@@ -24237,7 +27718,7 @@ Start your response with the CSV header line: use_case_id,domain
                     try:
                         self._run_generate_sample_result_mode()
                     except Exception as e:
-                        self.logger.error(f"Sample generation failed: {e}")
+                        self.logger.error(f"Sample generation failed: {get_clean_error_message(e)}")
                         log_print(f"⚠️ Sample generation encountered an issue: {str(e)[:100]}", level="WARNING")
                         log_print(f"ℹ️ Proceeding with remaining artifacts...")
                 
@@ -24254,8 +27735,8 @@ Start your response with the CSV header line: use_case_id,domain
                 return
                 
             except Exception as e:
-                self.logger.critical(f"Failed to process in docs-only mode: {e}")
-                log_print(f"❌ Error: Failed to process in docs-only mode: {e}")
+                self.logger.critical(f"Failed to process in docs-only mode: {get_clean_error_message(e)}")
+                log_print(f"❌ Error: Failed to process in docs-only mode: {get_clean_error_message(e, max_chars=200)}")
                 AIAgent.get_summary_report()
                 return
         
@@ -24265,6 +27746,14 @@ Start your response with the CSV header line: use_case_id,domain
         self.logger.info("=" * 80)
         self.logger.info("🚀 STEP 1: EXTRACTING BUSINESS CONTEXT, STRATEGIC GOALS, AND PRIORITIES")
         self.logger.info("=" * 80)
+        self._emit_pipeline_status(
+            stage_name="Business Context",
+            step_name="Context Extraction",
+            sub_step_name="LLM",
+            message="Business context extraction started",
+            status="started",
+            progress_increment=1.0
+        )
         
         # Prepare user context string early - now uses business_domains instead of use_cases_focus
         user_domains_str = ', '.join(self.user_business_domains) if self.user_business_domains else ''
@@ -24304,6 +27793,18 @@ Start your response with the CSV header line: use_case_id,domain
         
         self.logger.info("✅ Business context extracted and merged.")
         self.logger.info("=" * 80)
+        self._emit_pipeline_status(
+            stage_name="Business Context",
+            step_name="Context Extraction",
+            sub_step_name="LLM",
+            message="Business context extraction completed",
+            status="ended_success",
+            progress_increment=3.0,
+            result_json={
+                "business_domains_count": len(merged_business_context.get("user_business_domains", []) or []),
+                "strategic_goals_count": len(merged_business_context.get("strategic_goals", []) or [])
+            }
+        )
         
         # Store merged context for use in prompt generation
         self.merged_business_context = merged_business_context
@@ -24539,7 +28040,51 @@ Start your response with the CSV header line: use_case_id,domain
                     else:
                         master_details.append(detail)
                 
-                master_tables_count = len(master_tables_set)
+                _rt = TECHNICAL_CONTEXT["runtime"]
+                _table_election_threshold = _rt["table_election_threshold"]
+                _table_election_tx_min = _rt["table_election_transactional_tables_min"]
+                total_business_tables = len(business_tables)
+                tx_count = len(transactional_tables_set)
+                
+                elected_master_details = master_details
+                elected_transactional_details = transactional_details
+                
+                if self.table_election_mode == "Let Inspire Decides":
+                    if total_business_tables > _table_election_threshold:
+                        if tx_count >= _table_election_tx_min:
+                            elected_master_details = []
+                            log_print(f"🗳️ Table Election: {total_business_tables} tables > threshold ({_table_election_threshold}), "
+                                      f"using TRANSACTIONAL tables only ({tx_count} tables)")
+                            self.logger.info(f"Table Election [Let Inspire Decides]: total={total_business_tables} > threshold={_table_election_threshold}, "
+                                           f"tx={tx_count} >= min={_table_election_tx_min} → transactional only")
+                        else:
+                            log_print(f"🗳️ Table Election: {total_business_tables} tables > threshold ({_table_election_threshold}), "
+                                      f"but transactional tables ({tx_count}) < min ({_table_election_tx_min}), "
+                                      f"including MASTER tables as well")
+                            self.logger.info(f"Table Election [Let Inspire Decides]: total={total_business_tables} > threshold={_table_election_threshold}, "
+                                           f"tx={tx_count} < min={_table_election_tx_min} → transactional + master")
+                    else:
+                        log_print(f"🗳️ Table Election: {total_business_tables} tables <= threshold ({_table_election_threshold}), "
+                                  f"using ALL business tables (master + transactional)")
+                        self.logger.info(f"Table Election [Let Inspire Decides]: total={total_business_tables} <= threshold={_table_election_threshold} → all tables")
+                elif self.table_election_mode == "Transactional Only":
+                    elected_master_details = []
+                    if not elected_transactional_details:
+                        self.logger.warning("Table Election [Transactional Only]: No transactional tables found. Falling back to all business tables.")
+                        log_print("⚠️ Table Election: No transactional tables found. Falling back to all business tables.", level="WARNING")
+                        elected_master_details = master_details
+                    else:
+                        log_print(f"🗳️ Table Election: TRANSACTIONAL ONLY mode — using {tx_count} transactional tables, "
+                                  f"excluding {len(master_tables_set)} master tables")
+                        self.logger.info(f"Table Election [Transactional Only]: tx={tx_count}, excluded master={len(master_tables_set)}")
+                else:
+                    log_print(f"🗳️ Table Election: ALL TABLES mode — using all {total_business_tables} business tables")
+                    self.logger.info(f"Table Election [All Tables]: using all {total_business_tables} business tables")
+                
+                master_details = elected_master_details
+                transactional_details = elected_transactional_details
+                
+                master_tables_count = len({f"{c}.{s}.{t}" for (c, s, t, _, _, _) in master_details}) if master_details else 0
                 tables_per_call = self._determine_tables_per_call(master_tables_count)
                 
                 adjusted_batches = []
@@ -24569,16 +28114,20 @@ Start your response with the CSV header line: use_case_id,domain
                     augmented = self._augment_columns_with_related_tables(batch_columns)
                     augmented_batches.append((batch_num, augmented))
                 batches_to_process = augmented_batches
-                log_print(f"✅ Business tables: {len(business_tables)}")
+                elected_master_count = len({f"{c}.{s}.{t}" for (c, s, t, _, _, _) in master_details}) if master_details else 0
+                elected_tx_count = len({f"{c}.{s}.{t}" for (c, s, t, _, _, _) in transactional_details}) if transactional_details else 0
+                elected_total = elected_master_count + elected_tx_count
+                log_print(f"✅ Business tables (discovered): {len(business_tables)}")
                 log_print(f"   📊 Master Data tables: {len(master_tables_set)}")
                 log_print(f"   📈 Transactional tables: {len(transactional_tables_set)}")
+                log_print(f"🗳️ Elected for generation: {elected_total} (master={elected_master_count}, transactional={elected_tx_count}) [{self.table_election_mode}]")
                 log_print(f"🟡 Reference tables (excluded): {len(reference_tables_set)}")
                 log_print(f"❌ Technical tables (excluded): {len(technical_tables)}")
                 log_print(f"{'='*80}\n")
 
                 # Update honesty tracking
                 self.processing_honesty['total_tables_discovered'] = len(business_tables) + len(technical_tables) + len(reference_tables_set)
-                self.processing_honesty['total_tables_processed'] = len(business_tables)
+                self.processing_honesty['total_tables_processed'] = elected_total
                 self.processing_honesty['total_batches_created'] = len(batches_to_process)
 
                 # Process each batch once (deduplication handles redundancy)
@@ -24592,7 +28141,8 @@ Start your response with the CSV header line: use_case_id,domain
                     num_items=len(batches_to_process),
                     total_columns=total_batch_columns,
                     avg_prompt_chars=avg_prompt_chars,
-                    is_llm_operation=True, logger=self.logger
+                    is_llm_operation=True, logger=self.logger,
+                    estimated_mb_per_worker=10.0
                 )
                 
                 log_print(f"\n{'='*80}")
@@ -24611,50 +28161,62 @@ Start your response with the CSV header line: use_case_id,domain
                 log_print(f"🔄 PASS 1: Initial Use Case Generation")
                 log_print(f"{'='*60}")
                 
-                with ThreadPoolExecutor(max_workers=batch_parallelism, thread_name_prefix="Pass1Batch") as executor:
-                    future_to_batch = {}
-                    for batch_num, column_details in batches_to_process:
-                        unique_batch_id = f"P1_{batch_num}"
-                        future = executor.submit(
-                            self._process_batch_with_retry,
-                            column_details,
-                            unique_batch_id,
-                            unstructured_docs_markdown,
-                            strategic_goals,
-                            business_context if 'business_context' in locals() else "",
-                            business_priorities if 'business_priorities' in locals() else "",
-                            strategic_initiative if 'strategic_initiative' in locals() else "",
-                            value_chain if 'value_chain' in locals() else "",
-                            revenue_model if 'revenue_model' in locals() else "",
-                            3,  # max_attempts
-                            ""  # No feedback for PASS 1
-                        )
-                        future_to_batch[future] = unique_batch_id
-                        self.logger.info(f"✓ [PASS 1] Submitted batch {batch_num}")
-                    
-                    total_submissions = len(batches_to_process)
-                    batches_completed = 0
-                    total_timeout = (total_submissions * 900) // max(batch_parallelism, 1) + 600
-                    
-                    try:
-                        for future in concurrent.futures.as_completed(future_to_batch, timeout=total_timeout):
-                            unique_batch_id = future_to_batch[future]
-                            try:
-                                use_cases = future.result(timeout=900)
-                                if use_cases:
-                                    self.storage_manager.save_batch(unique_batch_id, use_cases)
-                                    batches_completed += 1
-                                    self.logger.info(f"✓ [PASS 1] Batch {unique_batch_id}: {len(use_cases)} use cases ({batches_completed}/{total_submissions})")
-                                    log_print(f"✓ [PASS 1] Batch complete ({batches_completed}/{total_submissions})")
-                                    try:
-                                        self._tracking_merge_use_cases(use_cases)
-                                    except Exception as track_err:
-                                        self.logger.error(f"⚠️ [PASS 1] Tracking merge failed for batch {unique_batch_id} (non-fatal): {track_err}")
-                                        log_print(f"⚠️ Tracking merge failed for batch {unique_batch_id}: {track_err}", level="ERROR")
-                            except Exception as e:
-                                self.logger.error(f"❌ [PASS 1] Batch {unique_batch_id} failed: {e}")
-                    except concurrent.futures.TimeoutError:
-                        self.logger.error(f"⚠️ [PASS 1] Timeout after {total_timeout}s. Proceeding with {batches_completed}/{total_submissions} completed.")
+                _bp_timeout = TECHNICAL_CONTEXT["runtime"]["batch_processing_timeout"]
+                total_submissions = len(batches_to_process)
+                total_timeout = (total_submissions * _bp_timeout) // max(1, self.max_parallelism) + 600
+                
+                _p1_bc = business_context if 'business_context' in locals() else ""
+                _p1_bp = business_priorities if 'business_priorities' in locals() else ""
+                _p1_si = strategic_initiative if 'strategic_initiative' in locals() else ""
+                _p1_vc = value_chain if 'value_chain' in locals() else ""
+                _p1_rm = revenue_model if 'revenue_model' in locals() else ""
+                _p1_max_attempts = TECHNICAL_CONTEXT["runtime"]["batch_processing_max_attempts"]
+                
+                def _pass1_worker(batch_num_inner, column_details_inner):
+                    unique_batch_id = f"P1_{batch_num_inner}"
+                    use_cases = self._process_batch_with_retry(
+                        column_details_inner,
+                        unique_batch_id,
+                        unstructured_docs_markdown,
+                        strategic_goals,
+                        _p1_bc, _p1_bp, _p1_si, _p1_vc, _p1_rm,
+                        _p1_max_attempts,
+                        ""
+                    )
+                    if use_cases:
+                        self.storage_manager.save_batch(unique_batch_id, use_cases)
+                    return (unique_batch_id, use_cases)
+                
+                tasks = [(_pass1_worker, (bn, cd)) for bn, cd in batches_to_process]
+                for bn, _ in batches_to_process:
+                    self.logger.info(f"✓ [PASS 1] Submitted batch {bn}")
+                
+                pass1_results = ParallelExecutor.execute_parallel(
+                    tasks=tasks,
+                    max_workers=batch_parallelism,
+                    task_name="Pass1Batch",
+                    logger=self.logger,
+                    timeout_per_task=_bp_timeout,
+                    total_timeout=total_timeout,
+                    thread_name_prefix="Pass1Batch",
+                    return_exceptions=True
+                )
+                
+                batches_completed = 0
+                for result in pass1_results:
+                    if isinstance(result, Exception):
+                        self.logger.error(f"❌ [PASS 1] Batch failed: {get_clean_error_message(result)}")
+                        continue
+                    unique_batch_id, use_cases = result
+                    if use_cases:
+                        batches_completed += 1
+                        self.logger.info(f"✓ [PASS 1] Batch {unique_batch_id}: {len(use_cases)} use cases ({batches_completed}/{total_submissions})")
+                        log_print(f"✓ [PASS 1] Batch complete ({batches_completed}/{total_submissions})")
+                        try:
+                            self._tracking_merge_use_cases(use_cases)
+                        except Exception as track_err:
+                            self.logger.error(f"⚠️ [PASS 1] Tracking merge failed for batch {unique_batch_id} (non-fatal): {track_err}")
+                            log_print(f"⚠️ Tracking merge failed for batch {unique_batch_id}: {track_err}", level="ERROR")
                 
                 # === MEMORY OPTIMIZATION: Save PASS 1 results to disk immediately ===
                 # Count use cases and save IDs without loading all into memory
@@ -24675,13 +28237,21 @@ Start your response with the CSV header line: use_case_id,domain
                 self.logger.debug("🧹 Memory cleanup after PASS 1")
                 
                 # === PASS 2: Generate NEW use cases with feedback (TRANSACTIONAL TABLES ONLY) ===
-                # Create transactional-only batches for PASS 2
+                _pass1_already_tx_only = (
+                    self.table_election_mode == "Transactional Only" or
+                    (self.table_election_mode == "Let Inspire Decides" and elected_master_count == 0)
+                )
+                
                 transactional_batches = []
-                for batch_num, column_details in batches_to_process:
-                    tx_columns = [col for col in column_details 
-                                  if f"{col[0]}.{col[1]}.{col[2]}" in transactional_tables_set]
-                    if tx_columns:
-                        transactional_batches.append((batch_num, tx_columns))
+                if not _pass1_already_tx_only:
+                    for batch_num, column_details in batches_to_process:
+                        tx_columns = [col for col in column_details 
+                                      if f"{col[0]}.{col[1]}.{col[2]}" in transactional_tables_set]
+                        if tx_columns:
+                            transactional_batches.append((batch_num, tx_columns))
+                else:
+                    self.logger.info("⏭️ PASS 2 skipped: PASS 1 already used transactional tables only (table election mode)")
+                    log_print(f"⏭️ PASS 2 skipped: PASS 1 already covered transactional tables only [{self.table_election_mode}]")
                 
                 if pass1_count > 0 and transactional_batches:
                     self.logger.info("🔄 PASS 2: Generating NEW use cases from TRANSACTIONAL TABLES (with PASS 1 feedback)...")
@@ -24709,6 +28279,32 @@ Start your response with the CSV header line: use_case_id,domain
                     if pass1_count > 200:
                         feedback_lines.append(f"\n*... and {pass1_count - 200} more use cases (not shown)*")
                     
+                    feedback_lines.append("\n**⚠️ ALREADY-CLAIMED CORE BUSINESS PROBLEMS (normalized — ANY use case with these core phrases is a DUPLICATE):**")
+                    feedback_lines.append("The following are the core phrases extracted from Pass 1 use cases by stripping the verb and 'with...' activation suffix.")
+                    feedback_lines.append("If your new use case reduces to ANY of these core phrases after the same normalization, it is a DUPLICATE — DO NOT GENERATE IT.")
+                    feedback_lines.append("")
+                    import re as _re
+                    seen_cores = set()
+                    for _, name, _ in self.storage_manager.iter_pass1_use_cases_for_feedback(limit=200):
+                        core = _re.sub(r'\s+with\s+.*$', '', name, flags=_re.IGNORECASE).strip()
+                        words = core.split()
+                        if words:
+                            verb_map = {
+                                'forecast': 'PREDICT', 'predict': 'PREDICT', 'anticipate': 'PREDICT', 'envision': 'PREDICT',
+                                'detect': 'DETECT', 'identify': 'DETECT', 'reveal': 'DETECT', 'find': 'DETECT', 'discover': 'DETECT',
+                                'classify': 'CLASSIFY', 'segment': 'CLASSIFY', 'categorize': 'CLASSIFY',
+                                'simulate': 'SIMULATE', 'model': 'SIMULATE',
+                            }
+                            first_lower = words[0].lower()
+                            if first_lower in verb_map:
+                                words[0] = verb_map[first_lower]
+                        normalized_core = ' '.join(words)
+                        if normalized_core not in seen_cores:
+                            seen_cores.add(normalized_core)
+                    for core_phrase in sorted(seen_cores):
+                        feedback_lines.append(f"- {core_phrase}")
+                    feedback_lines.append("")
+                    
                     feedback_lines.append("\n**🔥 PASS 2 MISSION: FIND HIGH-VALUE USE CASES THAT PASS 1 MISSED 🔥**")
                     feedback_lines.append("")
                     feedback_lines.append("**VALUE-FOCUSED EXPLORATION:**")
@@ -24721,14 +28317,26 @@ Start your response with the CSV header line: use_case_id,domain
                     feedback_lines.append("- 📊 **Strategic insights**: Cross-table relationships that reveal hidden business drivers")
                     feedback_lines.append("- ⚡ **Efficiency gains**: Process bottlenecks, resource optimization opportunities")
                     feedback_lines.append("")
-                    feedback_lines.append("**QUALITY RULES:**")
-                    feedback_lines.append("- ❌ Avoid duplicates of Pass 1 use cases (check the table above)")
-                    feedback_lines.append("- ❌ Do NOT generate low-value filler just to add more use cases")
-                    feedback_lines.append("- ✅ Variations that add DISTINCT business value ARE encouraged")
-                    feedback_lines.append("- ✅ Different business angles on same data = valuable if ROI is clear")
-                    feedback_lines.append("- ✅ Cross-table joins often unlock the highest value - explore these")
+                    feedback_lines.append("**🚨 QUALITY RULES (EXTREME — ZERO TOLERANCE — violations cause IMMEDIATE rejection) 🚨**")
                     feedback_lines.append("")
-                    feedback_lines.append("**SELF-CHECK**: For each use case ask: 'Would a CFO fund this? Does it impact revenue or reduce costs?'")
+                    feedback_lines.append("**5-LAYER DUPLICATE DETECTION (match on ANY layer = DO NOT GENERATE):**")
+                    feedback_lines.append("- Layer 1: Normalize verb (Forecast/Predict→PREDICT, Detect/Identify→DETECT, etc.) + strip 'with...' activation suffix. Core phrase match → DUPLICATE")
+                    feedback_lines.append("- Layer 2: Also replace noun synonyms (Revenue=Income=Sales, Churn=Attrition, Cost=Expense, Customer=Client, etc.). Match → DUPLICATE")
+                    feedback_lines.append("- Layer 3: Extract entity + metric. Same entity + same metric as ANY Pass 1 use case → DUPLICATE")
+                    feedback_lines.append("- Layer 4: Technique swap: 'Forecast X' and 'Detect X Anomalies' on same X → DUPLICATE")
+                    feedback_lines.append("- Layer 5: Same tables + similar business question → DUPLICATE")
+                    feedback_lines.append("")
+                    feedback_lines.append("**ALSO CHECK the ALREADY-CLAIMED CORE PHRASES list above — if your normalized core matches ANY entry, it is a DUPLICATE.**")
+                    feedback_lines.append("")
+                    feedback_lines.append("**ADDITIONAL REJECTION CRITERIA:**")
+                    feedback_lines.append("- ❌ STRIP TEST: Remove AI functions mentally. If what remains is a WHERE clause, threshold, GROUP BY, or date check → REJECT (trivial)")
+                    feedback_lines.append("- ❌ DELIVERABLE TEST: Does your 'with [...]' suffix describe a business DELIVERABLE (recommendation, action plan, queue, strategy)? If it describes a technical method, data source, or analytical technique → REJECT. Also check: does the action part (before 'with') contain any technical jargon, domain acronyms, or statistical terms? If yes → REJECT.")
+                    feedback_lines.append("- ❌ Single-table use cases when FK relationships exist → REJECT unless there's a genuinely unique single-table insight")
+                    feedback_lines.append("- ✅ Genuinely DIFFERENT business entities and metrics using DIFFERENT data dimensions ARE encouraged")
+                    feedback_lines.append("- ✅ Cross-table joins with 2+ tables unlock the highest value — prioritize these")
+                    feedback_lines.append("- ✅ Use UNDER-REPRESENTED techniques (check Pass 1 technique distribution and balance)")
+                    feedback_lines.append("")
+                    feedback_lines.append("**SELF-CHECK before EACH use case**: (1) 'Would a skeptical CFO fund this?' (2) 'Does this pass ALL 5 duplicate layers against ALL Pass 1 use cases?' (3) 'Does this REQUIRE AI or is it just basic SQL?' (4) 'Does my activation suffix describe a business DELIVERABLE (recommendation, queue, strategy, action plan) rather than a technical method?' (5) 'Does my action part contain ANY technical jargon, domain acronyms, or statistical terms? If yes, rewrite in plain business language.'")
                     
                     # Save feedback to disk and clear from memory
                     self.storage_manager.save_feedback_file(feedback_lines)
@@ -24736,48 +28344,61 @@ Start your response with the CSV header line: use_case_id,domain
                     del feedback_lines  # Free memory
                     gc.collect()
                     
-                    with ThreadPoolExecutor(max_workers=batch_parallelism, thread_name_prefix="Pass2Batch") as executor:
-                        future_to_batch = {}
-                        for batch_num, column_details in transactional_batches:
-                            unique_batch_id = f"P2_{batch_num}"
-                            future = executor.submit(
-                                self._process_batch_with_retry,
-                                column_details,
-                                unique_batch_id,
-                                unstructured_docs_markdown,
-                                strategic_goals,
-                                business_context if 'business_context' in locals() else "",
-                                business_priorities if 'business_priorities' in locals() else "",
-                                strategic_initiative if 'strategic_initiative' in locals() else "",
-                                value_chain if 'value_chain' in locals() else "",
-                                revenue_model if 'revenue_model' in locals() else "",
-                                3,  # max_attempts
-                                previous_use_cases_feedback  # Include feedback from PASS 1
-                            )
-                            future_to_batch[future] = unique_batch_id
-                            self.logger.info(f"✓ [PASS 2] Submitted transactional batch {batch_num}")
-                        
-                        batches_completed = 0
-                        pass2_submissions = len(transactional_batches)
-                        try:
-                            for future in concurrent.futures.as_completed(future_to_batch, timeout=total_timeout):
-                                unique_batch_id = future_to_batch[future]
-                                try:
-                                    use_cases = future.result(timeout=900)
-                                    if use_cases:
-                                        self.storage_manager.save_batch(unique_batch_id, use_cases)
-                                        batches_completed += 1
-                                        self.logger.info(f"✓ [PASS 2] Batch {unique_batch_id}: {len(use_cases)} NEW use cases ({batches_completed}/{pass2_submissions})")
-                                        log_print(f"✓ [PASS 2] Batch complete ({batches_completed}/{pass2_submissions})")
-                                        try:
-                                            self._tracking_merge_use_cases(use_cases)
-                                        except Exception as track_err:
-                                            self.logger.error(f"⚠️ [PASS 2] Tracking merge failed for batch {unique_batch_id} (non-fatal): {track_err}")
-                                            log_print(f"⚠️ Tracking merge failed for batch {unique_batch_id}: {track_err}", level="ERROR")
-                                except Exception as e:
-                                    self.logger.error(f"❌ [PASS 2] Batch {unique_batch_id} failed: {e}")
-                        except concurrent.futures.TimeoutError:
-                            self.logger.error(f"⚠️ [PASS 2] Timeout. Proceeding with {batches_completed}/{pass2_submissions} completed.")
+                    pass2_submissions = len(transactional_batches)
+                    
+                    _p2_bc = business_context if 'business_context' in locals() else ""
+                    _p2_bp = business_priorities if 'business_priorities' in locals() else ""
+                    _p2_si = strategic_initiative if 'strategic_initiative' in locals() else ""
+                    _p2_vc = value_chain if 'value_chain' in locals() else ""
+                    _p2_rm = revenue_model if 'revenue_model' in locals() else ""
+                    _p2_max_attempts = TECHNICAL_CONTEXT["runtime"]["batch_processing_max_attempts"]
+                    _p2_feedback = previous_use_cases_feedback
+                    
+                    def _pass2_worker(batch_num_inner, column_details_inner):
+                        unique_batch_id = f"P2_{batch_num_inner}"
+                        use_cases = self._process_batch_with_retry(
+                            column_details_inner,
+                            unique_batch_id,
+                            unstructured_docs_markdown,
+                            strategic_goals,
+                            _p2_bc, _p2_bp, _p2_si, _p2_vc, _p2_rm,
+                            _p2_max_attempts,
+                            _p2_feedback
+                        )
+                        if use_cases:
+                            self.storage_manager.save_batch(unique_batch_id, use_cases)
+                        return (unique_batch_id, use_cases)
+                    
+                    pass2_tasks = [(_pass2_worker, (bn, cd)) for bn, cd in transactional_batches]
+                    for bn, _ in transactional_batches:
+                        self.logger.info(f"✓ [PASS 2] Submitted transactional batch {bn}")
+                    
+                    pass2_results = ParallelExecutor.execute_parallel(
+                        tasks=pass2_tasks,
+                        max_workers=batch_parallelism,
+                        task_name="Pass2Batch",
+                        logger=self.logger,
+                        timeout_per_task=_bp_timeout,
+                        total_timeout=total_timeout,
+                        thread_name_prefix="Pass2Batch",
+                        return_exceptions=True
+                    )
+                    
+                    batches_completed = 0
+                    for result in pass2_results:
+                        if isinstance(result, Exception):
+                            self.logger.error(f"❌ [PASS 2] Batch failed: {get_clean_error_message(result)}")
+                            continue
+                        unique_batch_id, use_cases = result
+                        if use_cases:
+                            batches_completed += 1
+                            self.logger.info(f"✓ [PASS 2] Batch {unique_batch_id}: {len(use_cases)} NEW use cases ({batches_completed}/{pass2_submissions})")
+                            log_print(f"✓ [PASS 2] Batch complete ({batches_completed}/{pass2_submissions})")
+                            try:
+                                self._tracking_merge_use_cases(use_cases)
+                            except Exception as track_err:
+                                self.logger.error(f"⚠️ [PASS 2] Tracking merge failed for batch {unique_batch_id} (non-fatal): {track_err}")
+                                log_print(f"⚠️ Tracking merge failed for batch {unique_batch_id}: {track_err}", level="ERROR")
                     
                     # === MEMORY OPTIMIZATION: Count PASS 2 results without loading all into memory ===
                     total_after_pass2 = self.storage_manager.get_total_count()
@@ -24801,7 +28422,8 @@ Start your response with the CSV header line: use_case_id,domain
                 storage_stats = self.storage_manager.get_stats()
                 if storage_stats['num_batches'] == 0:
                     self.logger.warning("No use cases were generated from any batch. Skipping all generation.")
-                    self.storage_manager.cleanup()  # Cleanup if no use cases generated
+                    self.storage_manager.cleanup()
+                    self.ai_agent.cleanup_llm_cache()
                     return
                 
                 self.logger.info(f"📊 Batch processing complete. Storage stats: {storage_stats['num_batches']} batches, "
@@ -24840,9 +28462,7 @@ Start your response with the CSV header line: use_case_id,domain
                 if filtered_count > 0:
                     self.logger.warning(f"⚠️ Filtered out {filtered_count} use cases without valid tables before deduplication")
 
-                # Deduplicate per domain in parallel (skip global deduplication to maximize parallelization)
                 self.logger.debug(f"Total use cases generated (pre-deduplication): {len(all_use_cases)}")
-                self.logger.info("🔄 Starting domain-level parallel deduplication (skipping global deduplication for max parallelization)...")
                 unique_use_cases = all_use_cases
                 
                 # === RESTRUCTURED: Prepare all columns for SQL generation FIRST ===
@@ -24928,21 +28548,13 @@ Start your response with the CSV header line: use_case_id,domain
                 self.logger.info("✅ Phase 1 complete: All use cases scored")
                 
                 del clustered_use_cases
-                try:
-                    self.spark.catalog.clearCache()
-                except Exception:
-                    pass
                 _force_gc(self.logger, "after scoring, before dedup")
                 
-                # === PHASE 3: Intelligent Deduplication (Using Scores) ===
-                self.logger.info("🔄 Starting INTELLIGENT domain-level deduplication (using scores)...")
-                final_deduplicated_use_cases = self._deduplicate_use_cases_by_domain_parallel(unique_use_cases_scored)
+                # === PHASE 3: Intelligent Deduplication (Global first, per-domain fallback) ===
+                self.logger.info("🔄 Starting INTELLIGENT deduplication (global attempt → per-domain fallback)...")
+                final_deduplicated_use_cases = self._deduplicate_use_cases(unique_use_cases_scored)
                 
                 del unique_use_cases_scored
-                try:
-                    self.spark.catalog.clearCache()
-                except Exception:
-                    pass
                 _force_gc(self.logger, "after dedup")
                 
                 final_consolidated_use_cases = final_deduplicated_use_cases
@@ -24989,20 +28601,43 @@ Start your response with the CSV header line: use_case_id,domain
                 # Set final_consolidated_use_cases before quality scoring
                 final_consolidated_use_cases = renumbered_use_cases
                 
-                # === PHASE 4.5: DATA QUALITY SCORING (MUST run BEFORE any quality-based filtering) ===
+                # === PHASE 4.5: VALUE+QUALITY SCORING ===
                 _schema_for_quality = self.storage_manager.load_schema_details("all_columns_for_sql")
                 if renumbered_use_cases and _schema_for_quality:
-                    ctx_business_context = getattr(self, 'merged_business_context', {}).get('business_context', business_context or '')
-                    ctx_industry = getattr(self, 'merged_business_context', {}).get('industry', '')
+                    _ctx_bc = getattr(self, 'merged_business_context', {}).get('business_context', business_context or '')
+                    _ctx_ind = getattr(self, 'merged_business_context', {}).get('industry', '')
                     
-                    final_consolidated_use_cases = self._score_use_case_data_quality(
-                        use_cases=renumbered_use_cases,
-                        full_schema_details=_schema_for_quality,
-                        business_context=ctx_business_context,
-                        industry=ctx_industry
-                    )
+                    _use_combined = TECHNICAL_CONTEXT["runtime"].get("use_combined_scoring", True)
+                    _cache_tag = "combined_scored" if _use_combined else "quality_scored"
                     
-                    del _schema_for_quality
+                    _cached_scored = self.storage_manager.load_scored_use_cases(_cache_tag)
+                    if _cached_scored and len(_cached_scored) == len(renumbered_use_cases):
+                        self.logger.info(f"Loaded {len(_cached_scored)} scored use cases from disk cache ({_cache_tag})")
+                        final_consolidated_use_cases = _cached_scored
+                        del _schema_for_quality
+                    elif _use_combined:
+                        final_consolidated_use_cases = self._score_combined_value_and_quality(
+                            use_cases=renumbered_use_cases,
+                            full_schema_details=_schema_for_quality,
+                            business_context=_ctx_bc,
+                            industry=_ctx_ind,
+                            strategic_goals=ctx_strategic_goals,
+                            business_priorities=ctx_business_priorities,
+                            strategic_initiative=ctx_strategic_initiative,
+                            value_chain=ctx_value_chain,
+                            revenue_model=ctx_revenue_model
+                        )
+                        self.storage_manager.save_scored_use_cases(final_consolidated_use_cases, _cache_tag)
+                        del _schema_for_quality
+                    else:
+                        final_consolidated_use_cases = self._score_use_case_data_quality(
+                            use_cases=renumbered_use_cases,
+                            full_schema_details=_schema_for_quality,
+                            business_context=_ctx_bc,
+                            industry=_ctx_ind
+                        )
+                        self.storage_manager.save_scored_use_cases(final_consolidated_use_cases, _cache_tag)
+                        del _schema_for_quality
                     gc.collect()
                     
                     quality_distribution = {}
@@ -25018,28 +28653,24 @@ Start your response with the CSV header line: use_case_id,domain
                     
                     self._tracking_update_quality(final_consolidated_use_cases)
                     
-                    # === EXTREME QUALITY MODE: Reject use cases with Quality < High ===
-                    if self.extreme_quality_mode:
-                        log_print(f"\n🔴 EXTREME QUALITY MODE: Filtering out use cases with Quality < High...")
-                        self.logger.info(f"🔴 EXTREME QUALITY MODE: Rejecting low-quality use cases...")
+                    # === USE CASES QUALITY FILTER: Apply filtering based on widget selection ===
+                    if self.quality_filter_acceptable is not None:
+                        acceptable_labels_str = ', '.join(sorted(self.quality_filter_acceptable))
+                        log_print(f"\n🔴 QUALITY FILTER [{self.use_cases_quality}]: Keeping only {acceptable_labels_str}...")
+                        self.logger.info(f"🔴 Quality filter [{self.use_cases_quality}]: Acceptable labels = {acceptable_labels_str}")
                         
-                        # Quality levels to keep (>= High)
-                        acceptable_quality = {'Ultra High', 'Very High', 'High'}
-                        
-                        # Separate accepted and rejected
                         accepted_use_cases = []
                         rejected_use_cases = []
                         
                         for uc in final_consolidated_use_cases:
                             quality = uc.get('Quality', 'Medium')
-                            if quality in acceptable_quality:
+                            if quality in self.quality_filter_acceptable:
                                 accepted_use_cases.append(uc)
                             else:
                                 rejected_use_cases.append(uc)
                         
-                        # Log rejected use cases
                         if rejected_use_cases:
-                            log_print(f"\n⚠️ REJECTED USE CASES ({len(rejected_use_cases)} total - Quality < High):")
+                            log_print(f"\n⚠️ REJECTED USE CASES ({len(rejected_use_cases)} total - below {self.use_cases_quality} threshold):")
                             self.logger.info(f"⚠️ REJECTED USE CASES ({len(rejected_use_cases)} total):")
                             for uc in rejected_use_cases:
                                 uc_id = uc.get('No', 'Unknown')
@@ -25051,49 +28682,110 @@ Start your response with the CSV header line: use_case_id,domain
                                 log_print(f"      Reason: {uc_summary[:200]}..." if len(uc_summary) > 200 else f"      Reason: {uc_summary}")
                                 self.logger.info(f"   ⚠️ {uc_id}: {uc_name} | Quality: {uc_quality} | {uc_summary}")
                         
-                        # Update final list
+                        if not accepted_use_cases:
+                            log_print(f"\n{'='*80}")
+                            log_print(f"⚠️⚠️⚠️  ZERO USE CASES PASSED QUALITY FILTER [{self.use_cases_quality}]")
+                            log_print(f"⚠️⚠️⚠️  FALLBACK: Pulling the next best quality tier forward so you get results")
+                            log_print(f"{'='*80}")
+                            self.logger.warning(f"⚠️ Quality filter fallback: 0 use cases passed [{self.use_cases_quality}]")
+
+                            fallback_order = ['Medium', 'Low', 'Very Low', 'Ultra Low']
+                            fallback_use_cases = []
+                            fallback_label = None
+                            for fb_label in fallback_order:
+                                fallback_use_cases = [uc for uc in rejected_use_cases if uc.get('Quality', '') == fb_label]
+                                if fallback_use_cases:
+                                    fallback_label = fb_label
+                                    break
+
+                            if fallback_use_cases:
+                                log_print(f"\n🔄 FALLBACK RECOVERED: {len(fallback_use_cases)} '{fallback_label}' quality use cases pulled forward")
+                                self.logger.warning(f"🔄 FALLBACK RECOVERED: {len(fallback_use_cases)} '{fallback_label}' quality use cases")
+                                for uc in fallback_use_cases:
+                                    log_print(f"   🔄 {uc.get('No', 'Unknown')}: {uc.get('Name', 'Unknown')} (Quality: {fallback_label})")
+                                accepted_use_cases = fallback_use_cases
+                                still_rejected = [uc for uc in rejected_use_cases if uc.get('Quality', '') != fallback_label]
+                                if still_rejected:
+                                    log_print(f"\n⚠️ STILL REJECTED ({len(still_rejected)} use cases - Quality < {fallback_label}):")
+                                    for uc in still_rejected:
+                                        log_print(f"   ⚠️ {uc.get('No', 'Unknown')}: {uc.get('Name', 'Unknown')} (Quality: {uc.get('Quality', 'Unknown')})")
+                                del still_rejected
+                            else:
+                                log_print(f"\n🚨🚨🚨  CRITICAL: No use cases available at any quality level!")
+                                log_print(f"🚨🚨🚨  ALL {len(rejected_use_cases)} use cases were rejected")
+                                log_print(f"🚨🚨🚨  Pipeline cannot produce any output. Check your data quality.")
+                                log_print(f"{'='*80}")
+                                self.logger.critical(f"🚨 Quality filter fallback FAILED: All {len(rejected_use_cases)} use cases rejected. No output possible.")
+                                del rejected_use_cases, accepted_use_cases
+                                self.storage_manager.cleanup()
+                                self.ai_agent.cleanup_llm_cache()
+                                AIAgent.get_summary_report()
+                                return
+
                         final_consolidated_use_cases = accepted_use_cases
                         
-                        log_print(f"\n✅ ACCEPTED USE CASES: {len(accepted_use_cases)} (Quality >= High)")
-                        log_print(f"⚠️ REJECTED USE CASES: {len(rejected_use_cases)} (Quality < High)")
-                        self.logger.info(f"✅ Extreme Quality filter: {len(accepted_use_cases)} accepted, {len(rejected_use_cases)} rejected")
+                        log_print(f"\n✅ ACCEPTED USE CASES: {len(accepted_use_cases)} (passed {self.use_cases_quality} filter)")
+                        log_print(f"⚠️ REJECTED USE CASES: {len(rejected_use_cases)} (below threshold)")
+                        self.logger.info(f"✅ Quality filter [{self.use_cases_quality}]: {len(accepted_use_cases)} accepted, {len(rejected_use_cases)} rejected")
                         del rejected_use_cases, accepted_use_cases
                         
-                        # Update quality distribution for logging
                         quality_distribution = {}
                         for uc in final_consolidated_use_cases:
                             label = uc.get('Quality', 'Medium')
                             quality_distribution[label] = quality_distribution.get(label, 0) + 1
                         
                         log_print(f"\n📊 FINAL QUALITY DISTRIBUTION (after filtering):")
-                        for label in ['Ultra High', 'Very High', 'High']:
+                        for label in ['Ultra High', 'Very High', 'High', 'Medium', 'Low', 'Very Low', 'Ultra Low']:
                             count = quality_distribution.get(label, 0)
                             if count > 0:
                                 log_print(f"   {label}: {count} use cases")
                     else:
-                        log_print(f"\nℹ️ Quality Level: High Quality - All scored use cases retained")
-                        self.logger.info(f"ℹ️ Quality Level: High Quality - No quality filtering applied")
+                        log_print(f"\nℹ️ Quality Filter: Good Quality - All scored use cases retained (no filtering)")
+                        self.logger.info(f"ℹ️ Quality Filter: Good Quality - No quality filtering applied")
                 
             else:
                  self.logger.warning("No data loader. Skipping use case, PDF, and Presentation generation.")
                  return
         except Exception as e:
-            self.logger.critical(f"A critical error occurred during English generation: {e}")
-            self.storage_manager.cleanup()  # Cleanup on error
+            self.logger.critical(f"A critical error occurred during English generation: {get_clean_error_message(e)}")
+            self.storage_manager.cleanup()
+            self.ai_agent.cleanup_llm_cache()
             AIAgent.get_summary_report()
             return
 
         english_grouped_data = self._group_use_cases_by_domain_flat(final_consolidated_use_cases) if final_consolidated_use_cases else {}
         summary_dict = None
 
-        # ALWAYS Generate English Excel before SQL generation
         if final_consolidated_use_cases:
-            self.logger.info("Generating English Excel before SQL generation...")
+            for uc in final_consolidated_use_cases:
+                if not uc.get('Analytics Technique') or uc.get('Analytics Technique') == 'N/A':
+                    uc['Analytics Technique'] = 'AI Analysis'
+                tables_involved = uc.get('Tables Involved', '')
+                uc['Primary Table'] = self._extract_primary_table(tables_involved)
+                if 'result_table' not in uc or not uc.get('result_table'):
+                    uc['result_table'] = compute_result_table_name(
+                        uc.get('No', 'unknown'), uc.get('Name', 'unknown'),
+                        tables_involved, inspire_database=self.inspire_database
+                    )
+            self.logger.info(f"✅ Pre-computed Primary Table and Result Database for {len(final_consolidated_use_cases)} use cases")
+            english_grouped_data = self._group_use_cases_by_domain_flat(final_consolidated_use_cases)
+
+        if final_consolidated_use_cases:
+            self._apply_sql_generation_selection(final_consolidated_use_cases)
+            english_grouped_data = self._group_use_cases_by_domain_flat(final_consolidated_use_cases)
+
+        # ALWAYS Generate English Excel and CSV before SQL generation
+        if final_consolidated_use_cases:
+            self.logger.info("Generating English Excel and CSV before SQL generation...")
             lang_abbr_en = self._get_lang_abbr("English")
             try:
                 self._generate_use_case_excel("English", lang_abbr_en, english_grouped_data)
             except Exception as e:
-                self.logger.error(f"Failed to generate English Excel before SQL: {e}")
+                self.logger.error(f"Failed to generate English Excel before SQL: {get_clean_error_message(e)}")
+            try:
+                self._generate_csv_catalog("English", lang_abbr_en, english_grouped_data)
+            except Exception as e:
+                self.logger.error(f"Failed to generate English CSV before SQL: {get_clean_error_message(e)}")
 
         
         # === PHASE 2: DOMAIN-BY-DOMAIN SQL GENERATION & NOTEBOOK CREATION ===
@@ -25123,11 +28815,6 @@ Start your response with the CSV header line: use_case_id,domain
                 ["English"]  # skip_excel_langs - already generated
             )
         
-        try:
-            self.spark.catalog.clearCache()
-            self.logger.info("🧹 Cleared Spark catalog cache before SQL generation phase")
-        except Exception:
-            pass
         _force_gc(self.logger, "pre-SQL-generation phase cleanup")
         
         self.logger.info(f"🔄 PHASE 2: Domain-by-domain SQL generation & notebook creation...")
@@ -25158,10 +28845,6 @@ Start your response with the CSV header line: use_case_id,domain
                 unstructured_docs_markdown
             )
         del _schema_for_sql
-        try:
-            self.spark.catalog.clearCache()
-        except Exception:
-            pass
         _force_gc(self.logger, "after SQL generation phase")
         self.logger.info("✅ Phase 2 complete: All domains processed (SQL + Notebooks)")
         
@@ -25172,35 +28855,24 @@ Start your response with the CSV header line: use_case_id,domain
         if doc_generation_future:
             try:
                 self.logger.info("⏳ Waiting for documentation generation to complete...")
-                doc_generation_future.result(timeout=1800)  # 30 minute timeout
+                _safe_future_result(doc_generation_future, timeout=1800)
                 self.logger.info("✅ Documentation generation completed")
                 log_print("✅ Documentation generation completed")
             except concurrent.futures.TimeoutError:
                 self.logger.warning("⚠️ Documentation generation timed out after 30 minutes")
                 log_print("⚠️ Documentation generation timed out", level="WARNING")
             except Exception as e:
-                self.logger.error(f"❌ Documentation generation failed: {e}")
+                self.logger.error(f"❌ Documentation generation failed: {get_clean_error_message(e)}")
                 log_print(f"❌ Documentation generation failed: {str(e)[:100]}", level="ERROR")
             finally:
                 if doc_generation_executor:
-                    doc_generation_executor.shutdown(wait=False)
+                    try:
+                        doc_generation_executor.shutdown(wait=False, cancel_futures=True)
+                    except TypeError:
+                        doc_generation_executor.shutdown(wait=False)
                 del doc_generation_future
                 doc_generation_future = None
         _force_gc(self.logger, "after documentation generation")
-
-        # === POPULATE PRIMARY TABLE (Analytics Technique comes from LLM during use case generation) ===
-        if final_consolidated_use_cases:
-            for uc in final_consolidated_use_cases:
-                # Analytics Technique is now generated by LLM during use case creation
-                # Only set a default if missing (for legacy use cases)
-                if not uc.get('Analytics Technique') or uc.get('Analytics Technique') == 'N/A':
-                    uc['Analytics Technique'] = 'AI Analysis'  # Default fallback
-                
-                # Extract Primary Table from Tables Involved
-                tables_involved = uc.get('Tables Involved', '')
-                uc['Primary Table'] = self._extract_primary_table(tables_involved)
-            
-            self.logger.info(f"✅ Populated Primary Table for {len(final_consolidated_use_cases)} use cases")
 
         # === SAVE JSON CATALOG (POST-SQL) ===
         if final_consolidated_use_cases and not self.json_file_path:
@@ -25241,14 +28913,14 @@ Start your response with the CSV header line: use_case_id,domain
             try:
                 self._run_generate_sample_result_mode()
             except Exception as e:
-                self.logger.error(f"Sample generation failed: {e}")
+                self.logger.error(f"Sample generation failed: {get_clean_error_message(e)}")
                 log_print(f"⚠️ Sample generation encountered an issue: {str(e)[:100]}", level="WARNING")
                 log_print(f"ℹ️ Proceeding with remaining artifacts...")
         
-        # Cleanup intermediate storage
         self.storage_manager.cleanup()
+        self.ai_agent.cleanup_llm_cache()
         
-        # Upload log file and show summary BEFORE final success message
+        # Upload log file, honesty report, and final success BEFORE AI usage summary
         self.logger.info(f"✅ All Use cases for {self.business_name} generated successfully")
         self.logger.info("Uploading log file...")
         self._upload_log_file()
@@ -25256,11 +28928,11 @@ Start your response with the CSV header line: use_case_id,domain
         # Show processing honesty report
         self._report_processing_honesty()
         
-        # Show AI usage summary
-        AIAgent.get_summary_report()
-        
-        # Final success message with green checkmark - THIS MUST BE THE LAST OUTPUT
+        # Final success message first; AI usage summary must be the final output block
         log_print(f"✅ All Use cases for {self.business_name} generated successfully")
+        
+        # Show AI usage summary as the very last run output
+        AIAgent.get_summary_report()
             
 
     def _generate_unstructured_docs(self, combined_schema_markdown: str) -> dict:
@@ -25295,7 +28967,7 @@ Start your response with the CSV header line: use_case_id,domain
             return fallback_context
             
         except Exception as e:
-            self.logger.error(f"Failed to generate unstructured document list: {e}. Proceeding with empty list.")
+            self.logger.error(f"Failed to generate unstructured document list: {get_clean_error_message(e)}. Proceeding with empty list.")
             fallback_context = {
                 "unstructured_docs_markdown": "",
                 "strategic_goals": [],
@@ -25407,7 +29079,7 @@ Start your response with the CSV header line: use_case_id,domain
             return summary_dict, transliterated_name
             
         except Exception as e:
-            self.logger.error(f"LLM summary generation failed for {language}: {e}. Using default text.")
+            self.logger.error(f"LLM summary generation failed for {language}: {get_clean_error_message(e)}. Using default text.")
             fallback_dict = {}
             total_cases_fallback = sum(len(cases) for cases in grouped_data.values())
             p1 = t['pdf_fallback_summary_p1'].format(total_cases=total_cases_fallback, business_name=business_name)
@@ -25512,14 +29184,20 @@ Start your response with: {{{{"honesty_score":
                 self.logger.warning(f"Domain merge response is not a dict: {type(merge_mapping)}. Skipping merge.")
                 return use_cases
             
+            # Sanitize: LLMs sometimes return nested dicts/lists as values instead of plain strings
+            sanitized = {}
+            for k, v in merge_mapping.items():
+                if isinstance(k, str) and isinstance(v, str):
+                    sanitized[k] = v
+                else:
+                    self.logger.warning(f"Domain merge: dropping non-string entry {type(k).__name__}={type(v).__name__} for key '{k}'")
+            merge_mapping = sanitized
+            
             # Resolve transitive merges (e.g., A->B, B->C  =>  A->C, B->C)
-            # This handles cases where a domain is renamed, and another domain is merged into the OLD name
-            # or where multiple merges happen in a chain.
-            for _ in range(5):  # Max depth 5 to prevent infinite loops
+            for _ in range(5):
                 updated = False
-                for key, val in merge_mapping.items():
+                for key, val in list(merge_mapping.items()):
                     if val in merge_mapping and merge_mapping[val] != val:
-                         # Update target to the final destination
                          merge_mapping[key] = merge_mapping[val]
                          updated = True
                 if not updated:
@@ -25552,7 +29230,7 @@ Start your response with: {{{{"honesty_score":
             return use_cases
             
         except Exception as e:
-            self.logger.error(f"Failed to merge domains: {e}")
+            self.logger.error(f"Failed to merge domains: {get_clean_error_message(e)}")
             return use_cases  # Return original if merge fails
 
     def _cluster_domains_and_subdomains(self, use_cases: list, language: str) -> list:
@@ -25623,116 +29301,11 @@ Start your response with: {{{{"honesty_score":
                     f"Using BATCHED domain detection to process {len(use_cases)} use cases in smaller chunks."
                 )
                 
-                # Calculate batch size based on available context space
-                prompt_overhead = len(prompt_template) + 5000  # Buffer for prompt template + response
-                available_chars = MAX_CONTEXT_CHARS - prompt_overhead
+                batched_domain_assignments = self._run_domain_detection_batched(
+                    use_cases, fieldnames, language, prompt_template, MAX_CONTEXT_CHARS
+                )
                 
-                # Estimate chars per use case from the CSV
-                chars_per_use_case = len(use_cases_csv) / len(use_cases) if use_cases else 500
-                batch_size = max(50, int(available_chars / chars_per_use_case * 0.7))  # 70% safety margin
-                
-                self.logger.info(f"📦 BATCHED DOMAIN DETECTION: Processing {len(use_cases)} use cases in batches of ~{batch_size}")
-                
-                # Process use cases in batches
-                batched_domain_assignments = []
-                all_discovered_domains = set()
-                
-                for batch_idx in range(0, len(use_cases), batch_size):
-                    batch_use_cases = use_cases[batch_idx:batch_idx + batch_size]
-                    batch_num = (batch_idx // batch_size) + 1
-                    total_batches = (len(use_cases) + batch_size - 1) // batch_size
-                    
-                    self.logger.info(f"📍 BATCH {batch_num}/{total_batches}: Processing {len(batch_use_cases)} use cases for domain detection...")
-                    
-                    try:
-                        # Create CSV for this batch
-                        batch_output = io.StringIO()
-                        batch_writer = csv.DictWriter(batch_output, fieldnames=fieldnames, extrasaction='ignore')
-                        batch_writer.writeheader()
-                        batch_writer.writerows(batch_use_cases)
-                        batch_csv = batch_output.getvalue()
-                        
-                        # Include previously discovered domains as context for consistency
-                        domain_context = ""
-                        if all_discovered_domains:
-                            domain_context = f"\n\n**PREVIOUSLY DISCOVERED DOMAINS (reuse these where appropriate):**\n{', '.join(sorted(all_discovered_domains))}\n"
-                        
-                        batch_prompt_vars = {
-                            "use_cases_csv": batch_csv,
-                            "output_language": language,
-                            "business_name": self.business_name,
-                            "industries": ", ".join(self.industries) if hasattr(self, 'industries') and self.industries else "General Business",
-                            "business_context": self._get_business_context_fallback() + domain_context,
-                            "previous_violations": ""
-                        }
-                        
-                        # Call LLM for this batch
-                        batch_response = self.ai_agent.run_worker(
-                            step_name=f"Detect_Domains_Batch{batch_num}_{language}",
-                            worker_prompt_path="DOMAIN_FINDER_PROMPT",
-                            prompt_vars=batch_prompt_vars,
-                            response_schema=None
-                        )
-                        
-                        if batch_response and batch_response.strip():
-                            batch_response_clean = clean_json_response(batch_response)
-                            batch_csv_rows = CSVParser.parse_csv_string(
-                                batch_response_clean,
-                                logger=self.logger,
-                                context=f"Domain detection batch {batch_num}"
-                            )
-                            
-                            # Apply domain assignments to batch use cases
-                            batch_domain_map = {}
-                            for row in batch_csv_rows:
-                                uc_id_raw = row.get('use_case_id', '') or ''
-                                domain_raw = row.get('domain', '') or ''
-                                uc_id = uc_id_raw.strip() if isinstance(uc_id_raw, str) else str(uc_id_raw).strip()
-                                domain = domain_raw.strip() if isinstance(domain_raw, str) else str(domain_raw).strip()
-                                if uc_id and domain:
-                                    batch_domain_map[uc_id] = domain
-                                    all_discovered_domains.add(domain)
-                            
-                            # Apply to batch use cases
-                            for uc in batch_use_cases:
-                                uc_copy = uc.copy()
-                                uc_id = uc_copy.get('No', '')
-                                if uc_id in batch_domain_map:
-                                    uc_copy['Business Domain'] = batch_domain_map[uc_id]
-                                else:
-                                    # Assign to most common domain in batch as fallback
-                                    if batch_domain_map:
-                                        from collections import Counter
-                                        most_common = Counter(batch_domain_map.values()).most_common(1)[0][0]
-                                        uc_copy['Business Domain'] = most_common
-                                    else:
-                                        uc_copy['Business Domain'] = 'Uncategorized'
-                                uc_copy['Subdomain'] = ''
-                                batched_domain_assignments.append(uc_copy)
-                            
-                            self.logger.info(f"✅ BATCH {batch_num}/{total_batches}: Assigned domains to {len(batch_use_cases)} use cases. Discovered domains so far: {len(all_discovered_domains)}")
-                        else:
-                            # Fallback for failed batch
-                            self.logger.warning(f"⚠️ BATCH {batch_num}: Empty response, using fallback domains")
-                            for uc in batch_use_cases:
-                                uc_copy = uc.copy()
-                                uc_copy['Business Domain'] = 'Uncategorized'
-                                uc_copy['Subdomain'] = ''
-                                batched_domain_assignments.append(uc_copy)
-                                
-                    except Exception as batch_err:
-                        self.logger.error(f"❌ BATCH {batch_num} failed: {batch_err}. Using fallback domains for this batch.")
-                        for uc in batch_use_cases:
-                            uc_copy = uc.copy()
-                            uc_copy['Business Domain'] = 'Uncategorized'
-                            uc_copy['Subdomain'] = ''
-                            batched_domain_assignments.append(uc_copy)
-                
-                self.logger.info(f"📦 BATCHED DOMAIN DETECTION COMPLETE: {len(batched_domain_assignments)} use cases assigned to {len(all_discovered_domains)} domains")
-                
-                # Use the batched results and continue to domain merging (Step 1.5)
-                # The domain merging will consolidate similar domains across batches
-                domain_assignments = batched_domain_assignments
+                domain_assignments = batched_domain_assignments if batched_domain_assignments else self._assign_default_domains(use_cases)
                 
                 # Skip the single-batch domain detection below, jump to Step 1.5
                 # === STEP 1.5: DOMAIN MERGING (MERGE SMALL/SIMILAR DOMAINS) ===
@@ -25779,7 +29352,7 @@ Start your response with: {{{{"honesty_score":
                             self.logger.warning(f"⚠️ [{idx}/{len(domain_usecases_map)}] Domain '{domain_name}': empty after {elapsed:.1f}s, used defaults")
                     except Exception as e:
                         elapsed = _time.time() - domain_start
-                        self.logger.error(f"❌ [{idx}/{len(domain_usecases_map)}] Domain '{domain_name}' failed after {elapsed:.1f}s: {e}")
+                        self.logger.error(f"❌ [{idx}/{len(domain_usecases_map)}] Domain '{domain_name}' failed after {elapsed:.1f}s: {get_clean_error_message(e)}")
                         fallback = self._assign_default_subdomains(domain_use_cases, domain_name)
                         final_use_cases_with_subdomains.extend(fallback)
                 
@@ -25976,19 +29549,30 @@ Start your response with: {{{{"honesty_score":
                             prompt_vars['previous_violations'] = violation_summary
                             continue
                 
+                except CascadeRebatchError as cre:
+                    self.logger.warning(
+                        f"🔄 Domain detection cascade rebatch needed after '{cre.failed_model_name}' failed. "
+                        f"Switching to batched mode for model '{cre.target_model_name}' "
+                        f"(limit: {cre.target_context_limit_chars:,} chars)"
+                    )
+                    batched_result = self._run_domain_detection_batched(
+                        use_cases, fieldnames, language, prompt_template,
+                        cre.target_context_limit_chars, cre.target_model_endpoint
+                    )
+                    if batched_result:
+                        domain_assignments = batched_result
+                    break
+
                 except Exception as e:
-                    self.logger.error(f"Domain detection attempt {attempt} failed: {e}")
+                    self.logger.error(f"Domain detection attempt {attempt} failed: {get_clean_error_message(e)}")
                     if attempt == max_attempts:
                         self.logger.error("Max attempts reached. Using DEFAULT domains as fallback...")
-                        # FALLBACK: Assign default domains "Domain 1", "Domain 2", etc.
                         domain_assignments = self._assign_default_domains(use_cases)
                         self.logger.warning(f"✅ Fallback complete: Assigned {len(set(uc.get('Business Domain', '') for uc in domain_assignments))} default domains to {len(domain_assignments)} use cases")
                         break
             
-            # Check if domain detection was successful
             if not domain_assignments:
                 self.logger.error("Domain detection failed. Using DEFAULT domains as fallback...")
-                # FALLBACK: Assign default domains "Domain 1", "Domain 2", etc.
                 domain_assignments = self._assign_default_domains(use_cases)
                 self.logger.warning(f"✅ Fallback complete: Assigned {len(set(uc.get('Business Domain', '') for uc in domain_assignments))} default domains to {len(domain_assignments)} use cases")
             
@@ -26038,17 +29622,17 @@ Start your response with: {{{{"honesty_score":
             per_domain_timeout = self.llm_timeout_seconds + 120
             
             if num_domains >= 2:
-                conservative_workers = min(2, num_domains)
-                total_timeout = per_domain_timeout * ((num_domains + conservative_workers - 1) // conservative_workers)
+                subdomain_workers = min(subdomain_parallelism, num_domains)
+                total_timeout = per_domain_timeout * ((num_domains + subdomain_workers - 1) // subdomain_workers)
                 self.logger.info(
-                    f"🔄 PROGRESSIVE PARALLELISM: Trying {conservative_workers} workers for {num_domains} domains "
+                    f"🔄 PARALLEL SUBDOMAIN DETECTION: {subdomain_workers} workers for {num_domains} domains "
                     f"(per-domain timeout: {per_domain_timeout}s, total timeout: {total_timeout}s)"
                 )
-                log_print(f"🔄 Subdomain detection: {num_domains} domains with {conservative_workers} workers")
+                log_print(f"🔄 Subdomain detection: {num_domains} domains with {subdomain_workers} workers")
                 
                 executor = None
                 try:
-                    executor = ThreadPoolExecutor(max_workers=conservative_workers, thread_name_prefix="SubdomainDetect")
+                    executor = ThreadPoolExecutor(max_workers=subdomain_workers, thread_name_prefix="SubdomainDetect")
                     future_to_domain = {}
                     for domain_name, domain_use_cases in domain_usecases_map.items():
                         self.logger.info(f"📤 Submitting domain '{domain_name}' ({len(domain_use_cases)} use cases) to thread pool...")
@@ -26063,7 +29647,7 @@ Start your response with: {{{{"honesty_score":
                     completed_domains = set()
                     import time as _time
                     try:
-                        for future in concurrent.futures.as_completed(future_to_domain, timeout=total_timeout):
+                        for future in safe_as_completed(future_to_domain, timeout=total_timeout):
                             domain_name = future_to_domain[future]
                             try:
                                 use_cases_with_subdomains = future.result(timeout=per_domain_timeout)
@@ -26076,7 +29660,7 @@ Start your response with: {{{{"honesty_score":
                                     final_use_cases_with_subdomains.extend(fallback)
                                 completed_domains.add(domain_name)
                             except Exception as e:
-                                self.logger.error(f"❌ Domain '{domain_name}': Failed: {e}")
+                                self.logger.error(f"❌ Domain '{domain_name}': Failed: {get_clean_error_message(e)}")
                                 fallback = self._assign_default_subdomains(domain_usecases_map[domain_name], domain_name)
                                 final_use_cases_with_subdomains.extend(fallback)
                                 completed_domains.add(domain_name)
@@ -26101,7 +29685,7 @@ Start your response with: {{{{"honesty_score":
                     else:
                         parallel_succeeded = True
                 except Exception as e:
-                    self.logger.error(f"❌ Progressive parallel failed entirely: {e}")
+                    self.logger.error(f"❌ Progressive parallel failed entirely: {get_clean_error_message(e)}")
                     _alive_threads = [(t.name, t.is_alive()) for t in threading.enumerate() if 'SubdomainDetect' in t.name or 'LLM_Query' in t.name]
                     self.logger.error(f"🧵 Thread state after failure: {_alive_threads}")
                     final_use_cases_with_subdomains = []
@@ -26138,7 +29722,7 @@ Start your response with: {{{{"honesty_score":
                             self.logger.warning(f"⚠️ [{idx}/{num_domains}] Domain '{domain_name}': empty result after {elapsed:.1f}s, used defaults")
                     except Exception as e:
                         elapsed = _time.time() - domain_start
-                        self.logger.error(f"❌ [{idx}/{num_domains}] Domain '{domain_name}' failed after {elapsed:.1f}s: {e}")
+                        self.logger.error(f"❌ [{idx}/{num_domains}] Domain '{domain_name}' failed after {elapsed:.1f}s: {get_clean_error_message(e)}")
                         fallback = self._assign_default_subdomains(domain_use_cases, domain_name)
                         final_use_cases_with_subdomains.extend(fallback)
             
@@ -26146,7 +29730,7 @@ Start your response with: {{{{"honesty_score":
             return final_use_cases_with_subdomains
         
         except Exception as e:
-            self.logger.error(f"Domain/subdomain clustering failed with error: {e}. Using DEFAULT domains/subdomains as fallback...")
+            self.logger.error(f"Domain/subdomain clustering failed with error: {get_clean_error_message(e)}. Using DEFAULT domains/subdomains as fallback...")
             # FALLBACK: Assign default domains and subdomains on any error
             fallback_use_cases = self._assign_default_domains(use_cases)
             # Also assign default subdomains for each domain
@@ -26164,6 +29748,180 @@ Start your response with: {{{{"honesty_score":
             
             self.logger.warning(f"✅ Complete fallback applied: {len(final_use_cases)} use cases with default domains and subdomains")
             return final_use_cases
+
+    def _run_domain_detection_batched(self, use_cases, fieldnames, language, prompt_template, context_limit, start_from_model=None):
+        """
+        Run domain detection in batches mirroring the same grouping used during use case generation.
+        
+        Strategy: Group use cases by their table schema prefix (catalog.schema from "Tables Involved"),
+        which mirrors how the DataLoader batches tables during generation. Each schema-group is processed
+        as a separate domain detection call, then domains are merged across groups.
+        
+        If a schema-group is still too large for the context window, it is further split by individual
+        table prefixes (catalog.schema.table) within that schema.
+        
+        Returns list of domain-assigned use cases, or None on total failure.
+        """
+        import io
+        import csv
+        from collections import defaultdict
+
+        def _extract_schema_prefix(tables_involved_str):
+            if not tables_involved_str or not isinstance(tables_involved_str, str):
+                return '_no_tables_'
+            first_table = tables_involved_str.split(',')[0].strip().strip('`')
+            parts = first_table.split('.')
+            if len(parts) >= 2:
+                return f"{parts[0]}.{parts[1]}"
+            return first_table
+
+        def _build_batch_csv(batch_ucs):
+            buf = io.StringIO()
+            w = csv.DictWriter(buf, fieldnames=fieldnames, extrasaction='ignore')
+            w.writeheader()
+            w.writerows(batch_ucs)
+            return buf.getvalue()
+
+        def _estimate_prompt_size(batch_csv_text):
+            return len(prompt_template) + len(batch_csv_text) + 5000
+
+        def _detect_domains_for_group(group_ucs, group_label, effective_limit_chars, effective_model, discovered_domains):
+            batch_csv = _build_batch_csv(group_ucs)
+            prompt_size = _estimate_prompt_size(batch_csv)
+            
+            if prompt_size > effective_limit_chars:
+                table_groups = defaultdict(list)
+                for uc in group_ucs:
+                    tables = uc.get('Tables Involved', '')
+                    first_table = tables.split(',')[0].strip().strip('`') if tables else '_unknown_'
+                    table_groups[first_table].append(uc)
+                
+                if len(table_groups) <= 1:
+                    self.logger.warning(f"⚠️ [{group_label}] Single table group still exceeds context ({prompt_size:,} > {effective_limit_chars:,}). Processing anyway.")
+                else:
+                    self.logger.info(f"📦 [{group_label}] Group too large ({prompt_size:,} chars, {len(group_ucs)} UCs). Splitting into {len(table_groups)} table sub-groups.")
+                    sub_results = []
+                    for sub_idx, (table_key, sub_ucs) in enumerate(table_groups.items(), 1):
+                        sub_label = f"{group_label}_T{sub_idx}"
+                        sub_result = _detect_domains_for_group(sub_ucs, sub_label, effective_limit_chars, effective_model, discovered_domains)
+                        sub_results.extend(sub_result)
+                    return sub_results
+            
+            domain_context = ""
+            if discovered_domains:
+                domain_context = f"\n\n**PREVIOUSLY DISCOVERED DOMAINS (reuse these where appropriate):**\n{', '.join(sorted(discovered_domains))}\n"
+            
+            batch_prompt_vars = {
+                "use_cases_csv": batch_csv,
+                "output_language": language,
+                "business_name": self.business_name,
+                "industries": ", ".join(self.industries) if hasattr(self, 'industries') and self.industries else "General Business",
+                "business_context": self._get_business_context_fallback() + domain_context,
+                "previous_violations": ""
+            }
+            
+            try:
+                batch_response = self.ai_agent.run_worker(
+                    step_name=f"Detect_Domains_{group_label}_{language}",
+                    worker_prompt_path="DOMAIN_FINDER_PROMPT",
+                    prompt_vars=batch_prompt_vars,
+                    response_schema=None,
+                    start_from_model=effective_model
+                )
+            except CascadeRebatchError as cre:
+                self.logger.warning(
+                    f"🔄 [{group_label}] Cascade rebatch → model '{cre.target_model_name}' "
+                    f"(limit: {cre.target_context_limit_chars:,} chars). Re-splitting group."
+                )
+                return _detect_domains_for_group(
+                    group_ucs, group_label, cre.target_context_limit_chars,
+                    cre.target_model_endpoint, discovered_domains
+                )
+            except Exception as e:
+                self.logger.error(f"❌ [{group_label}] Domain detection failed: {get_clean_error_message(e)}. Using 'Uncategorized'.")
+                results = []
+                for uc in group_ucs:
+                    uc_copy = uc.copy()
+                    uc_copy['Business Domain'] = 'Uncategorized'
+                    uc_copy['Subdomain'] = ''
+                    results.append(uc_copy)
+                return results
+            
+            results = []
+            if batch_response and batch_response.strip():
+                batch_response_clean = clean_json_response(batch_response)
+                batch_csv_rows = CSVParser.parse_csv_string(
+                    batch_response_clean, logger=self.logger,
+                    context=f"Domain detection {group_label}"
+                )
+                batch_domain_map = {}
+                for row in batch_csv_rows:
+                    uc_id_raw = row.get('use_case_id', '') or ''
+                    domain_raw = row.get('domain', '') or ''
+                    uc_id = uc_id_raw.strip() if isinstance(uc_id_raw, str) else str(uc_id_raw).strip()
+                    domain = domain_raw.strip() if isinstance(domain_raw, str) else str(domain_raw).strip()
+                    if uc_id and domain:
+                        batch_domain_map[uc_id] = domain
+                        discovered_domains.add(domain)
+                
+                for uc in group_ucs:
+                    uc_copy = uc.copy()
+                    uc_id = uc_copy.get('No', '')
+                    if uc_id in batch_domain_map:
+                        uc_copy['Business Domain'] = batch_domain_map[uc_id]
+                    elif batch_domain_map:
+                        from collections import Counter
+                        most_common = Counter(batch_domain_map.values()).most_common(1)[0][0]
+                        uc_copy['Business Domain'] = most_common
+                    else:
+                        uc_copy['Business Domain'] = 'Uncategorized'
+                    uc_copy['Subdomain'] = ''
+                    results.append(uc_copy)
+                self.logger.info(f"✅ [{group_label}] Assigned domains to {len(group_ucs)} use cases ({len(set(batch_domain_map.values()))} domains found)")
+            else:
+                self.logger.warning(f"⚠️ [{group_label}] Empty LLM response. Using 'Uncategorized'.")
+                for uc in group_ucs:
+                    uc_copy = uc.copy()
+                    uc_copy['Business Domain'] = 'Uncategorized'
+                    uc_copy['Subdomain'] = ''
+                    results.append(uc_copy)
+            return results
+
+        schema_groups = defaultdict(list)
+        for uc in use_cases:
+            prefix = _extract_schema_prefix(uc.get('Tables Involved', ''))
+            schema_groups[prefix].append(uc)
+        
+        self.logger.info(
+            f"📦 BATCHED DOMAIN DETECTION (generation-aligned): {len(use_cases)} use cases "
+            f"across {len(schema_groups)} schema groups"
+        )
+        for prefix, group_ucs in sorted(schema_groups.items(), key=lambda x: len(x[1]), reverse=True):
+            self.logger.info(f"   📁 {prefix}: {len(group_ucs)} use cases")
+
+        all_discovered_domains = set()
+        completed_assignments = []
+        effective_limit_chars = context_limit
+        effective_model = start_from_model
+        
+        for group_idx, (schema_prefix, group_ucs) in enumerate(sorted(schema_groups.items()), 1):
+            group_label = f"Schema{group_idx}_{schema_prefix.replace('.', '_')}"
+            self.logger.info(f"📍 GROUP {group_idx}/{len(schema_groups)}: '{schema_prefix}' ({len(group_ucs)} use cases)...")
+            
+            group_results = _detect_domains_for_group(
+                group_ucs, group_label, effective_limit_chars, effective_model, all_discovered_domains
+            )
+            completed_assignments.extend(group_results)
+        
+        if completed_assignments:
+            self.logger.info(
+                f"📦 BATCHED DOMAIN DETECTION COMPLETE: {len(completed_assignments)} use cases "
+                f"assigned to {len(all_discovered_domains)} domains"
+            )
+            return completed_assignments
+
+        self.logger.error("All schema-group domain detection attempts failed")
+        return None
 
     def _assign_default_domains(self, use_cases: list) -> list:
         """
@@ -26421,28 +30179,36 @@ Start your response with: {{{{"honesty_score":
                             prompt_vars['previous_violations'] = violation_summary
                             continue
                 
+                except CascadeRebatchError as cre:
+                    self.logger.warning(
+                        f"{log_prefix} Subdomain detection cascade rebatch needed after '{cre.failed_model_name}' failed. "
+                        f"Switching to context-splitting for model '{cre.target_model_name}' "
+                        f"(limit: {cre.target_context_limit_chars:,} chars)"
+                    )
+                    return self._detect_subdomains_with_context_splitting(
+                        domain_name, use_cases, language, prompt_template,
+                        cre.target_context_limit_chars, cre.target_model_endpoint
+                    )
+
                 except Exception as e:
-                    self.logger.error(f"{log_prefix} Subdomain detection attempt {attempt} failed: {e}")
+                    self.logger.error(f"{log_prefix} Subdomain detection attempt {attempt} failed: {get_clean_error_message(e)}")
                     if attempt == max_attempts:
                         self.logger.error(f"{log_prefix} Max attempts reached. Using DEFAULT subdomains as fallback...")
-                        # FALLBACK: Assign default subdomains "Sub Domain 1", "Sub Domain 2", etc.
                         fallback_use_cases = self._assign_default_subdomains(use_cases, domain_name)
                         self.logger.warning(f"{log_prefix} ✅ Fallback complete: Assigned default subdomains to {len(fallback_use_cases)} use cases")
                         return fallback_use_cases
             
-            # If we reach here without returning, use fallback
             self.logger.warning(f"{log_prefix} No subdomain assignments made. Using DEFAULT subdomains as fallback...")
             return self._assign_default_subdomains(use_cases, domain_name)
             
         except Exception as e:
-            self.logger.error(f"{log_prefix} Subdomain detection failed with error: {e}. Using DEFAULT subdomains as fallback...")
-            # FALLBACK: Assign default subdomains on any error
+            self.logger.error(f"{log_prefix} Subdomain detection failed with error: {get_clean_error_message(e)}. Using DEFAULT subdomains as fallback...")
             return self._assign_default_subdomains(use_cases, domain_name)
 
-    def _detect_subdomains_with_context_splitting(self, domain_name: str, use_cases: list, language: str, prompt_template: str, max_context_chars: int) -> list:
+    def _detect_subdomains_with_context_splitting(self, domain_name: str, use_cases: list, language: str, prompt_template: str, max_context_chars: int, start_from_model: str = None) -> list:
         """
         Handle subdomain detection when context exceeds max size by splitting into batches.
-        Processes each batch separately and merges results.
+        Processes each batch separately and merges results. Supports cascade rebatching.
         
         Args:
             domain_name: Name of the domain
@@ -26450,6 +30216,7 @@ Start your response with: {{{{"honesty_score":
             language: Output language
             prompt_template: The prompt template string
             max_context_chars: Maximum context size in characters
+            start_from_model: Optional model endpoint to start cascade from
             
         Returns:
             List of use cases with assigned subdomains
@@ -26460,114 +30227,178 @@ Start your response with: {{{{"honesty_score":
         
         log_prefix = f"[Domain: {domain_name}][Context Split]"
         
-        # Calculate how many use cases can fit in one batch
-        # Estimate average use case size in CSV format
-        sample_output = io.StringIO()
+        MAX_CASCADE_RETRIES = 3
+        effective_limit = max_context_chars
+        effective_start_model = start_from_model
         sample_fieldnames = ['No', 'Name', 'type', 'Analytics Technique', 'Statement', 'Solution', 
                             'Business Value', 'Beneficiary', 'Sponsor', 'Tables Involved']
-        sample_writer = csv.DictWriter(sample_output, fieldnames=sample_fieldnames, extrasaction='ignore')
-        sample_writer.writeheader()
-        if use_cases:
-            sample_writer.writerow(use_cases[0])
-        avg_use_case_size = len(sample_output.getvalue()) // max(1, 1)  # Size of header + 1 row
-        
-        # Calculate available space for use cases (subtract prompt template and buffer)
-        available_chars = max_context_chars - len(prompt_template) - 2000  # 2000 char buffer
-        batch_size = max(2, available_chars // max(1, avg_use_case_size))  # At least 2 use cases per batch
-        
-        self.logger.info(f"{log_prefix} Splitting {len(use_cases)} use cases into batches of ~{batch_size}")
-        
-        # Split use cases into batches
-        batches = []
-        for i in range(0, len(use_cases), batch_size):
-            batches.append(use_cases[i:i + batch_size])
-        
-        self.logger.info(f"{log_prefix} Created {len(batches)} batches for subdomain detection")
-        
-        # Process each batch and collect subdomain assignments
-        all_subdomain_assignments = {}  # uc_id -> subdomain
-        
-        for batch_idx, batch in enumerate(batches, start=1):
-            self.logger.info(f"{log_prefix} Processing batch {batch_idx}/{len(batches)} ({len(batch)} use cases)")
-            
-            try:
-                # Convert batch to CSV
-                batch_output = io.StringIO()
-                batch_writer = csv.DictWriter(batch_output, fieldnames=sample_fieldnames, extrasaction='ignore')
-                batch_writer.writeheader()
-                batch_writer.writerows(batch)
-                batch_csv = batch_output.getvalue()
-                
-                # Call LLM for this batch
-                max_attempts = (getattr(self, "max_retry_attempts", 1) or 0) + 1
-                prompt_vars = {
-                    "domain_name": domain_name,
-                    "use_cases_csv": batch_csv,
-                    "output_language": language,
-                    "business_name": self.business_name,
-                    "industries": ", ".join(self.industries) if hasattr(self, 'industries') and self.industries else "General Business",
-                    "business_context": self._get_business_context_fallback(),
-                    "previous_violations": ""
-                }
-                
-                batch_success = False
-                for attempt in range(1, max_attempts + 1):
-                    try:
-                        response_raw = self.ai_agent.run_worker(
-                            step_name=f"Detect_Subdomains_{domain_name}_Batch{batch_idx}_{language}_Attempt{attempt}",
-                            worker_prompt_path="SUBDOMAIN_DETECTOR_PROMPT",
-                            prompt_vars=prompt_vars,
-                            response_schema=None,
-                            timeout_override=self.llm_timeout_seconds
-                        )
-                        
-                        if not response_raw or len(response_raw.strip()) == 0:
-                            raise ValueError("LLM returned empty response")
-                        
-                        response_clean = clean_json_response(response_raw)
-                        if not response_clean or len(response_clean.strip()) == 0:
-                            raise ValueError("Cleaned response is empty")
-                        
-                        # Parse CSV response
-                        csv_rows = CSVParser.parse_csv_string(
-                            response_clean,
-                            logger=self.logger,
-                            context=f"Subdomain detection batch {batch_idx}"
-                        )
-                        
-                        # Extract subdomain assignments
-                        for row in csv_rows:
-                            uc_id_raw = row.get('use_case_id', '') or ''
-                            subdomain_raw = row.get('subdomain', '') or ''
-                            uc_id = str(uc_id_raw).strip()
-                            subdomain = str(subdomain_raw).strip()
-                            if uc_id and subdomain:
-                                all_subdomain_assignments[uc_id] = subdomain
-                        
-                        batch_success = True
-                        self.logger.info(f"{log_prefix} Batch {batch_idx} completed successfully")
-                        break
-                        
-                    except Exception as attempt_err:
-                        self.logger.warning(f"{log_prefix} Batch {batch_idx} attempt {attempt} failed: {attempt_err}")
-                        if attempt == max_attempts:
-                            self.logger.error(f"{log_prefix} Batch {batch_idx} failed after {max_attempts} attempts")
-                
-                if not batch_success:
-                    # Assign default subdomains for failed batch
+
+        all_subdomain_assignments = {}
+        _sub_lock = threading.Lock()
+        remaining_use_cases = list(use_cases)
+
+        for cascade_retry in range(MAX_CASCADE_RETRIES):
+            if not remaining_use_cases:
+                break
+
+            sample_output = io.StringIO()
+            sample_writer = csv.DictWriter(sample_output, fieldnames=sample_fieldnames, extrasaction='ignore')
+            sample_writer.writeheader()
+            if remaining_use_cases:
+                sample_writer.writerow(remaining_use_cases[0])
+            avg_use_case_size = max(100, len(sample_output.getvalue()))
+
+            available_chars = effective_limit - len(prompt_template) - 2000
+            batch_size = max(2, available_chars // max(1, avg_use_case_size))
+
+            self.logger.info(
+                f"{log_prefix} Splitting {len(remaining_use_cases)} use cases into batches of ~{batch_size} "
+                f"(context limit: {effective_limit:,} chars, model: {effective_start_model or 'default cascade'}, "
+                f"already assigned: {len(all_subdomain_assignments)})"
+            )
+
+            batches = []
+            for i in range(0, len(remaining_use_cases), batch_size):
+                batches.append(remaining_use_cases[i:i + batch_size])
+
+            self.logger.info(f"{log_prefix} Created {len(batches)} batches for subdomain detection")
+
+            num_batches = len(batches)
+            cascade_rebatch_triggered = False
+            cascade_rebatch_error = None
+
+            def _process_subdomain_batch(batch_idx, batch, _start_model=effective_start_model):
+                self.logger.info(f"{log_prefix} Processing batch {batch_idx}/{num_batches} ({len(batch)} use cases)")
+                local_assignments = {}
+                try:
+                    batch_output = io.StringIO()
+                    batch_writer = csv.DictWriter(batch_output, fieldnames=sample_fieldnames, extrasaction='ignore')
+                    batch_writer.writeheader()
+                    batch_writer.writerows(batch)
+                    batch_csv = batch_output.getvalue()
+
+                    max_attempts = (getattr(self, "max_retry_attempts", 1) or 0) + 1
+                    prompt_vars = {
+                        "domain_name": domain_name,
+                        "use_cases_csv": batch_csv,
+                        "output_language": language,
+                        "business_name": self.business_name,
+                        "industries": ", ".join(self.industries) if hasattr(self, 'industries') and self.industries else "General Business",
+                        "business_context": self._get_business_context_fallback(),
+                        "previous_violations": ""
+                    }
+
+                    batch_success = False
+                    for attempt in range(1, max_attempts + 1):
+                        try:
+                            response_raw = self.ai_agent.run_worker(
+                                step_name=f"Detect_Subdomains_{domain_name}_Batch{batch_idx}_{language}_Attempt{attempt}",
+                                worker_prompt_path="SUBDOMAIN_DETECTOR_PROMPT",
+                                prompt_vars=prompt_vars,
+                                response_schema=None,
+                                timeout_override=self.llm_timeout_seconds,
+                                start_from_model=_start_model
+                            )
+
+                            if not response_raw or len(response_raw.strip()) == 0:
+                                raise ValueError("LLM returned empty response")
+
+                            response_clean = clean_json_response(response_raw)
+                            if not response_clean or len(response_clean.strip()) == 0:
+                                raise ValueError("Cleaned response is empty")
+
+                            csv_rows = CSVParser.parse_csv_string(
+                                response_clean,
+                                logger=self.logger,
+                                context=f"Subdomain detection batch {batch_idx}"
+                            )
+
+                            for row in csv_rows:
+                                uc_id_raw = row.get('use_case_id', '') or ''
+                                subdomain_raw = row.get('subdomain', '') or ''
+                                uc_id = str(uc_id_raw).strip()
+                                subdomain = str(subdomain_raw).strip()
+                                if uc_id and subdomain:
+                                    local_assignments[uc_id] = subdomain
+
+                            batch_success = True
+                            self.logger.info(f"{log_prefix} Batch {batch_idx} completed successfully")
+                            break
+
+                        except CascadeRebatchError:
+                            raise
+                        except Exception as attempt_err:
+                            self.logger.warning(f"{log_prefix} Batch {batch_idx} attempt {attempt} failed: {attempt_err}")
+                            if attempt == max_attempts:
+                                self.logger.error(f"{log_prefix} Batch {batch_idx} failed after {max_attempts} attempts")
+
+                    if not batch_success:
+                        for uc in batch:
+                            uc_id = str(uc.get('No', '')).strip()
+                            if uc_id:
+                                local_assignments.setdefault(uc_id, f"General {domain_name}")
+
+                except CascadeRebatchError:
+                    raise
+                except Exception as batch_err:
+                    self.logger.error(f"{log_prefix} Batch {batch_idx} processing error: {batch_err}")
                     for uc in batch:
                         uc_id = str(uc.get('No', '')).strip()
-                        if uc_id and uc_id not in all_subdomain_assignments:
-                            all_subdomain_assignments[uc_id] = f"General {domain_name}"
-                            
-            except Exception as batch_err:
-                self.logger.error(f"{log_prefix} Batch {batch_idx} processing error: {batch_err}")
-                for uc in batch:
-                    uc_id = str(uc.get('No', '')).strip()
-                    if uc_id and uc_id not in all_subdomain_assignments:
-                        all_subdomain_assignments[uc_id] = f"General {domain_name}"
-        
-        # Apply subdomain assignments to use cases
+                        if uc_id:
+                            local_assignments.setdefault(uc_id, f"General {domain_name}")
+
+                with _sub_lock:
+                    all_subdomain_assignments.update(local_assignments)
+
+            batch_workers = min(4, num_batches)
+            try:
+                if num_batches <= 1:
+                    _process_subdomain_batch(1, batches[0]) if batches else None
+                else:
+                    _sb_total_timeout = self.llm_timeout_seconds * 3 * len(batches) + 120
+                    with _SafeExecutorContext(max_workers=batch_workers, thread_name_prefix="sub_batch", logger=self.logger, name="SubdomainBatch") as ctx:
+                        sb_futures = [ctx.submit(_process_subdomain_batch, i, b) for i, b in enumerate(batches, 1)]
+                        try:
+                            for f in safe_as_completed(sb_futures, timeout=_sb_total_timeout):
+                                try:
+                                    f.result(timeout=self.llm_timeout_seconds * 3)
+                                except CascadeRebatchError as cre:
+                                    cascade_rebatch_triggered = True
+                                    cascade_rebatch_error = cre
+                                    ctx.mark_timed_out()
+                                    for remaining_f in sb_futures:
+                                        if not remaining_f.done():
+                                            remaining_f.cancel()
+                                    break
+                                except Exception as exc:
+                                    self.logger.error(f"{log_prefix} Subdomain batch task failed: {get_clean_error_message(exc)}")
+                        except concurrent.futures.TimeoutError:
+                            ctx.mark_timed_out()
+                            self.logger.error(f"{log_prefix} Subdomain batch timed out globally ({_sb_total_timeout}s)")
+            except CascadeRebatchError as cre:
+                cascade_rebatch_triggered = True
+                cascade_rebatch_error = cre
+
+            if cascade_rebatch_triggered and cascade_rebatch_error:
+                effective_limit = cascade_rebatch_error.target_context_limit_chars
+                effective_start_model = cascade_rebatch_error.target_model_endpoint
+                remaining_use_cases = [
+                    uc for uc in remaining_use_cases
+                    if str(uc.get('No', '')).strip() not in all_subdomain_assignments
+                ]
+                self.logger.warning(
+                    f"{log_prefix} CASCADE RETRY {cascade_retry + 1}/{MAX_CASCADE_RETRIES}: "
+                    f"Rebatching {len(remaining_use_cases)} remaining use cases for model "
+                    f"'{cascade_rebatch_error.target_model_name}' (limit: {effective_limit:,} chars, "
+                    f"already assigned: {len(all_subdomain_assignments)})"
+                )
+                if not remaining_use_cases:
+                    self.logger.info(f"{log_prefix} All use cases assigned despite cascade error")
+                    break
+                continue
+
+            break
+
         result = []
         for uc in use_cases:
             uc_copy = uc.copy()
@@ -26575,16 +30406,15 @@ Start your response with: {{{{"honesty_score":
             subdomain = all_subdomain_assignments.get(uc_id, f"General {domain_name}")
             uc_copy['Subdomain'] = subdomain
             result.append(uc_copy)
-        
-        # Log statistics
+
         subdomain_counts = defaultdict(int)
         for uc in result:
             subdomain_counts[uc.get('Subdomain', 'Unknown')] += 1
-        
+
         self.logger.info(f"{log_prefix} Context splitting complete: {len(result)} use cases assigned to {len(subdomain_counts)} subdomains")
         for subdomain, count in sorted(subdomain_counts.items(), key=lambda x: -x[1]):
             self.logger.debug(f"{log_prefix}   - {subdomain}: {count} use cases")
-        
+
         return result
 
     def _report_table_statistics(self, use_cases: list):
@@ -26636,7 +30466,7 @@ Start your response with: {{{{"honesty_score":
             self.logger.info(f"Table Statistics: {total_included}/{total_available} tables included ({pct_included:.1f}%), {total_excluded} excluded ({pct_excluded:.1f}%)")
             
         except Exception as e:
-            self.logger.error(f"Failed to generate table statistics report: {e}")
+            self.logger.error(f"Failed to generate table statistics report: {get_clean_error_message(e)}")
     
     def _priority_sort_key(self, use_case: dict) -> tuple:
         """
@@ -26776,7 +30606,7 @@ Start your response with: {{{{"honesty_score":
                 self.logger.info(f"✅ [{i}/{total_domains}] Notebook '{notebook_name}' completed successfully")
                 return (i, notebook_name, True)
             except Exception as e:
-                self.logger.error(f"❌ [{i}/{total_domains}] Notebook '{notebook_name}' failed: {e}")
+                self.logger.error(f"❌ [{i}/{total_domains}] Notebook '{notebook_name}' failed: {get_clean_error_message(e)}")
                 return (i, notebook_name, False)
         
         # ADAPTIVE PARALLELISM: Calculate based on number of domains and use cases
@@ -26791,14 +30621,14 @@ Start your response with: {{{{"honesty_score":
         log_adaptive_parallelism_decision("notebook_generation", notebook_parallelism, self.max_parallelism, reason)
         
         _notebook_total_timeout = max(600, total_domains * 120)
-        with ThreadPoolExecutor(max_workers=notebook_parallelism, thread_name_prefix="NotebookGen") as executor:
+        with _SafeExecutorContext(max_workers=notebook_parallelism, thread_name_prefix="NotebookGen", logger=self.logger, name="NotebookGen") as ctx:
             domain_data_list = [(i, domain_name) for i, domain_name in enumerate(sorted_domain_names, start=1)]
-            futures = [executor.submit(create_notebook_for_domain, domain_data) for domain_data in domain_data_list]
+            futures = [ctx.submit(create_notebook_for_domain, domain_data) for domain_data in domain_data_list]
             
             completed_count = 0
             failed_count = 0
             try:
-                for future in concurrent.futures.as_completed(futures, timeout=_notebook_total_timeout):
+                for future in safe_as_completed(futures, timeout=_notebook_total_timeout):
                     try:
                         i, notebook_name, success = future.result()
                         if success:
@@ -26809,8 +30639,9 @@ Start your response with: {{{{"honesty_score":
                             log_print(f"   ❌ Notebook {i}/{total_domains} failed: {notebook_name}")
                     except Exception as e:
                         failed_count += 1
-                        self.logger.error(f"Notebook generation future failed: {e}")
+                        self.logger.error(f"Notebook generation future failed: {get_clean_error_message(e)}")
             except concurrent.futures.TimeoutError:
+                ctx.mark_timed_out()
                 self.logger.error(f"⏱️ Notebook generation total timeout after {_notebook_total_timeout}s.")
                 for future in futures:
                     if not future.done():
@@ -27019,13 +30850,12 @@ Start your response with: {{{{"honesty_score":
             return self._prepare_example_result(columns, statement.manifest.schema.columns, row_data, use_case_id)
             
         except Exception as e:
-            import traceback
-            self.logger.warning(f"Could not execute query for example results (use case {use_case_id}): {str(e)[:200]}")
-            self.logger.debug(f"Full traceback for {use_case_id}: {traceback.format_exc()}")
+            clean_err = get_clean_error_message(e)
+            self.logger.warning(f"Could not execute query for example results (use case {use_case_id}): {clean_err[:200]}")
             return {
                 'status': 'error',
                 'data': [],
-                'message': f'Query execution error: {str(e)[:100]}'
+                'message': f'Query execution error: {clean_err[:200]}'
             }
 
     def execute_sql_with_fixing(self, use_case: dict, directly_involved_schema: str = "") -> dict:
@@ -27049,6 +30879,19 @@ Start your response with: {{{{"honesty_score":
         use_case_id = use_case.get('No', 'Unknown')
         sql_query = use_case.get('SQL', '')
         tables_involved_str = use_case.get('Tables Involved', '')
+        
+        # Rebuild schema if empty — the fix LLM needs real columns to correct hallucinations
+        if not directly_involved_schema:
+            directly_involved_schema = use_case.get('_directly_involved_schema', '') or use_case.get('directly_involved_schema', '')
+        if not directly_involved_schema and self.data_loader and hasattr(self.data_loader, 'db_details_cache') and self.data_loader.db_details_cache:
+            involved_tables_raw = use_case.get('_directly_involved_tables') or []
+            if involved_tables_raw:
+                normalized_involved = set(self._normalize_table_name(t) for t in involved_tables_raw)
+                rebuild_details = [d for d in self.data_loader.db_details_cache
+                                   if self._normalize_table_name(f"{d[0]}.{d[1]}.{d[2]}") in normalized_involved]
+                if rebuild_details:
+                    directly_involved_schema = self._format_schema_for_prompt(rebuild_details, load_column_tracking=True)
+                    self.logger.info(f"[{use_case_id}] Sample fix: rebuilt schema with {len(rebuild_details)} columns ({len(directly_involved_schema):,} chars)")
         
         if not sql_query:
             return {
@@ -27086,6 +30929,7 @@ Start your response with: {{{{"honesty_score":
         }
         
         adaptive_timeout = self._calculate_adaptive_sql_timeout(use_case)
+        skip_llm_cache = bool(use_case.get('_skip_llm_cache'))
         
         try:
             fixed_sql = self.ai_agent.run_worker(
@@ -27094,10 +30938,12 @@ Start your response with: {{{{"honesty_score":
                 prompt_vars=reviewer_prompt_vars,
                 response_schema=None,
                 timeout_override=adaptive_timeout,
-                max_retries_override=self.max_retry_attempts
+                max_retries_override=self.max_retry_attempts,
+                skip_cache=skip_llm_cache
             )
             
             result_table = use_case.get('result_table', '')
+            fixed_sql, _ = self._extract_sql_and_columns_from_response(fixed_sql)
             fixed_sql = self._apply_sql_auto_fixes(fixed_sql, use_case_id, result_table)
 
             exec_result_fixed = self.execute_query_for_example(fixed_sql, use_case_id)
@@ -27165,9 +31011,11 @@ Start your response with: {{{{"honesty_score":
                 prompt_vars=regeneration_prompt_vars,
                 response_schema=None,
                 timeout_override=adaptive_timeout,
-                max_retries_override=self.max_retry_attempts
+                max_retries_override=self.max_retry_attempts,
+                skip_cache=skip_llm_cache
             )
             
+            regenerated_sql, _ = self._extract_sql_and_columns_from_response(regenerated_sql)
             regenerated_sql = self._apply_sql_auto_fixes(regenerated_sql, use_case_id, result_table)
 
             exec_result_regen = self.execute_query_for_example(regenerated_sql, use_case_id)
@@ -27201,9 +31049,11 @@ Start your response with: {{{{"honesty_score":
                 prompt_vars=reviewer_prompt_vars_final,
                 response_schema=None,
                 timeout_override=adaptive_timeout,
-                max_retries_override=self.max_retry_attempts
+                max_retries_override=self.max_retry_attempts,
+                skip_cache=skip_llm_cache
             )
             
+            final_fixed_sql, _ = self._extract_sql_and_columns_from_response(final_fixed_sql)
             final_fixed_sql = self._apply_sql_auto_fixes(final_fixed_sql, use_case_id, result_table)
 
             exec_result_final = self.execute_query_for_example(final_fixed_sql, use_case_id)
@@ -27299,7 +31149,7 @@ Start your response with: {{{{"honesty_score":
         total_queries = len(use_cases_to_validate)
         self.logger.info(f"🔄 Validating and caching {total_queries} SQL queries in parallel (max {self.max_parallelism} concurrent)... Reused {reused_cached} cached results.")
         log_print(f"🔄 Validating and caching {total_queries} SQL queries in parallel (max {self.max_parallelism} concurrent)...")
-        log_print(f"   ⏱️  Each query takes ~5-10 seconds. Estimated time: {(total_queries * 7 / max(self.max_parallelism, 1) / 60):.1f} minutes")
+        log_print(f"   ⏱️  Each query takes ~5-10 seconds. Estimated time: {(total_queries * 7 / self.max_parallelism / 60):.1f} minutes")
         
         # Define worker function for parallel execution
         def validate_and_cache_worker(idx_uc_tuple):
@@ -27323,8 +31173,9 @@ Start your response with: {{{{"honesty_score":
                         message_map[use_case_id] = cached_result.get('message', '')
                         self.logger.info(f"Using cached SQL result for {use_case_id}; skipping re-execution.")
                         return (use_case_id, status_value, cached_result.get('message', ''))
-                # Execute SQL with automatic fixing
-                result = self.execute_sql_with_fixing(uc)
+                # Execute SQL with automatic fixing — pass schema so fix LLM knows real columns
+                uc_schema = uc.get('_directly_involved_schema', '') or uc.get('directly_involved_schema', '')
+                result = self.execute_sql_with_fixing(uc, directly_involved_schema=uc_schema)
                 status_value = 'success' if result['status'] != 'error' else 'error'
                 status_map[use_case_id] = status_value
                 message_map[use_case_id] = result.get('message', '')
@@ -27358,12 +31209,12 @@ Start your response with: {{{{"honesty_score":
         log_adaptive_parallelism_decision("sql_validation", validation_parallelism, self.max_parallelism, reason)
         
         _sql_val_total_timeout = max(600, len(use_cases_to_validate) * 180)
-        with ThreadPoolExecutor(max_workers=validation_parallelism, thread_name_prefix="SQLValidator") as executor:
-            futures = {executor.submit(validate_and_cache_worker, idx_uc): idx_uc for idx_uc in use_cases_to_validate}
+        with _SafeExecutorContext(max_workers=validation_parallelism, thread_name_prefix="SQLValidator", logger=self.logger, name="SQLValidator") as ctx:
+            futures = {ctx.submit(validate_and_cache_worker, idx_uc): idx_uc for idx_uc in use_cases_to_validate}
             
             completed = 0
             try:
-                for future in as_completed(futures, timeout=_sql_val_total_timeout):
+                for future in safe_as_completed(futures, timeout=_sql_val_total_timeout):
                     completed += 1
                     try:
                         use_case_id, status, message = future.result(timeout=180)
@@ -27374,6 +31225,7 @@ Start your response with: {{{{"honesty_score":
                     except Exception as e:
                         self.logger.error(f"Query validation task failed: {str(e)[:100]}")
             except concurrent.futures.TimeoutError:
+                ctx.mark_timed_out()
                 self.logger.error(f"⏱️ SQL validation total timeout after {_sql_val_total_timeout}s. Completed {completed}/{total_queries}.")
                 for future in futures:
                     if not future.done():
@@ -27388,20 +31240,21 @@ Start your response with: {{{{"honesty_score":
             retry_workers = max(1, self.max_parallelism // 2)
             self.logger.warning(f"⚠️  Retrying {len(timeout_ids)} timeout failures with reduced parallelism ({retry_workers})...")
             _retry_total_timeout = max(600, len(timeout_ids) * 180)
-            with ThreadPoolExecutor(max_workers=retry_workers, thread_name_prefix="SQLValidatorRetry") as executor:
+            with _SafeExecutorContext(max_workers=retry_workers, thread_name_prefix="SQLValidatorRetry", logger=self.logger, name="SQLValidatorRetry") as ctx:
                 retry_futures = {
-                    executor.submit(validate_and_cache_worker, (idx, uc_lookup[uc_id])): uc_id
+                    ctx.submit(validate_and_cache_worker, (idx, uc_lookup[uc_id])): uc_id
                     for idx, uc in use_cases_to_validate
                     for uc_id in [uc.get('No', f'UC-{idx}')]
                     if uc_id in timeout_ids
                 }
                 try:
-                    for future in as_completed(retry_futures, timeout=_retry_total_timeout):
+                    for future in safe_as_completed(retry_futures, timeout=_retry_total_timeout):
                         try:
                             future.result(timeout=180)
                         except Exception as e:
                             self.logger.error(f"Retry validation task failed: {str(e)[:100]}")
                 except concurrent.futures.TimeoutError:
+                    ctx.mark_timed_out()
                     self.logger.error(f"⏱️ SQL validation retry total timeout after {_retry_total_timeout}s.")
                     for future in retry_futures:
                         if not future.done():
@@ -27490,7 +31343,7 @@ Start your response with: {{{{"honesty_score":
                     logger_instance.info("Successfully installed weasyprint.")
                     return True
                 except Exception as e: 
-                    logger_instance.error(f"Failed to install weasyprint: {e}")
+                    logger_instance.error(f"Failed to install weasyprint: {get_clean_error_message(e)}")
                     print("ERROR: Failed to install 'weasyprint'. PDF generation cannot continue.", file=sys.stderr)
                     return False
 
@@ -27938,6 +31791,7 @@ Start your response with: {{{{"honesty_score":
                     html_parts.append(f"<p><strong>{e(t['statement'])}:</strong> {e(uc.get('Statement', 'N/A'))}</p>")
                     html_parts.append(f"<p><strong>{e(t['solution'])}:</strong> {e(uc.get('Solution', 'N/A'))}</p>")
                     html_parts.append(f"<p><strong>{e(t['business_value'])}:</strong> {e(uc.get('Business Value', 'N/A'))}</p>")
+                    html_parts.append(f"<p><strong>{e(t.get('quality_reasons', 'Quality Reasons'))}:</strong> {e(uc.get('Quality Summary', 'N/A'))}</p>")
                     html_parts.append(f"<p><strong>{e(t['beneficiary'])}:</strong> {e(uc.get('Beneficiary', 'N/A'))}</p>")
                     html_parts.append(f"<p><strong>{e(t['sponsor'])}:</strong> {e(uc.get('Sponsor', 'N/A'))}</p>")
                     html_parts.append(f"<p><strong>{e(t.get('business_priority_alignment', 'Business Priority Alignment'))}:</strong> {e(translate_strategic_value(uc.get('Business Priority Alignment', 'General Improvement')))}</p>")
@@ -27976,9 +31830,7 @@ Start your response with: {{{{"honesty_score":
                 logger_instance.info(f"Success! PDF Catalog uploaded to: {abs_path}")
                 log_print(f"Success! PDF Catalog ({language}) generated: {abs_path}")
             except Exception as e:
-                import traceback
-                logger_instance.critical(f"Failed to generate and save PDF for {language}: {e}")
-                logger_instance.critical(f"Full traceback: {traceback.format_exc()}")
+                logger_instance.critical(f"Failed to generate and save PDF for {language}: {get_clean_error_message(e)}")
             finally:
                 if local_pdf_path and os.path.exists(local_pdf_path): os.remove(local_pdf_path)
 
@@ -27995,7 +31847,7 @@ Start your response with: {{{{"honesty_score":
             pdf_workspace_path = os.path.join(self.docs_output_dir, f"{self.business_name}-dbx_inspire_{lang_abbr}.pdf")
             _save_pdf(final_html, pdf_workspace_path, self.logger)
         except Exception as e:
-            self.logger.critical(f"An error occurred during PDF generation for {language}: {e}")
+            self.logger.critical(f"An error occurred during PDF generation for {language}: {get_clean_error_message(e)}")
 
     # === MODIFIED: PPTX Generation (Req 1, 2, 4, 5, 6) ===
     def generate_presentation_pptx(self, language: str, lang_abbr: str, translations: dict, summary_dict: dict, grouped_data: dict, transliterated_name: str):
@@ -28017,7 +31869,7 @@ Start your response with: {{{{"honesty_score":
                     self.logger.info("Successfully installed python-pptx.")
                     return True
                 except Exception as e: 
-                    logger_instance.error(f"Failed to install python-pptx: {e}")
+                    logger_instance.error(f"Failed to install python-pptx: {get_clean_error_message(e)}")
                     print("ERROR: Failed to install 'python-pptx'. Presentation generation cannot continue.", file=sys.stderr)
                     return False
 
@@ -28030,7 +31882,7 @@ Start your response with: {{{{"honesty_score":
                 from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
                 from pptx.enum.shapes import MSO_SHAPE
             except ImportError as e:
-                logger_instance.error(f"FATAL: python-pptx import failed inside _build_presentation: {e}. Aborting PPTX generation.")
+                logger_instance.error(f"FATAL: python-pptx import failed inside _build_presentation: {get_clean_error_message(e)}. Aborting PPTX generation.")
                 return
             
             DATABRICKS_BLUE = RGBColor(0, 51, 102); DATABRICKS_ORANGE = RGBColor(255, 105, 0); TEXT_COLOR = RGBColor(0x33, 0x33, 0x33)
@@ -28059,7 +31911,7 @@ Start your response with: {{{{"honesty_score":
                     p.font.size = Pt(10); p.font.color.rgb = FOOTER_COLOR
                     p.alignment = PP_ALIGN.CENTER if is_rtl else PP_ALIGN.RIGHT
                 except Exception as e:
-                    logger_instance.warning(f"Failed to add footer to slide: {e}")
+                    logger_instance.warning(f"Failed to add footer to slide: {get_clean_error_message(e)}")
 
             # Enhanced title slide with decorative shapes
             logger_instance.info("Building Title Slide...") 
@@ -28368,6 +32220,7 @@ Start your response with: {{{{"honesty_score":
                     add_detail_line(content_frame, 'statement', uc.get('Statement', 'N/A'), align, is_first=True)
                     add_detail_line(content_frame, 'solution', uc.get('Solution', 'N/A'), align)
                     add_detail_line(content_frame, 'business_value', uc.get('Business Value', 'N/A'), align)
+                    add_detail_line(content_frame, 'quality_reasons', uc.get('Quality Summary', 'N/A'), align)
                     add_detail_line(content_frame, 'beneficiary', uc.get('Beneficiary', 'N/A'), align)
                     add_detail_line(content_frame, 'sponsor', uc.get('Sponsor', 'N/A'), align)
                     # Add Business Priority Alignment
@@ -28393,7 +32246,7 @@ Start your response with: {{{{"honesty_score":
                 prs.save(local_pptx_path)
                 logger_instance.info(f"Presentation saved locally to {local_pptx_path}")
                 _save_pptx(local_pptx_path, workspace_path, logger_instance)
-            except Exception as e: logger_instance.error(f"Failed to save or upload PPTX: {e}")
+            except Exception as e: logger_instance.error(f"Failed to save or upload PPTX: {get_clean_error_message(e)}")
             finally:
                 if local_pptx_path and os.path.exists(local_pptx_path): os.remove(local_pptx_path)
 
@@ -28407,7 +32260,7 @@ Start your response with: {{{{"honesty_score":
                 abs_path = self.w_client.workspace.get_status(workspace_path).path
                 logger_instance.info(f"Success! Presentation uploaded to: {abs_path}")
                 log_print(f"Success! Presentation ({language}) generated: {abs_path}")
-            except Exception as e: logger_instance.critical(f"Failed to save and upload PPTX: {e}")
+            except Exception as e: logger_instance.critical(f"Failed to save and upload PPTX: {get_clean_error_message(e)}")
 
         # --- Main execution logic for generate_presentation_pptx ---
         try:
@@ -28421,7 +32274,7 @@ Start your response with: {{{{"honesty_score":
             pptx_workspace_path = os.path.join(self.docs_output_dir, f"{self.business_name}-dbx_inspire_{lang_abbr}.pptx")
             _build_presentation(grouped_data, summary_dict, transliterated_name, t, pptx_workspace_path, self.logger, is_rtl)
         except Exception as e:
-            self.logger.critical(f"An error occurred during PPTX generation for {language}: {e}")
+            self.logger.critical(f"An error occurred during PPTX generation for {language}: {get_clean_error_message(e)}")
     
     def _install_excel_dependencies(self, logger_instance) -> bool:
         """Installs xlsxwriter if not present."""
@@ -28437,7 +32290,7 @@ Start your response with: {{{{"honesty_score":
                 logger_instance.info("Successfully installed xlsxwriter.")
                 return True
             except Exception as e:
-                logger_instance.error(f"Failed to install xlsxwriter: {e}")
+                logger_instance.error(f"Failed to install xlsxwriter: {get_clean_error_message(e)}")
                 print("ERROR: Failed to install 'xlsxwriter'. Excel generation cannot continue.", file=sys.stderr)
                 return False
 
@@ -28456,7 +32309,7 @@ Start your response with: {{{{"honesty_score":
             logger_instance.info(f"Success! Excel Catalog uploaded to: {abs_path}")
             log_print(f"Success! Excel Catalog ({language}) generated: {abs_path}")
         except Exception as e:
-            logger_instance.critical(f"Failed to save and upload Excel: {e}")
+            logger_instance.critical(f"Failed to save and upload Excel: {get_clean_error_message(e)}")
 
     def _generate_use_case_excel(self, language: str, lang_abbr: str, grouped_data: dict):
         warnings.filterwarnings('ignore', module='xlsxwriter')
@@ -28491,38 +32344,40 @@ Start your response with: {{{{"honesty_score":
                         safe_str(uc.get('Business Domain'), 'N/A'),                    # 1 - Business Domain (B)
                         safe_str(uc.get('Subdomain'), 'N/A'),                          # 2 - Subdomain (C)
                         safe_str(uc.get('Name'), 'N/A'),                               # 3 - Use Case (D)
-                        safe_str(uc.get('type'), 'N/A'),                               # 4 - Type (E)
-                        safe_str(uc.get('Analytics Technique'), 'N/A'),                # 5 - Analytics Technique (F)
-                        safe_str(uc.get('Business Priority Alignment'), 'General Improvement'),  # 6 - Business Priority Alignment (G)
-                        safe_str(uc.get('Strategic Goals Alignment'), 'General Improvement'),    # 7 - Strategic Goals Alignment (H)
-                        safe_str(uc.get('Statement'), 'N/A'),                          # 8 - Statement (I)
-                        safe_str(uc.get('Solution'), 'N/A'),                           # 9 - Solution (J)
-                        safe_str(uc.get('Business Value'), 'N/A'),                     # 10 - Business Value (K)
-                        safe_str(uc.get('Beneficiary'), 'N/A'),                        # 11 - Beneficiary (L)
-                        safe_str(uc.get('Sponsor'), 'N/A'),                            # 12 - Sponsor (M)
-                        safe_str(uc.get('Tables Involved'), 'N/A'),                    # 13 - Tables Involved (N)
-                        uc.get('Strategic Alignment', 0),                              # 14 - Strategic Alignment (O)
-                        uc.get('Return on Investment', 0),                             # 15 - ROI (P)
-                        uc.get('Reusability', 0),                                      # 16 - Reusability (Q)
-                        uc.get('Time to Value', 0),                                    # 17 - Time to Value (R)
-                        uc.get('Data Availability', 0),                                # 18 - Data Availability (S)
-                        uc.get('Data Accessibility', 0),                               # 19 - Data Accessibility (T)
-                        uc.get('Architecture Fitness', 0),                             # 20 - Architecture Fitness (U)
-                        uc.get('Team Skills', 0),                                      # 21 - Team Skills (V)
-                        uc.get('Domain Knowledge', 0),                                 # 22 - Domain Knowledge (W)
-                        uc.get('People Allocation', 0),                                # 23 - People Allocation (X)
-                        uc.get('Budget Allocation', 0),                                # 24 - Budget Allocation (Y)
-                        uc.get('Time to Production', 0),                               # 25 - Time to Production (Z)
-                        uc.get('Value', 0),                                            # 26 - Value (AA)
-                        uc.get('Feasibility', 0),                                      # 27 - Feasibility (AB)
-                        uc.get('Priority', 0),                                         # 28 - Priority (AC)
-                        safe_str(uc.get('Quality'), 'N/A'),                            # 29 - Quality (AD) - right after Priority
-                        safe_str(uc.get('Justification'), 'N/A'),                      # 30 - Justification (AE)
-                        safe_str(uc.get('result_table'), 'N/A')                        # 31 - Result Table (AF)
+                        safe_str(uc.get('generated', 'N/A'), 'N/A'),                   # 4 - SQL Generated (E)
+                        safe_str(uc.get('type'), 'N/A'),                               # 5 - Type (F)
+                        safe_str(uc.get('Analytics Technique'), 'N/A'),                # 6 - Analytics Technique (G)
+                        safe_str(uc.get('Business Priority Alignment'), 'General Improvement'),  # 7 - Business Priority Alignment (H)
+                        safe_str(uc.get('Strategic Goals Alignment'), 'General Improvement'),    # 8 - Strategic Goals Alignment (I)
+                        safe_str(uc.get('Statement'), 'N/A'),                          # 9 - Statement (J)
+                        safe_str(uc.get('Solution'), 'N/A'),                           # 10 - Solution (K)
+                        safe_str(uc.get('Business Value'), 'N/A'),                     # 11 - Business Value (L)
+                        safe_str(uc.get('Beneficiary'), 'N/A'),                        # 12 - Beneficiary (M)
+                        safe_str(uc.get('Sponsor'), 'N/A'),                            # 13 - Sponsor (N)
+                        safe_str(uc.get('Tables Involved'), 'N/A'),                    # 14 - Tables Involved (O)
+                        safe_str(uc.get('Primary Table'), 'N/A'),                      # 15 - Primary Table (P)
+                        uc.get('Strategic Alignment', 0),                              # 16 - Strategic Alignment (Q)
+                        uc.get('Return on Investment', 0),                             # 17 - ROI (R)
+                        uc.get('Reusability', 0),                                      # 18 - Reusability (S)
+                        uc.get('Time to Value', 0),                                    # 19 - Time to Value (T)
+                        uc.get('Data Availability', 0),                                # 20 - Data Availability (U)
+                        uc.get('Data Accessibility', 0),                               # 21 - Data Accessibility (V)
+                        uc.get('Architecture Fitness', 0),                             # 22 - Architecture Fitness (W)
+                        uc.get('Team Skills', 0),                                      # 23 - Team Skills (X)
+                        uc.get('Domain Knowledge', 0),                                 # 24 - Domain Knowledge (Y)
+                        uc.get('People Allocation', 0),                                # 25 - People Allocation (Z)
+                        uc.get('Budget Allocation', 0),                                # 26 - Budget Allocation (AA)
+                        uc.get('Time to Production', 0),                               # 27 - Time to Production (AB)
+                        uc.get('Value', 0),                                            # 28 - Value (AC)
+                        uc.get('Feasibility', 0),                                      # 29 - Feasibility (AD)
+                        uc.get('Priority', 0),                                         # 30 - Priority (AE)
+                        safe_str(uc.get('Quality'), 'N/A'),                            # 31 - Quality (AF)
+                        safe_str(uc.get('Justification'), 'N/A'),                      # 32 - Priority Reasons (AG)
+                        safe_str(uc.get('Quality Summary'), 'N/A'),                    # 33 - Quality Reasons (AH)
+                        safe_str(uc.get('result_table'), 'N/A'),                       # 34 - Result Database (AI)
                     ])
             
-            # Sort by Priority descending
-            priority_score_idx = 28  # Priority is column AC (index 28)
+            priority_score_idx = 30
             data_rows.sort(key=lambda row: float(row[priority_score_idx]) if isinstance(row[priority_score_idx], (int, float)) else 0, reverse=True)
             
             if not data_rows:
@@ -28573,27 +32428,18 @@ Start your response with: {{{{"honesty_score":
                 'font_size': 10
             })
             
-            # Column headers - Quality placed right after Priority for easy filtering
-            # A: ID, B: Business Domain, C: Subdomain, D: Use Case, E: Type, F: Analytics Technique
-            # G: Business Priority Alignment, H: Strategic Goals Alignment, I: Statement
-            # J: Solution, K: Business Value, L: Beneficiary, M: Sponsor, N: Tables Involved
-            # O: Strategic Alignment, P: ROI, Q: Reusability, R: Time to Value
-            # S: Data Availability, T: Data Accessibility, U: Architecture Fitness, V: Team Skills
-            # W: Domain Knowledge, X: People Allocation, Y: Budget Allocation, Z: Time to Production
-            # AA: Value, AB: Feasibility, AC: Priority, AD: Quality, AE: Justification, AF: Result Table
             headers = [
-                "ID", "Business Domain", "Subdomain", "Use Case", "Type", "Analytics Technique",
+                "ID", "Business Domain", "Subdomain", "Use Case", "SQL Generated",
+                "Type", "Analytics Technique",
                 "Business Priority Alignment", "Strategic Goals Alignment",
-                "Statement", "Solution", "Business Value", "Beneficiary", "Sponsor", "Tables Involved",
+                "Statement", "Solution", "Business Value", "Beneficiary", "Sponsor",
+                "Tables Involved", "Primary Table",
                 "Strategic Alignment", "ROI", "Reusability", "Time to Value",
-                "Data Availability", "Data Accessibility", "Architecture Fitness", "Team Skills", 
+                "Data Availability", "Data Accessibility", "Architecture Fitness", "Team Skills",
                 "Domain Knowledge", "People Allocation", "Budget Allocation", "Time to Production",
-                "Value",
-                "Feasibility",
-                "Priority",
-                "Quality",
-                "Justification",
-                "Result Table"
+                "Value", "Feasibility", "Priority",
+                "Quality", "Priority Reasons", "Quality Reasons",
+                "Result Database",
             ]
             
             # Write headers
@@ -28602,8 +32448,8 @@ Start your response with: {{{{"honesty_score":
             
             # Write data rows
             for row_num, row_data in enumerate(data_rows, start=1):
-                numeric_start = 14  # Strategic Alignment score (column O, index 14)
-                numeric_end = 28    # Priority (column AC, index 28)
+                numeric_start = 16  # Strategic Alignment score (index 16)
+                numeric_end = 30    # Priority (index 30)
                 for col_num, cell_data in enumerate(row_data):
                     if col_num >= numeric_start and col_num <= numeric_end:
                         try:
@@ -28638,28 +32484,21 @@ Start your response with: {{{{"honesty_score":
                 'columns': [{'header': h} for h in headers]
             })
             
-            # Add conditional formatting - Data Bars for all scoring columns
-            # Column indices based on headers array (Quality moved after Priority):
-            # 14: Strategic Alignment (O), 15: ROI (P), 16: Reusability (Q), 17: Time to Value (R)
-            # 18: Data Availability (S), 19: Data Accessibility (T), 20: Architecture Fitness (U)
-            # 21: Team Skills (V), 22: Domain Knowledge (W), 23: People Allocation (X)
-            # 24: Budget Allocation (Y), 25: Time to Production (Z), 26: Value (AA)
-            # 27: Feasibility (AB), 28: Priority (AC), 29: Quality (AD), 30: Justification (AE)
             scoring_columns = [
-                (14, '#4472C4'),  # Strategic Alignment (O)
-                (15, '#ED7D31'),  # ROI (P)
-                (16, '#A5A5A5'),  # Reusability (Q)
-                (17, '#FFC000'),  # Time to Value (R)
-                (18, '#5B9BD5'),  # Data Availability (S)
-                (19, '#70AD47'),  # Data Accessibility (T)
-                (20, '#264478'),  # Architecture Fitness (U)
-                (21, '#9E480E'),  # Team Skills (V)
-                (22, '#636363'),  # Domain Knowledge (W)
-                (23, '#997300'),  # People Allocation (X)
-                (24, '#255E91'),  # Budget Allocation (Y)
-                (25, '#43682B'),  # Time to Production (Z)
-                (26, ACCENT),     # Value (AA)
-                (27, SECONDARY),  # Feasibility (AB)
+                (16, '#4472C4'),  # Strategic Alignment
+                (17, '#ED7D31'),  # ROI
+                (18, '#A5A5A5'),  # Reusability
+                (19, '#FFC000'),  # Time to Value
+                (20, '#5B9BD5'),  # Data Availability
+                (21, '#70AD47'),  # Data Accessibility
+                (22, '#264478'),  # Architecture Fitness
+                (23, '#9E480E'),  # Team Skills
+                (24, '#636363'),  # Domain Knowledge
+                (25, '#997300'),  # People Allocation
+                (26, '#255E91'),  # Budget Allocation
+                (27, '#43682B'),  # Time to Production
+                (28, ACCENT),     # Value
+                (29, SECONDARY),  # Feasibility
             ]
             
             for col_idx, bar_color in scoring_columns:
@@ -28669,13 +32508,11 @@ Start your response with: {{{{"honesty_score":
                     'bar_only': False
                 })
             
-            # Add conditional formatting - Color Scale for Priority (column 28 = Column AC)
-            # Headers: ..., 26: Value (AA), 27: Feasibility (AB), 28: Priority (AC), 29: Quality (AD), 30: Justification (AE)
-            worksheet.conditional_format(1, 28, last_row, 28, {
+            worksheet.conditional_format(1, 30, last_row, 30, {
                 'type': '3_color_scale',
-                'min_color': '#F8696B',   # Red for low priority
-                'mid_color': '#FFEB84',   # Yellow for medium priority
-                'max_color': '#63BE7B'    # Green for high priority
+                'min_color': '#F8696B',
+                'mid_color': '#FFEB84',
+                'max_color': '#63BE7B'
             })
             
             # Graph sheet removed per user request - no longer needed
@@ -28686,7 +32523,7 @@ Start your response with: {{{{"honesty_score":
             workspace_excel_path = os.path.join(self.docs_output_dir, excel_file_name)
             self._save_excel(local_excel_path, workspace_excel_path, self.logger, language)
         except Exception as e:
-            self.logger.critical(f"An error occurred during Excel generation for {language}: {e}")
+            self.logger.critical(f"An error occurred during Excel generation for {language}: {get_clean_error_message(e)}")
             raise
         finally:
             if local_excel_path and os.path.exists(local_excel_path):
@@ -28785,9 +32622,7 @@ Start your response with: {{{{"honesty_score":
             self.logger.info(f"Success! Markdown Catalog uploaded to: {abs_path}")
             log_print(f"Success! Markdown Catalog ({language}) generated: {abs_path}")
         except Exception as e:
-            self.logger.error(f"Failed to generate Markdown catalog for {language}: {e}")
-            import traceback
-            self.logger.error(f"Full traceback: {traceback.format_exc()}")
+            self.logger.error(f"Failed to generate Markdown catalog for {language}: {get_clean_error_message(e)}")
 
     def _generate_csv_catalog(self, language: str, lang_abbr: str, grouped_data: dict):
         """
@@ -28801,16 +32636,19 @@ Start your response with: {{{{"honesty_score":
         self.logger.info(f"--- Starting CSV Catalog Generation for {language} ---")
         
         try:
-            # Prepare data rows
             data_rows = []
             headers = [
-                "ID", "Business Domain", "Subdomain", "Use Case", "Type", "Analytics Technique",
-                "Business Priority Alignment", "Strategic Goals Alignment", "Priority",
-                "Statement", "Solution", "Business Value", "Beneficiary", "Sponsor", "Primary Table",
+                "ID", "Business Domain", "Subdomain", "Use Case", "SQL Generated",
+                "Type", "Analytics Technique",
+                "Business Priority Alignment", "Strategic Goals Alignment",
+                "Statement", "Solution", "Business Value", "Beneficiary", "Sponsor",
+                "Tables Involved", "Primary Table",
                 "Strategic Alignment", "ROI", "Reusability", "Time to Value",
-                "Data Availability", "Data Accessibility", "Architecture Fitness", "Team Skills", 
+                "Data Availability", "Data Accessibility", "Architecture Fitness", "Team Skills",
                 "Domain Knowledge", "People Allocation", "Budget Allocation", "Time to Production",
-                "Value", "Feasibility", "Priority", "Justification"
+                "Value", "Feasibility", "Priority",
+                "Quality", "Priority Reasons", "Quality Reasons",
+                "Result Database",
             ]
             
             for domain, use_cases in grouped_data.items():
@@ -28820,16 +32658,17 @@ Start your response with: {{{{"honesty_score":
                         uc.get('Business Domain', 'N/A'),
                         uc.get('Subdomain', 'N/A'),
                         uc.get('Name', 'N/A'),
+                        uc.get('generated', 'N/A'),
                         uc.get('type', 'N/A'),
                         uc.get('Analytics Technique', 'N/A'),
                         uc.get('Business Priority Alignment', 'General Improvement'),
                         uc.get('Strategic Goals Alignment', 'General Improvement'),
-                        uc.get('Quality', 'N/A'),
                         uc.get('Statement', 'N/A'),
                         uc.get('Solution', 'N/A'),
                         uc.get('Business Value', 'N/A'),
                         uc.get('Beneficiary', 'N/A'),
                         uc.get('Sponsor', 'N/A'),
+                        uc.get('Tables Involved', 'N/A'),
                         uc.get('Primary Table', 'N/A'),
                         uc.get('Strategic Alignment', 0),
                         uc.get('Return on Investment', 0),
@@ -28846,11 +32685,14 @@ Start your response with: {{{{"honesty_score":
                         uc.get('Value', 0),
                         uc.get('Feasibility', 0),
                         uc.get('Priority', 0),
-                        uc.get('Justification', 'N/A')
+                        uc.get('Quality', 'N/A'),
+                        uc.get('Justification', 'N/A'),
+                        uc.get('Quality Summary', 'N/A'),
+                        uc.get('result_table', 'N/A'),
                     ])
             
-            # Sort by Priority descending
-            data_rows.sort(key=lambda row: float(row[29]) if isinstance(row[29], (int, float)) else 0, reverse=True)
+            # Sort by Priority descending (index 30)
+            data_rows.sort(key=lambda row: float(row[30]) if isinstance(row[30], (int, float)) else 0, reverse=True)
             
             if not data_rows:
                 self.logger.warning(f"No data to write to CSV for {language}. Skipping.")
@@ -28878,9 +32720,7 @@ Start your response with: {{{{"honesty_score":
             self.logger.info(f"Success! CSV Catalog uploaded to: {abs_path}")
             log_print(f"Success! CSV Catalog ({language}) generated: {abs_path}")
         except Exception as e:
-            self.logger.error(f"Failed to generate CSV catalog for {language}: {e}")
-            import traceback
-            self.logger.error(f"Full traceback: {traceback.format_exc()}")
+            self.logger.error(f"Failed to generate CSV catalog for {language}: {get_clean_error_message(e)}")
 
     def _validate_use_case_tables(self, parsed_rows: list, full_schema_details: list, log_prefix: str) -> tuple:
         """
@@ -29066,26 +32906,23 @@ Start your response with: {{{{"honesty_score":
             list: Use cases with Quality field populated
         """
         import json
-        from concurrent.futures import ThreadPoolExecutor, as_completed
         
         if not use_cases:
             self.logger.info("🔍 No use cases to score for data quality")
             return use_cases
         
-        # Build schema once for all batches
-        schema_markdown = self._build_schema_markdown_for_validation(full_schema_details)
+        self._cached_schema_markdown = self._build_schema_markdown_for_validation(full_schema_details)
         
-        # Create batches
-        batch_size = 15
+        _rt = TECHNICAL_CONTEXT["runtime"]
+        batch_size = _rt["quality_scoring_batch_size"]
         batches = [use_cases[i:i + batch_size] for i in range(0, len(use_cases), batch_size)]
         
-        # Calculate parallelism
         num_batches = len(batches)
-        parallelism = min(num_batches, 4)  # Cap at 4 for rate limiting
+        max_quality_workers = _rt["quality_scoring_max_workers"]
+        parallelism = min(num_batches, max_quality_workers)
         if num_batches == 1:
             parallelism = 1
         
-        # Proper announcement header
         self.logger.info("")
         self.logger.info("=" * 80)
         self.logger.info(f"📊 PHASE 4.5: DATA QUALITY SCORING ({len(use_cases)} use cases)")
@@ -29094,67 +32931,78 @@ Start your response with: {{{{"honesty_score":
         self.logger.info(f"Batch size: {batch_size}")
         self.logger.info(f"Total batches: {num_batches}")
         self.logger.info(f"🔧 [QUALITY_SCORING] Workers: {parallelism}")
-        self.logger.info(f"   └─ Reason: min({num_batches} batches, 4 max) for rate limiting")
+        self.logger.info(f"   └─ Reason: min({num_batches} batches, {max_quality_workers} max from runtime config)")
         self.logger.info("=" * 80)
         
         quality_scores_map = {}
         
-        def process_quality_batch(batch_idx: int, batch: list) -> dict:
-            """Process a single batch for quality scoring."""
-            batch_results = {}
-            
-            self.logger.info(f"📊 [Batch {batch_idx}/{num_batches}] Scoring {len(batch)} use cases...")
-            
-            use_cases_markdown = self._build_use_cases_markdown_for_validation(batch)
-            
+        def _score_single_batch(batch_label: str, uc_batch: list) -> dict:
+            """Score a single batch, returning {uc_id: scores_dict}. Raises on failure."""
+            use_cases_markdown = self._build_use_cases_markdown_for_validation(uc_batch)
             prompt_vars = {
                 "business_context": business_context or self._get_business_context_fallback(),
                 "industry": industry or "General",
-                "schema_details": schema_markdown,
+                "schema_details": self._cached_schema_markdown,
                 "use_cases_to_validate": use_cases_markdown
             }
+            response_raw = self.ai_agent.run_worker(
+                step_name=f"Quality_{batch_label}",
+                worker_prompt_path="USE_CASE_QUALITY_SCORE_PROMPT",
+                prompt_vars=prompt_vars,
+                response_schema=None
+            )
+            quality_results = self._parse_quality_score_response(response_raw, uc_batch)
+            result = {}
+            for r in quality_results:
+                result[r.get('use_case_id', 'UNKNOWN')] = {
+                    'Quality': r.get('quality_label', 'Medium'),
+                    'Quality Summary': self._sanitize_quality_summary(r.get('quality_summary', '')),
+                    'Data Strengths': r.get('strengths', []),
+                    'Data Weaknesses': r.get('weaknesses', [])
+                }
+            return result
+
+        def process_quality_batch(batch_idx: int, batch: list) -> dict:
+            """Process a batch with retry-and-split: on failure, halve and retry each sub-batch."""
+            batch_results = {}
+            self.logger.info(f"📊 [Batch {batch_idx}/{num_batches}] Scoring {len(batch)} use cases...")
             
             try:
-                response_raw = self.ai_agent.run_worker(
-                    step_name=f"Quality_Batch_{batch_idx}",
-                    worker_prompt_path="USE_CASE_QUALITY_SCORE_PROMPT",
-                    prompt_vars=prompt_vars,
-                    response_schema=None
-                )
-                
-                quality_results = self._parse_quality_score_response(response_raw, batch)
-                
-                for result in quality_results:
-                    use_case_id = result.get('use_case_id', 'UNKNOWN')
-                    quality_label = result.get('quality_label', 'Medium')
-                    quality_score = result.get('quality_score', 3.0)
-                    quality_summary = result.get('quality_summary', '')
-                    strengths = result.get('strengths', [])
-                    weaknesses = result.get('weaknesses', [])
-                    
-                    batch_results[use_case_id] = {
-                        'Quality': quality_label,
-                        'Quality Summary': quality_summary,
-                        'Data Strengths': strengths,
-                        'Data Weaknesses': weaknesses
-                    }
-                    
+                batch_results = _score_single_batch(f"B{batch_idx}", batch)
                 self.logger.info(f"✅ [Batch {batch_idx}/{num_batches}] Complete: {len(batch_results)} use cases scored")
-                    
-            except Exception as e:
-                self.logger.error(f"❌ [Batch {batch_idx}/{num_batches}] Failed: {e}")
-                for uc in batch:
-                    uc_id = uc.get('No', 'UNKNOWN')
-                    batch_results[uc_id] = {
-                        'Quality': 'Medium',
-                        'Quality Summary': 'Quality scoring failed - default assigned',
-                        'Data Strengths': [],
-                        'Data Weaknesses': ['Quality scoring error']
-                    }
+                return batch_results
+            except Exception as first_err:
+                self.logger.warning(
+                    f"⚠️ [Batch {batch_idx}/{num_batches}] Failed ({str(first_err)[:120]}). "
+                    f"Retrying as {max(1, len(batch) // 2)}-sized sub-batches..."
+                )
+            
+            mid = max(1, len(batch) // 2)
+            sub_batches = [batch[:mid], batch[mid:]] if len(batch) > 1 else [batch]
+            for sub_idx, sub in enumerate(sub_batches, 1):
+                if not sub:
+                    continue
+                try:
+                    sub_results = _score_single_batch(f"B{batch_idx}_S{sub_idx}", sub)
+                    batch_results.update(sub_results)
+                    self.logger.info(f"✅ [Batch {batch_idx}/{num_batches} sub-{sub_idx}] Scored {len(sub_results)} use cases on retry")
+                except Exception as sub_err:
+                    self.logger.error(
+                        f"❌ [Batch {batch_idx}/{num_batches} sub-{sub_idx}] "
+                        f"Retry also failed ({str(sub_err)[:120]}). Assigning defaults for {len(sub)} use cases."
+                    )
+                    for uc in sub:
+                        uc_id = uc.get('No', 'UNKNOWN')
+                        batch_results[uc_id] = {
+                            'Quality': 'Medium',
+                            'Quality Summary': f'Quality scoring default - retry failed: {str(sub_err)[:80]}',
+                            'Data Strengths': [],
+                            'Data Weaknesses': ['Quality scoring failed after retry']
+                        }
             
             return batch_results
         
-        per_batch_timeout = self.llm_timeout_seconds + 120
+        per_batch_timeout = self.llm_timeout_seconds * 4
         parallel_succeeded = False
         
         _thread_diag = []
@@ -29163,16 +33011,16 @@ Start your response with: {{{{"honesty_score":
         self.logger.info(f"🧵 Thread dump before quality scoring ({len(_thread_diag)} threads): {', '.join(_thread_diag[:20])}")
         
         if num_batches >= 2:
-            conservative_workers = min(2, num_batches)
-            total_timeout = per_batch_timeout * ((num_batches + conservative_workers - 1) // conservative_workers)
+            quality_workers = min(parallelism, num_batches)
+            total_timeout = per_batch_timeout * ((num_batches + quality_workers - 1) // quality_workers)
             self.logger.info(
-                f"🔄 PROGRESSIVE PARALLELISM: Trying {conservative_workers} workers for {num_batches} batches "
+                f"🔄 PARALLEL QUALITY SCORING: {quality_workers} workers for {num_batches} batches "
                 f"(per-batch timeout: {per_batch_timeout}s, total timeout: {total_timeout}s)"
             )
             
             executor = None
             try:
-                executor = ThreadPoolExecutor(max_workers=conservative_workers, thread_name_prefix="QualityScore")
+                executor = ThreadPoolExecutor(max_workers=quality_workers, thread_name_prefix="QualityScore")
                 futures = {
                     executor.submit(process_quality_batch, idx, batch): idx
                     for idx, batch in enumerate(batches, 1)
@@ -29180,7 +33028,7 @@ Start your response with: {{{{"honesty_score":
                 
                 completed_batches = set()
                 try:
-                    for future in as_completed(futures, timeout=total_timeout):
+                    for future in safe_as_completed(futures, timeout=total_timeout):
                         batch_idx = futures[future]
                         try:
                             batch_results = future.result(timeout=per_batch_timeout)
@@ -29192,7 +33040,7 @@ Start your response with: {{{{"honesty_score":
                             self._assign_default_quality_scores(batches[batch_idx - 1], quality_scores_map, 'Scoring timeout')
                             completed_batches.add(batch_idx)
                         except Exception as e:
-                            self.logger.error(f"❌ Quality batch {batch_idx} exception: {e}")
+                            self.logger.error(f"❌ Quality batch {batch_idx} exception: {get_clean_error_message(e)}")
                             self._assign_default_quality_scores(batches[batch_idx - 1], quality_scores_map, f'Scoring error: {str(e)[:80]}')
                             completed_batches.add(batch_idx)
                 except concurrent.futures.TimeoutError:
@@ -29211,7 +33059,7 @@ Start your response with: {{{{"honesty_score":
                 else:
                     parallel_succeeded = True
             except Exception as e:
-                self.logger.error(f"❌ Quality scoring parallel execution failed entirely: {e}")
+                self.logger.error(f"❌ Quality scoring parallel execution failed entirely: {get_clean_error_message(e)}")
                 _alive_threads = [(t.name, t.is_alive()) for t in threading.enumerate() if 'QualityScore' in t.name or 'LLM_Query' in t.name]
                 self.logger.error(f"🧵 Thread state after failure: {_alive_threads}")
             else:
@@ -29237,7 +33085,7 @@ Start your response with: {{{{"honesty_score":
                     elapsed = _time.time() - batch_start
                     self.logger.info(f"✅ [{idx}/{num_batches}] Quality batch complete in {elapsed:.1f}s")
                 except Exception as e:
-                    self.logger.error(f"❌ [{idx}/{num_batches}] Quality batch failed: {e} — assigning defaults")
+                    self.logger.error(f"❌ [{idx}/{num_batches}] Quality batch failed: {get_clean_error_message(e)} — assigning defaults")
                     self._assign_default_quality_scores(batch, quality_scores_map, f'Sequential error: {str(e)[:80]}')
         
         # Apply scores to use cases
@@ -29268,7 +33116,8 @@ Start your response with: {{{{"honesty_score":
                 self.logger.info(f"   {label}: {count} use cases")
         self.logger.info("=" * 80)
         
-        del quality_scores_map, schema_markdown, batches
+        del quality_scores_map, batches
+        self._cached_schema_markdown = None
         _force_gc(self.logger, "after quality scoring")
         
         return use_cases
@@ -29283,7 +33132,340 @@ Start your response with: {{{{"honesty_score":
                     'Data Strengths': [],
                     'Data Weaknesses': [reason]
                 }
+
+    def _score_combined_value_and_quality(self, use_cases: list, full_schema_details: list,
+                                           business_context: str = "", industry: str = "",
+                                           strategic_goals: list = None, business_priorities: list = None,
+                                           strategic_initiative: str = "", value_chain: str = "",
+                                           revenue_model: str = "") -> list:
+        """Combined value + quality scoring in a single LLM pass.
+        
+        Replaces the separate quality scoring phase (Phase 4.5) by producing BOTH
+        value score refinements AND quality assessments in one prompt. This eliminates
+        an entire LLM pass over all use cases.
+        
+        The initial value scores from _score_per_domain_parallel are overwritten with
+        refined scores that benefit from schema context.
+        
+        Uses ParallelExecutor (polling loop) instead of as_completed() to keep the
+        main thread active -- critical on Databricks where the notebook output buffer
+        only flushes when the main thread executes Python code.
+        """
+        import json
+        
+        if not use_cases:
+            self.logger.info("No use cases to score (combined)")
+            return use_cases
+        
+        self._cached_schema_markdown = self._build_schema_markdown_for_validation(full_schema_details)
+        
+        _rt = TECHNICAL_CONTEXT["runtime"]
+        batch_size = _rt["quality_scoring_batch_size"]
+        batches = [use_cases[i:i + batch_size] for i in range(0, len(use_cases), batch_size)]
+        
+        num_batches = len(batches)
+        max_workers = _rt["quality_scoring_max_workers"]
+        parallelism = min(num_batches, max_workers)
+        if num_batches == 1:
+            parallelism = 1
+        
+        self.logger.info("")
+        self.logger.info("=" * 80)
+        self.logger.info(f"PHASE 4.5: COMBINED VALUE+QUALITY SCORING ({len(use_cases)} use cases)")
+        self.logger.info("=" * 80)
+        self.logger.info(f"Batch size: {batch_size}, Batches: {num_batches}, Workers: {parallelism}")
+        self.logger.info("=" * 80)
+        
+        scores_map = {}
+        
+        import hashlib
+        _uc_ids_sorted = sorted(uc.get('No', '') for uc in use_cases)
+        _uc_names_sorted = sorted(uc.get('Name', '') for uc in use_cases)
+        _fingerprint_src = f"{len(use_cases)}|{'|'.join(_uc_ids_sorted)}|{'|'.join(_uc_names_sorted)}"
+        _cache_fingerprint = hashlib.md5(_fingerprint_src.encode('utf-8')).hexdigest()[:12]
+        _partial_cache_tag = f"combined_batch_partial_{_cache_fingerprint}"
+        
+        cached_batch_scores = self.storage_manager.load_scored_use_cases(_partial_cache_tag)
+        if cached_batch_scores and isinstance(cached_batch_scores, dict):
+            scores_map.update(cached_batch_scores)
+            self.logger.info(f"Loaded {len(cached_batch_scores)} partially-scored use cases from disk cache (fingerprint: {_cache_fingerprint})")
+        
+        str_goals = ", ".join(strategic_goals) if strategic_goals else ""
+        str_priorities = ", ".join(business_priorities) if business_priorities else ""
+        
+        def _score_combined_batch(batch_label: str, uc_batch: list) -> dict:
+            if _is_thread_cancelled():
+                raise Exception(f"[CombinedScore_{batch_label}] Aborted: parent task cancelled/timed out")
+            use_cases_markdown = self._build_use_cases_markdown_for_validation(uc_batch)
+            prompt_vars = {
+                "business_context": business_context or self._get_business_context_fallback(),
+                "industry": industry or "General",
+                "strategic_goals": str_goals,
+                "business_priorities": str_priorities,
+                "strategic_initiative": strategic_initiative or "",
+                "value_chain": value_chain or "",
+                "revenue_model": revenue_model or "",
+                "schema_details": self._cached_schema_markdown,
+                "use_cases_to_validate": use_cases_markdown
+            }
+            response_raw = self.ai_agent.run_worker(
+                step_name=f"CombinedScore_{batch_label}",
+                worker_prompt_path="COMBINED_VALUE_QUALITY_SCORE_PROMPT",
+                prompt_vars=prompt_vars,
+                response_schema=None
+            )
+            return self._parse_combined_score_response(response_raw, uc_batch)
+        
+        def process_combined_batch(batch_idx: int, batch: list) -> dict:
+            batch_results = {}
+            
+            already_scored = [uc for uc in batch if uc.get('No', 'UNKNOWN') in scores_map]
+            if len(already_scored) == len(batch):
+                self.logger.info(f"[Batch {batch_idx}/{num_batches}] All {len(batch)} use cases already scored (disk cache)")
+                return {uc.get('No', 'UNKNOWN'): scores_map[uc.get('No', 'UNKNOWN')] for uc in batch}
+            
+            self.logger.info(f"[Batch {batch_idx}/{num_batches}] Combined scoring {len(batch)} use cases...")
+            
+            try:
+                batch_results = _score_combined_batch(f"B{batch_idx}", batch)
+                self.logger.info(f"[Batch {batch_idx}/{num_batches}] Complete: {len(batch_results)} scored")
+                return batch_results
+            except Exception as first_err:
+                self.logger.warning(
+                    f"[Batch {batch_idx}/{num_batches}] Failed ({str(first_err)[:120]}). Splitting..."
+                )
+            
+            if _is_thread_cancelled():
+                self.logger.warning(f"[Batch {batch_idx}/{num_batches}] Cancelled before sub-batch retry")
+                for uc in batch:
+                    uc_id = uc.get('No', 'UNKNOWN')
+                    if uc_id not in batch_results:
+                        batch_results[uc_id] = self._default_combined_scores('Cancelled before retry')
+                return batch_results
+            
+            mid = len(batch) // 2
+            sub_batches = [batch[:mid], batch[mid:]] if len(batch) > 1 else [batch]
+            for sub_idx, sub in enumerate(sub_batches, 1):
+                if not sub:
+                    continue
+                if _is_thread_cancelled():
+                    self.logger.warning(f"[Batch {batch_idx} sub-{sub_idx}] Cancelled - assigning defaults")
+                    for uc in sub:
+                        uc_id = uc.get('No', 'UNKNOWN')
+                        batch_results[uc_id] = self._default_combined_scores('Cancelled during retry')
+                    continue
+                try:
+                    sub_results = _score_combined_batch(f"B{batch_idx}_S{sub_idx}", sub)
+                    batch_results.update(sub_results)
+                except Exception as sub_err:
+                    self.logger.error(f"[Batch {batch_idx} sub-{sub_idx}] Retry failed: {str(sub_err)[:120]}")
+                    for uc in sub:
+                        uc_id = uc.get('No', 'UNKNOWN')
+                        batch_results[uc_id] = self._default_combined_scores(f'Retry failed: {str(sub_err)[:80]}')
+            
+            return batch_results
+        
+        per_batch_timeout = self.llm_timeout_seconds * 4
+        total_timeout = per_batch_timeout * max(1, ((num_batches + parallelism - 1) // parallelism))
+        parallel_succeeded = False
+        
+        if num_batches >= 2:
+            try:
+                tasks = [(process_combined_batch, (idx, batch)) for idx, batch in enumerate(batches, 1)]
+                
+                results = ParallelExecutor.execute_parallel(
+                    tasks=tasks,
+                    max_workers=min(parallelism, num_batches),
+                    task_name="CombinedScore",
+                    logger=self.logger,
+                    timeout_per_task=per_batch_timeout,
+                    total_timeout=total_timeout,
+                    thread_name_prefix="CombinedScore",
+                    return_exceptions=True
+                )
+                
+                for i, result in enumerate(results):
+                    batch_idx = i + 1
+                    if isinstance(result, (TimeoutError, concurrent.futures.TimeoutError)):
+                        self.logger.error(f"Combined batch {batch_idx} timed out")
+                        for uc in batches[batch_idx - 1]:
+                            uc_id = uc.get('No', 'UNKNOWN')
+                            if uc_id not in scores_map:
+                                scores_map[uc_id] = self._default_combined_scores('Batch timeout')
+                    elif isinstance(result, Exception):
+                        self.logger.error(f"Combined batch {batch_idx} error: {get_clean_error_message(result)}")
+                        for uc in batches[batch_idx - 1]:
+                            uc_id = uc.get('No', 'UNKNOWN')
+                            scores_map[uc_id] = self._default_combined_scores(str(result)[:80])
+                    elif isinstance(result, dict):
+                        scores_map.update(result)
+                    else:
+                        self.logger.warning(f"Combined batch {batch_idx} returned unexpected type: {type(result)}")
+                
+                for uc in use_cases:
+                    uc_id = uc.get('No', 'UNKNOWN')
+                    if uc_id not in scores_map:
+                        scores_map[uc_id] = self._default_combined_scores('Not scored')
+                
+                self.storage_manager.save_scored_use_cases(scores_map, _partial_cache_tag)
+                parallel_succeeded = True
+                
+            except Exception as e:
+                self.logger.error(f"Combined scoring parallel execution failed: {get_clean_error_message(e)}")
+            
+            gc.collect()
+        
+        if not parallel_succeeded:
+            self.logger.info(f"SEQUENTIAL FALLBACK: Processing {num_batches} combined batches...")
+            for idx, batch in enumerate(batches, 1):
+                try:
+                    batch_results = process_combined_batch(idx, batch)
+                    scores_map.update(batch_results)
+                    self.storage_manager.save_scored_use_cases(scores_map, _partial_cache_tag)
+                except Exception as e:
+                    self.logger.error(f"[{idx}/{num_batches}] Sequential batch failed: {get_clean_error_message(e)}")
+                    for uc in batch:
+                        uc_id = uc.get('No', 'UNKNOWN')
+                        scores_map[uc_id] = self._default_combined_scores(str(e)[:80])
+        
+        for uc in use_cases:
+            uc_id = uc.get('No', 'UNKNOWN')
+            if uc_id in scores_map:
+                s = scores_map[uc_id]
+                uc['Strategic Alignment'] = s.get('strategic_alignment', uc.get('Strategic Alignment'))
+                uc['Return on Investment'] = s.get('roi', uc.get('Return on Investment'))
+                uc['Reusability'] = s.get('reusability', uc.get('Reusability'))
+                uc['Time to Value'] = s.get('time_to_value', uc.get('Time to Value'))
+                uc['Data Availability'] = s.get('data_availability', uc.get('Data Availability'))
+                uc['Data Accessibility'] = s.get('data_accessibility', uc.get('Data Accessibility'))
+                uc['Architecture Fitness'] = s.get('architecture_fitness', uc.get('Architecture Fitness'))
+                uc['Team Skills'] = s.get('team_skills', uc.get('Team Skills'))
+                uc['Domain Knowledge'] = s.get('domain_knowledge', uc.get('Domain Knowledge'))
+                uc['People Allocation'] = s.get('people_allocation', uc.get('People Allocation'))
+                uc['Budget Allocation'] = s.get('budget_allocation', uc.get('Budget Allocation'))
+                uc['Time to Production'] = s.get('time_to_production', uc.get('Time to Production'))
+                uc['Value'] = s.get('value_score', uc.get('Value'))
+                uc['Feasibility'] = s.get('feasibility_score', uc.get('Feasibility'))
+                uc['Priority Score'] = s.get('priority_score', uc.get('Priority Score'))
+                uc['Business Priority Alignment'] = s.get('business_priority_alignment', uc.get('Business Priority Alignment', ''))
+                uc['Strategic Goals Alignment'] = s.get('strategic_goals_alignment', uc.get('Strategic Goals Alignment', ''))
+                uc['Justification'] = s.get('justification', uc.get('Justification', ''))
+                uc['Quality'] = s.get('quality_label', 'Medium')
+                uc['Quality Summary'] = self._sanitize_quality_summary(s.get('quality_summary', ''))
+            else:
+                uc['Quality'] = 'Medium'
+                uc['Quality Summary'] = 'No combined score received - default assigned'
+        
+        quality_distribution = {}
+        for uc in use_cases:
+            label = uc.get('Quality', 'Medium')
+            quality_distribution[label] = quality_distribution.get(label, 0) + 1
+        
+        self.logger.info("")
+        self.logger.info("=" * 80)
+        self.logger.info("PHASE 4.5 COMPLETE: COMBINED VALUE+QUALITY SCORING")
+        self.logger.info("=" * 80)
+        self.logger.info(f"Total scored: {len(use_cases)} use cases")
+        for label in ['Ultra High', 'Very High', 'High', 'Medium', 'Low', 'Very Low', 'Ultra Low']:
+            count = quality_distribution.get(label, 0)
+            if count > 0:
+                self.logger.info(f"   {label}: {count} use cases")
+        self.logger.info("=" * 80)
+        
+        del scores_map, batches
+        self._cached_schema_markdown = None
+        _force_gc(self.logger, "after combined scoring")
+        
+        return use_cases
     
+    def _default_combined_scores(self, reason: str) -> dict:
+        return {
+            'quality_label': 'Medium',
+            'quality_summary': f'Combined scoring default - {reason}',
+            'strategic_alignment': None,
+            'roi': None,
+            'priority_score': None,
+        }
+    
+    def _parse_combined_score_response(self, response_raw: str, original_use_cases: list) -> dict:
+        """Parse combined value+quality JSON response into {uc_id: scores_dict}."""
+        import json
+        import re
+        
+        result = {}
+        
+        if not response_raw:
+            self.logger.warning("Empty combined score response")
+            for uc in original_use_cases:
+                result[uc.get('No', 'UNKNOWN')] = self._default_combined_scores('Empty response')
+            return result
+        
+        cleaned = response_raw.strip()
+        if cleaned.startswith("```"):
+            cleaned = re.sub(r'^```\w*\n?', '', cleaned)
+            cleaned = re.sub(r'\n?```$', '', cleaned)
+        
+        json_match = re.search(r'\[.*\]', cleaned, re.DOTALL)
+        if json_match:
+            cleaned = json_match.group(0)
+        
+        try:
+            parsed = json.loads(cleaned)
+            if not isinstance(parsed, list):
+                parsed = [parsed]
+            
+            for item in parsed:
+                uc_id = item.get('use_case_id', '')
+                if not uc_id:
+                    continue
+                
+                def safe_float(val, default=None):
+                    if val is None:
+                        return default
+                    try:
+                        return round(float(val), 2)
+                    except (ValueError, TypeError):
+                        return default
+                
+                result[uc_id] = {
+                    'strategic_alignment': safe_float(item.get('strategic_alignment')),
+                    'roi': safe_float(item.get('roi')),
+                    'reusability': safe_float(item.get('reusability')),
+                    'time_to_value': safe_float(item.get('time_to_value')),
+                    'data_availability': safe_float(item.get('data_availability')),
+                    'data_accessibility': safe_float(item.get('data_accessibility')),
+                    'architecture_fitness': safe_float(item.get('architecture_fitness')),
+                    'team_skills': safe_float(item.get('team_skills')),
+                    'domain_knowledge': safe_float(item.get('domain_knowledge')),
+                    'people_allocation': safe_float(item.get('people_allocation')),
+                    'budget_allocation': safe_float(item.get('budget_allocation')),
+                    'time_to_production': safe_float(item.get('time_to_production')),
+                    'value_score': safe_float(item.get('value_score')),
+                    'feasibility_score': safe_float(item.get('feasibility_score')),
+                    'priority_score': safe_float(item.get('priority_score')),
+                    'business_priority_alignment': item.get('business_priority_alignment', ''),
+                    'strategic_goals_alignment': item.get('strategic_goals_alignment', ''),
+                    'justification': item.get('justification', ''),
+                    'quality_score': safe_float(item.get('quality_score')),
+                    'quality_label': item.get('quality_label', 'Medium'),
+                    'quality_summary': self._sanitize_quality_summary(item.get('quality_summary', '')),
+                    'strengths': item.get('strengths', ''),
+                    'weaknesses': item.get('weaknesses', ''),
+                }
+            
+            self.logger.info(f"Parsed combined scores for {len(result)} use cases")
+        except json.JSONDecodeError as e:
+            self.logger.error(f"Failed to parse combined score JSON: {get_clean_error_message(e)}")
+            for uc in original_use_cases:
+                result[uc.get('No', 'UNKNOWN')] = self._default_combined_scores(f'JSON parse error: {str(e)[:60]}')
+        
+        for uc in original_use_cases:
+            uc_id = uc.get('No', 'UNKNOWN')
+            if uc_id not in result:
+                result[uc_id] = self._default_combined_scores('Missing from LLM response')
+        
+        return result
+
     def _parse_quality_score_response(self, response_raw: str, original_use_cases: list) -> list:
         """
         Parse quality scoring response from LLM with robust error handling.
@@ -29311,7 +33493,7 @@ Start your response with: {{{{"honesty_score":
                     self.logger.debug(f"✓ Parsed {len(results)} quality scores (Strategy 1: JSON array)")
                     return results
         except json.JSONDecodeError as e:
-            self.logger.debug(f"Strategy 1 (JSON array) failed: {e}")
+            self.logger.debug(f"Strategy 1 (JSON array) failed: {get_clean_error_message(e, max_chars=2000)}")
         
         # Strategy 2: Try to fix common JSON issues and parse
         try:
@@ -29326,7 +33508,7 @@ Start your response with: {{{{"honesty_score":
                     self.logger.debug(f"✓ Parsed {len(results)} quality scores (Strategy 2: Fixed JSON)")
                     return results
         except json.JSONDecodeError as e:
-            self.logger.debug(f"Strategy 2 (Fixed JSON) failed: {e}")
+            self.logger.debug(f"Strategy 2 (Fixed JSON) failed: {get_clean_error_message(e, max_chars=2000)}")
         
         # Strategy 3: Parse individual JSON objects using brace counting (handles nested objects)
         try:
@@ -29366,7 +33548,7 @@ Start your response with: {{{{"honesty_score":
                 self.logger.debug(f"✓ Parsed {len(results)} quality scores (Strategy 3: Brace counting)")
                 return results
         except Exception as e:
-            self.logger.debug(f"Strategy 3 (Brace counting) failed: {e}")
+            self.logger.debug(f"Strategy 3 (Brace counting) failed: {get_clean_error_message(e, max_chars=2000)}")
         
         # Strategy 4: Extract quality labels using regex patterns
         if not results:
@@ -29421,7 +33603,64 @@ Start your response with: {{{{"honesty_score":
             })
         
         return results
-    
+
+    @staticmethod
+    def _sanitize_quality_summary(quality_summary: str) -> str:
+        """
+        Validates and sanitizes quality_summary values from LLM output.
+        Detects when the LLM produced a hallucination-check boilerplate instead of
+        a proper data-to-value chain explanation, and flags it so users see a
+        meaningful indicator rather than misleading filler text.
+        """
+        if not quality_summary or not isinstance(quality_summary, str):
+            return ''
+        
+        summary = quality_summary.strip()
+        
+        bad_prefixes = [
+            'NO HALLUCINATION',
+            'HALLUCINATION DETECTED',
+            'All columns verified',
+            'Brief summary -',
+            'Brief summary:',
+        ]
+        
+        bad_phrases = [
+            'all columns verified to exist',
+            'strong causal signals present',
+            'unique business problem',
+            'strong causal signals. unique business problem',
+        ]
+        
+        summary_lower = summary.lower()
+        
+        is_boilerplate = False
+        for prefix in bad_prefixes:
+            if summary_lower.startswith(prefix.lower()):
+                is_boilerplate = True
+                break
+        
+        if not is_boilerplate:
+            for phrase in bad_phrases:
+                if summary_lower == phrase:
+                    is_boilerplate = True
+                    break
+        
+        if not is_boilerplate and len(summary) < 80:
+            has_column_ref = '`' in summary or 'column' in summary_lower
+            has_operation = any(op in summary_lower for op in [
+                'aggregat', 'join', 'comput', 'calculat', 'compar', 'datediff',
+                'avg', 'sum', 'count', 'percentile', 'group by', 'correlat',
+                'deriv', 'transform', 'filter', 'partition', 'window',
+            ])
+            if not has_column_ref and not has_operation:
+                is_boilerplate = True
+        
+        if is_boilerplate:
+            return f'[Insufficient detail] {summary}'
+        
+        return summary
+
     def _validate_use_case_data_sufficiency_legacy(self, use_cases: list, full_schema_details: list, 
                                             business_context: str = "", industry: str = "") -> tuple:
         """
@@ -29431,7 +33670,11 @@ Start your response with: {{{{"honesty_score":
         return (use_cases, [], {"total": len(use_cases), "approved": len(use_cases), "rejected": 0, "details": []})
     
     def _build_schema_markdown_for_validation(self, full_schema_details: list) -> str:
-        """Build a concise schema markdown for validation prompt."""
+        """Build a concise schema markdown for validation prompt. Uses disk cache if available."""
+        cached = self.storage_manager.load_schema_markdown()
+        if cached:
+            return cached
+        
         if not full_schema_details:
             return "No schema details available."
         
@@ -29459,7 +33702,9 @@ Start your response with: {{{{"honesty_score":
                 md_parts.append(f"| ... | ... | ({len(columns) - 30} more columns) |\n")
             md_parts.append("\n")
         
-        return ''.join(md_parts)
+        result = ''.join(md_parts)
+        self.storage_manager.save_schema_markdown(result)
+        return result
     
     def _build_use_cases_markdown_for_validation(self, use_cases: list) -> str:
         """Build use cases markdown for validation prompt."""
@@ -29523,7 +33768,7 @@ Start your response with: {{{{"honesty_score":
                     })
                     
         except json.JSONDecodeError as e:
-            self.logger.error(f"Failed to parse validation JSON: {e}")
+            self.logger.error(f"Failed to parse validation JSON: {get_clean_error_message(e)}")
             self.logger.debug(f"Raw response: {response_raw[:500]}...")
             
             for uc in original_use_cases:
@@ -29780,16 +34025,6 @@ Start your response with: {{{{"honesty_score":
             # Extract CSV starting from header
             csv_data = csv_clean[header_match.start():]
             
-            # Normalize header: strip honesty columns if present so DictReader uses canonical 11 columns
-            _honesty_suffix_pattern = re.compile(r'(?:,\s*"?honesty_score"?\s*,\s*"?honesty_justification"?)', re.IGNORECASE)
-            _first_newline = csv_data.find('\n')
-            if _first_newline > 0:
-                _header_line = csv_data[:_first_newline]
-                _stripped_header = _honesty_suffix_pattern.sub('', _header_line)
-                if _stripped_header != _header_line:
-                    self.logger.info(f"{log_prefix} Stripped honesty columns from header for consistent parsing")
-                    csv_data = _stripped_header + csv_data[_first_newline:]
-            
             # Use centralized CSV parser for robust parsing
             _expected_csv_fields = ["No", "Name", "type", "Analytics Technique", "Statement",
                                     "Solution", "Business Value", "Beneficiary", "Sponsor",
@@ -29939,13 +34174,13 @@ Start your response with: {{{{"honesty_score":
                     # Log error with sanitized row data (limit length to avoid huge logs)
                     try:
                         row_summary = {k: str(v)[:100] for k, v in row_dict.items()} if isinstance(row_dict, dict) else str(row_dict)[:200]
-                        self.logger.error(f"{log_prefix} Error processing CSV row: {e}. Row summary: {row_summary}")
+                        self.logger.error(f"{log_prefix} Error processing CSV row: {get_clean_error_message(e)}. Row summary: {row_summary}")
                     except:
-                        self.logger.error(f"{log_prefix} Error processing CSV row: {e}. Could not serialize row data.")
+                        self.logger.error(f"{log_prefix} Error processing CSV row: {get_clean_error_message(e)}. Could not serialize row data.")
                     continue
                     
         except Exception as e:
-            self.logger.error(f"{log_prefix} Failed to parse LLM CSV response: {e}")
+            self.logger.error(f"{log_prefix} Failed to parse LLM CSV response: {get_clean_error_message(e)}")
             # Show snippet for debugging
             snippet = llm_response[:500] if llm_response else "Empty response"
             self.logger.error(f"{log_prefix} Response snippet: {snippet}")
@@ -30240,10 +34475,15 @@ The user provided Strategic Goals that MUST be followed during generation.
         base_prompt_size = len(prompt_template) + len(unstructured_docs_markdown) + len(business_context) + len(business_priorities_text) + len(strategic_initiative) + len(value_chain) + len(revenue_model) + len(strategic_goals_text) + len(additional_context_section) + len(focus_areas_instruction) + len(ai_functions_summary) + len(ai_functions_detailed) + len(statistical_functions_detailed) + len(previous_use_cases_feedback) + 1000
         
         self.logger.info(f"{log_prefix} Starting batch processing with {len(column_details)} columns from {len(set([c[2] for c in column_details]))} tables")
-        tables_in_call = sorted({f"{c[0]}.{c[1]}.{c[2]}" for c in column_details})
-        tables_in_call_str = ", ".join(tables_in_call)
-        self.logger.info(f"{log_prefix} Tables in call ({len(tables_in_call)}): {tables_in_call_str}")
-        log_print(f"{log_prefix} Tables in call ({len(tables_in_call)}): {tables_in_call_str}")
+        all_tables_in_call = sorted({f"{c[0]}.{c[1]}.{c[2]}" for c in column_details})
+        _dc_map = getattr(self, "data_category_map", {})
+        _tx_tables = [t for t in all_tables_in_call if _dc_map.get(t) == 'TRANSACTIONAL']
+        _ctx_tables = [t for t in all_tables_in_call if t not in set(_tx_tables)]
+        self.logger.info(f"{log_prefix} PRIMARY (transactional) tables ({len(_tx_tables)}): {', '.join(_tx_tables) if _tx_tables else 'NONE'}")
+        self.logger.info(f"{log_prefix} CONTEXT (master/ref) tables ({len(_ctx_tables)}): {', '.join(_ctx_tables) if _ctx_tables else 'NONE'}")
+        log_print(f"{log_prefix} PRIMARY tables ({len(_tx_tables)}): {', '.join(_tx_tables) if _tx_tables else 'NONE'}")
+        if _ctx_tables:
+            log_print(f"{log_prefix} CONTEXT tables ({len(_ctx_tables)}): {', '.join(_ctx_tables)}")
         
         for attempt in range(1, max_attempts + 1):
             try:
@@ -30314,27 +34554,48 @@ The user provided Strategic Goals that MUST be followed during generation.
                 except Exception as fk_err:
                     self.logger.debug(f"{log_prefix} Failed to gather FK relationships: {str(fk_err)[:100]}")
                 
-                primary_tables = sorted({f"{c[0]}.{c[1]}.{c[2]}" for c in current_column_details})
+                data_cat_map = getattr(self, "data_category_map", {})
+                all_batch_tables = sorted({f"{c[0]}.{c[1]}.{c[2]}" for c in current_column_details})
+                
+                primary_tables = [t for t in all_batch_tables if data_cat_map.get(t) == 'TRANSACTIONAL']
+                if not primary_tables:
+                    primary_tables = all_batch_tables
+                primary_set = set(primary_tables)
+                
+                context_tables = sorted(t for t in all_batch_tables if t not in primary_set)
+                
+                reference_tables_in_cat = {k for k, v in data_cat_map.items() if v == "REFERENCE"}
+                master_tables_in_cat = {k for k, v in data_cat_map.items() if v == "MASTER"}
+                
                 fk_only_tables = set()
                 if additional_related_columns:
-                    fk_only_tables = {f"{c[0]}.{c[1]}.{c[2]}" for c in additional_related_columns} - set(primary_tables)
-                
-                reference_tables_in_cat = {k for k, v in getattr(self, "data_category_map", {}).items() if v == "REFERENCE"}
+                    fk_only_tables = {f"{c[0]}.{c[1]}.{c[2]}" for c in additional_related_columns} - set(all_batch_tables)
                 
                 table_lines = []
                 for t in primary_tables:
-                    table_lines.append(f"- `{t}` (PRIMARY)")
+                    table_lines.append(f"- `{t}` (PRIMARY — TRANSACTIONAL, generate use cases FROM this table)")
+                for t in context_tables:
+                    if t in reference_tables_in_cat:
+                        table_lines.append(f"- `{t}` (CONTEXT — REFERENCE DATA, use ONLY for JOINs and lookups, NEVER as the main analytical subject)")
+                    elif t in master_tables_in_cat:
+                        table_lines.append(f"- `{t}` (CONTEXT — MASTER DATA, use for JOINs and enrichment, but analytical question must come from transactional events)")
+                    else:
+                        table_lines.append(f"- `{t}` (CONTEXT — available for JOINs and enrichment)")
                 for t in sorted(fk_only_tables):
                     if t in reference_tables_in_cat:
                         table_lines.append(f"- `{t}` (FK-RELATED, REFERENCE — use ONLY for JOINs, NEVER as sole table)")
+                    elif t in master_tables_in_cat:
+                        table_lines.append(f"- `{t}` (FK-RELATED, MASTER — use for JOINs and enrichment only)")
                     else:
                         table_lines.append(f"- `{t}` (FK-RELATED — available for JOINs)")
                 
-                all_allowed_tables = sorted(set(primary_tables) | fk_only_tables)
+                all_allowed_tables = sorted(set(all_batch_tables) | fk_only_tables)
                 allowed_tables_block = (
                     "\n\n### 🚨 ALLOWED TABLES REGISTRY (EXHAUSTIVE LIST) 🚨\n"
                     "**You may ONLY use tables from this list. ANY other table name is HALLUCINATION and will be REJECTED.**\n"
-                    "**Every use case MUST include at least one PRIMARY table.**\n\n"
+                    "**Every use case MUST be centered on at least one PRIMARY (TRANSACTIONAL) table.**\n"
+                    "**CONTEXT and FK-RELATED tables provide enrichment via JOINs but must NEVER be the sole analytical subject.**\n"
+                    "**The analytical question must always derive from EVENTS in transactional data, not from static entity attributes.**\n\n"
                     + "\n".join(table_lines)
                     + "\n\n**Total allowed tables: " + str(len(all_allowed_tables)) + ". NO OTHER TABLES EXIST.**\n"
                 )
@@ -30388,7 +34649,7 @@ The user provided Strategic Goals that MUST be followed during generation.
                     raise
                 except Exception as e:
                     # Any other error in estimation - log and continue to actual LLM call
-                    self.logger.debug(f"{log_prefix} Proactive size check failed: {e}")
+                    self.logger.debug(f"{log_prefix} Proactive size check failed: {get_clean_error_message(e, max_chars=2000)}")
                 
                 self.logger.info(f"⏳ {log_prefix} Sending batch to BOTH AI-focused and STATS-focused prompts in parallel...")
                 
@@ -30418,12 +34679,17 @@ The user provided Strategic Goals that MUST be followed during generation.
                     except Exception as e:
                         stats_result_holder[1] = e
                 
-                ai_thread = threading.Thread(target=ai_worker, name=f"PromptCall_AI_{batch_num}")
-                stats_thread = threading.Thread(target=stats_worker, name=f"PromptCall_STATS_{batch_num}")
+                ai_thread = threading.Thread(target=ai_worker, name=f"PromptCall_AI_{batch_num}", daemon=True)
+                stats_thread = threading.Thread(target=stats_worker, name=f"PromptCall_STATS_{batch_num}", daemon=True)
                 ai_thread.start()
                 stats_thread.start()
-                ai_thread.join()
-                stats_thread.join()
+                _thread_timeout = self.llm_timeout_seconds * 4
+                ai_thread.join(timeout=_thread_timeout)
+                if ai_thread.is_alive():
+                    self.logger.error(f"{log_prefix} [AI] thread still alive after {_thread_timeout}s timeout")
+                stats_thread.join(timeout=_thread_timeout)
+                if stats_thread.is_alive():
+                    self.logger.error(f"{log_prefix} [STATS] thread still alive after {_thread_timeout}s timeout")
                 
                 if ai_result_holder[1]:
                     self.logger.error(f"❌ {log_prefix} [AI] Prompt call failed: {ai_result_holder[1]}")
@@ -30509,7 +34775,7 @@ The user provided Strategic Goals that MUST be followed during generation.
                             if original_id in row['SQL']:
                                 row['SQL'] = row['SQL'].replace(f"-- Use Case ID: {original_id}", f"-- Use Case ID: {new_id}")
                     except Exception as e:
-                        self.logger.warning(f"{log_prefix} Failed to re-number row: {e}")
+                        self.logger.warning(f"{log_prefix} Failed to re-number row: {get_clean_error_message(e)}")
                         row['batch'] = batch_num
                 
                 self.logger.debug(f"{log_prefix} Successfully processed {len(parsed_rows)} use cases on attempt {attempt}")
@@ -30663,9 +34929,9 @@ The user provided Strategic Goals that MUST be followed during generation.
                 
             except Exception as e:
                 if attempt < max_attempts:
-                    self.logger.warning(f"{log_prefix} Attempt {attempt} failed: {e}. Retrying...")
+                    self.logger.warning(f"{log_prefix} Attempt {attempt} failed: {get_clean_error_message(e)}. Retrying...")
                 else:
-                    self.logger.error(f"{log_prefix} All {max_attempts} attempts failed: {e}")
+                    self.logger.error(f"{log_prefix} All {max_attempts} attempts failed: {get_clean_error_message(e)}")
                     return self._collect_pending_results([])
         
         # If we exhaust all attempts without success, still return any pending results
@@ -30859,13 +35125,15 @@ The user provided Strategic Goals that MUST be followed during generation.
                 f"| **{t['statement']}** | {safe_notebook_str(use_case.get('Statement'))} |\n",
                 f"| **{t['solution']}** | {safe_notebook_str(use_case.get('Solution'))} |\n",
                 f"| **{t['aspect_value']}** | {safe_notebook_str(use_case.get('Business Value'))} |\n",
-                f"| **{t['aspect_tables']}** | {safe_notebook_str(use_case.get('Tables Involved'))} |\n"
+                f"| **{t['aspect_tables']}** | {safe_notebook_str(use_case.get('Tables Involved'))} |\n",
+                f"| **{t.get('quality_reasons', 'Quality Reasons')}** | {safe_notebook_str(use_case.get('Quality Summary'))} |\n"
             ]
             details_cell = {"cell_type": "markdown", "metadata": {"application/vnd.databricks.v1+cell": {"nuid": str(uuid.uuid4())}}, "source": combined_source}
             # Use SQL directly without any formatting/correction, but add Inspire header at the top
             use_case_id = use_case.get('No', 'UNKNOWN')
             use_case_name = use_case.get('Name', '')
-            sample_result_flag = "Yes" if self.generate_sample_result else "No"
+            is_dummy_sql = use_case.get('generated') == 'N'
+            sample_result_flag = "No" if is_dummy_sql else ("Yes" if self.generate_sample_result else "No")
             inspire_header = f"--Use Case: {use_case_id} - {use_case_name}\n--generate_sample_result:{sample_result_flag}\n--regenerate_sql:No\n"
             inspire_instructions_block = "/**Regeneration Instruction Start\n\nRegeneration Instruction End**/\n\n"
             sql_lines = use_case['SQL'].split('\n')
@@ -31025,13 +35293,13 @@ The user provided Strategic Goals that MUST be followed during generation.
             self.logger.error(f"[Batch {batch_idx}] Max recursion depth ({max_depth}) reached. Defaulting {len(batch_tables)} tables to BUSINESS.")
             return {table.replace('`', ''): ('BUSINESS', 50, 'MASTER') for table in batch_tables}
         
-        depth_prefix = "  " * depth  # Indent based on depth for readability
-        # Fix batch naming: use "Split" suffix instead of excessive "_SUB" suffixes
+        depth_prefix = "  " * depth
         if depth > 0:
             log_prefix = f"[Batch {batch_idx}-Split{depth}]"
         else:
             log_prefix = f"[Batch {batch_idx}]"
         
+        log_print(f"{depth_prefix}{log_prefix} Processing {len(batch_tables)} tables (depth={depth})...")
         self.logger.info(f"{depth_prefix}{log_prefix} Processing {len(batch_tables)} tables (depth={depth})...")
         
         # Create markdown table list for this batch
@@ -31074,40 +35342,38 @@ The user provided Strategic Goals that MUST be followed during generation.
                 f"Splitting {len(batch_tables)} tables into 2 sub-batches: {len(first_half)} + {len(second_half)} tables"
             )
             
-            # Process both halves recursively
             results = {}
-            
-            # Process first half
-            first_results = self._process_filter_batch_recursive(
-                batch_tables=first_half,
-                batch_idx=f"{batch_idx}a",
-                total_batches=total_batches,
-                business_name=business_name,
-                industry=industry,
-                business_context=business_context,
-                exclusion_strategy=exclusion_strategy,
-                strategy_rule_text=strategy_rule_text,
+            _common_kwargs = dict(
+                total_batches=total_batches, business_name=business_name,
+                industry=industry, business_context=business_context,
+                exclusion_strategy=exclusion_strategy, strategy_rule_text=strategy_rule_text,
                 additional_context_section=additional_context_section,
-                depth=depth + 1,
-                max_depth=max_depth
+                depth=depth + 1, max_depth=max_depth
             )
-            results.update(first_results)
             
-            # Process second half
-            second_results = self._process_filter_batch_recursive(
-                batch_tables=second_half,
-                batch_idx=f"{batch_idx}b",
-                total_batches=total_batches,
-                business_name=business_name,
-                industry=industry,
-                business_context=business_context,
-                exclusion_strategy=exclusion_strategy,
-                strategy_rule_text=strategy_rule_text,
-                additional_context_section=additional_context_section,
-                depth=depth + 1,
-                max_depth=max_depth
-            )
-            results.update(second_results)
+            split_exec = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="filter_split")
+            split_timed_out = False
+            try:
+                f_first = split_exec.submit(
+                    self._process_filter_batch_recursive,
+                    batch_tables=first_half, batch_idx=f"{batch_idx}a", **_common_kwargs
+                )
+                f_second = split_exec.submit(
+                    self._process_filter_batch_recursive,
+                    batch_tables=second_half, batch_idx=f"{batch_idx}b", **_common_kwargs
+                )
+                sub_batch_timeout = self.llm_timeout_seconds * 4
+                try:
+                    for f in safe_as_completed([f_first, f_second], timeout=sub_batch_timeout):
+                        try:
+                            results.update(f.result(timeout=self.llm_timeout_seconds * 3))
+                        except Exception as exc:
+                            self.logger.error(f"{depth_prefix}{log_prefix} Sub-batch failed: {get_clean_error_message(exc)}")
+                except concurrent.futures.TimeoutError:
+                    split_timed_out = True
+                    self.logger.error(f"{depth_prefix}{log_prefix} Sub-batch splitting timed out after {sub_batch_timeout}s")
+            finally:
+                split_exec.shutdown(wait=False, cancel_futures=split_timed_out)
             
             self.logger.info(f"{depth_prefix}{log_prefix} Sub-batches complete. Total: {len(results)} tables classified")
             return results
@@ -31122,6 +35388,8 @@ The user provided Strategic Goals that MUST be followed during generation.
                 try:
                     # Call LLM to classify tables in this batch
                     attempt_suffix = f" (attempt {attempt}/{max_retries})" if attempt > 1 else ""
+                    log_print(f"{depth_prefix}⏳ {log_prefix} Waiting for LLM response{attempt_suffix} (filtering {len(batch_tables)} tables into BUSINESS vs TECHNICAL)...")
+                    log_print(f"{depth_prefix}⏳ {log_prefix} Waiting for LLM response{attempt_suffix} (filtering {len(batch_tables)} tables into BUSINESS vs TECHNICAL)...")
                     self.logger.info(f"{depth_prefix}⏳ {log_prefix} Waiting for LLM response{attempt_suffix} (filtering {len(batch_tables)} tables into BUSINESS vs TECHNICAL)...")
                     response_raw = self.ai_agent.run_worker(
                         step_name=f"Filter_Business_Tables_Batch_{batch_idx}_Depth{depth}_Attempt{attempt}",
@@ -31129,6 +35397,7 @@ The user provided Strategic Goals that MUST be followed during generation.
                         prompt_vars=prompt_vars,
                         response_schema=None
                     )
+                    log_print(f"{depth_prefix}✅ {log_prefix} Received LLM response, parsing classifications...")
                     self.logger.info(f"{depth_prefix}✅ {log_prefix} Received LLM response, parsing classifications...")
                     
                     # Parse CSV response using centralized utility
@@ -31410,14 +35679,17 @@ The user provided Strategic Goals that MUST be followed during generation.
                 )
                 tasks.append(task)
             
-            # Execute in parallel with centralized utility
+            _num_waves = -(-max(len(tasks), 1) // max(classification_parallelism, 1))
+            classification_total_timeout = self.llm_timeout_seconds * 4 * _num_waves + 180
+            self.logger.info(f"Classification total timeout: {classification_total_timeout}s ({classification_total_timeout // 60} min) [{len(tasks)} tasks, {classification_parallelism} workers, {_num_waves} waves]")
             results = ParallelExecutor.execute_parallel(
                 tasks=tasks,
                 max_workers=classification_parallelism,
                 task_name="Classification Batch",
                 logger=self.logger,
                 thread_name_prefix="FilterBatch",
-                return_exceptions=True
+                return_exceptions=True,
+                total_timeout=classification_total_timeout
             )
             
             # Merge results from all batches
@@ -31571,7 +35843,7 @@ The user provided Strategic Goals that MUST be followed during generation.
             return (business_details, technical_details, business_tables_set, technical_tables_set, business_scores, data_category_map, master_tables_set, transactional_tables_set, reference_tables_set)
             
         except Exception as e:
-            self.logger.error(f"Failed to filter business vs technical tables: {e}. Proceeding with all tables.")
+            self.logger.error(f"Failed to filter business vs technical tables: {get_clean_error_message(e)}. Proceeding with all tables.")
             # On error, return all tables as business tables with default scores
             all_tables = set()
             default_scores = {}
@@ -31942,88 +36214,83 @@ The user provided Strategic Goals that MUST be followed during generation.
             clean_name = table_name.replace('`', '')
             return business_scores.get(clean_name, 50)  # Default to 50 if not found
         
-        def calculate_total_size(directly_inv_details, additional_det, unstructured):
-            """Calculate total size of schema context."""
-            # Load column tracking for SQL generation
+        def format_and_measure(directly_inv_details, additional_det, unstructured):
+            """Format schema and return (total_size, directly_schema, additional_schema)."""
             directly_schema = self._format_schema_for_prompt(directly_inv_details, load_column_tracking=True)
             additional_schema = ""
             if additional_det:
                 additional_schema = self._format_schema_for_prompt(additional_det, load_column_tracking=True)
-            return len(directly_schema) + len(additional_schema) + len(unstructured)
+            total = len(directly_schema) + len(additional_schema) + len(unstructured)
+            return total, directly_schema, additional_schema
+        
+        def truncate_tables_to_limit(details, col_limit):
+            """Truncate all tables in details to col_limit columns."""
+            tables = group_columns_by_table(details)
+            count = 0
+            for tname, cols in list(tables.items()):
+                if len(cols) > col_limit:
+                    tables[tname] = cols[:col_limit]
+                    count += 1
+            return rebuild_details_from_tables(tables), count
+        
+        # target_size accounts for unstructured docs allowance on top of max_schema_size
+        target_size = max_schema_size + len(unstructured_docs)
         
         # Initial check
-        total_size = calculate_total_size(directly_involved_details, additional_details, unstructured_docs)
-        target_size = max_schema_size + len(unstructured_docs)  # Total allowed
+        total_size, d_schema, a_schema = format_and_measure(directly_involved_details, additional_details, unstructured_docs)
         
         if total_size <= target_size:
-            # No truncation needed
-            directly_schema = self._format_schema_for_prompt(directly_involved_details, load_column_tracking=True)
-            additional_schema = ""
-            if additional_details:
-                additional_schema = self._format_schema_for_prompt(additional_details, load_column_tracking=True)
-            return (directly_schema, additional_schema, unstructured_docs, False)
+            return (d_schema, a_schema, unstructured_docs, False)
         
         self.logger.warning(f"Use case {use_case_id}: Schema exceeds limit. Starting progressive truncation...")
         
         # STEP 1: Drop unstructured documents
         self.logger.info(f"Use case {use_case_id}: Step 1 - Dropping unstructured documents")
         unstructured_docs_truncated = ""
-        total_size = calculate_total_size(directly_involved_details, additional_details, unstructured_docs_truncated)
+        target_size = max_schema_size  # Recalculate: no unstructured docs allowance anymore
+        total_size, d_schema, a_schema = format_and_measure(directly_involved_details, additional_details, unstructured_docs_truncated)
         
         if total_size <= target_size:
             self.logger.info(f"Use case {use_case_id}: Fits after dropping unstructured docs (size: {total_size:,} chars)")
-            directly_schema = self._format_schema_for_prompt(directly_involved_details, load_column_tracking=True)
-            additional_schema = ""
-            if additional_details:
-                additional_schema = self._format_schema_for_prompt(additional_details, load_column_tracking=True)
-            return (directly_schema, additional_schema, unstructured_docs_truncated, True)
+            return (d_schema, a_schema, unstructured_docs_truncated, True)
         
-        # STEP 2: Truncate tables with >250 columns to 250 columns
-        # CRITICAL: Truncate ALL tables (including directly involved) if they exceed 250 columns
+        # STEP 2: Truncate ALL tables (directly involved + additional) with >250 columns
         self.logger.info(f"Use case {use_case_id}: Step 2 - Truncating tables >250 columns to 250 columns")
+        directly_involved_details, d_trunc = truncate_tables_to_limit(directly_involved_details, 250)
+        additional_details_working = list(additional_details) if additional_details else []
+        if additional_details_working:
+            additional_details_working, a_trunc = truncate_tables_to_limit(additional_details_working, 250)
+        else:
+            a_trunc = 0
         
-        all_tables = group_columns_by_table(directly_involved_details)
-        truncated_count = 0
-        
-        for table_name, columns in list(all_tables.items()):
-            if len(columns) > 250:
-                all_tables[table_name] = columns[:250]
-                truncated_count += 1
-                self.logger.debug(f"Use case {use_case_id}: Truncated {table_name} from {len(columns)} to 250 columns")
-        
-        directly_involved_details = rebuild_details_from_tables(all_tables)
-        total_size = calculate_total_size(directly_involved_details, [], unstructured_docs_truncated)
-        
+        total_size, d_schema, a_schema = format_and_measure(directly_involved_details, additional_details_working, unstructured_docs_truncated)
         if total_size <= target_size:
-            self.logger.info(f"Use case {use_case_id}: Fits after truncating {truncated_count} tables to 250 columns (size: {total_size:,} chars)")
-            directly_schema = self._format_schema_for_prompt(directly_involved_details, load_column_tracking=True)
-            additional_schema = ""  # No additional tables left
-            return (directly_schema, additional_schema, unstructured_docs_truncated, True)
+            self.logger.info(f"Use case {use_case_id}: Fits after truncating {d_trunc + a_trunc} tables to 250 columns (size: {total_size:,} chars)")
+            return (d_schema, a_schema, unstructured_docs_truncated, True)
         
-        # STEP 3-5: Progressive column reduction (100 -> 50 -> 25 cols per table)
+        # STEP 3: Drop additional_details (keep only directly involved tables)
+        if additional_details_working:
+            self.logger.info(f"Use case {use_case_id}: Step 3 - Dropping additional context tables")
+            total_size, d_schema, a_schema = format_and_measure(directly_involved_details, [], unstructured_docs_truncated)
+            if total_size <= target_size:
+                self.logger.info(f"Use case {use_case_id}: Fits after dropping additional tables (size: {total_size:,} chars)")
+                return (d_schema, "", unstructured_docs_truncated, True)
+        
+        # STEP 4-6: Progressive column reduction on directly involved tables (100 -> 50 -> 25)
         column_limits = [100, 50, 25]
-        for step_idx, col_limit in enumerate(column_limits, start=3):
-            self.logger.info(f"Use case {use_case_id}: Step {step_idx} - Truncating ALL tables to {col_limit} columns")
-            all_tables_reduced = group_columns_by_table(directly_involved_details)
-            for table_name, columns in list(all_tables_reduced.items()):
-                if len(columns) > col_limit:
-                    all_tables_reduced[table_name] = columns[:col_limit]
-            reduced_details = rebuild_details_from_tables(all_tables_reduced)
-            total_size = calculate_total_size(reduced_details, [], unstructured_docs_truncated)
+        for step_idx, col_limit in enumerate(column_limits, start=4):
+            self.logger.info(f"Use case {use_case_id}: Step {step_idx} - Truncating directly-involved tables to {col_limit} columns")
+            directly_involved_details, _ = truncate_tables_to_limit(directly_involved_details, col_limit)
+            total_size, d_schema, a_schema = format_and_measure(directly_involved_details, [], unstructured_docs_truncated)
             if total_size <= target_size:
                 self.logger.info(f"Use case {use_case_id}: Fits after truncating to {col_limit} columns/table (size: {total_size:,} chars)")
-                directly_schema = self._format_schema_for_prompt(reduced_details, load_column_tracking=True)
-                return (directly_schema, "", unstructured_docs_truncated, True)
-            directly_involved_details = reduced_details
+                return (d_schema, "", unstructured_docs_truncated, True)
         
-        # STEP 6: Send what we have - the pre-flight check in the caller will apply
+        # STEP 7: Send what we have — the pre-flight check in the caller will apply
         # token-aware truncation or the retry loop will handle the overflow
         self.logger.warning(f"Use case {use_case_id}: Context still exceeds limit after aggressive truncation (size: {total_size:,} chars, limit: {target_size:,} chars)")
         self.logger.warning(f"Use case {use_case_id}: Sending reduced schema - pre-flight check or retry loop will handle overflow")
-        
-        directly_schema = self._format_schema_for_prompt(directly_involved_details, load_column_tracking=True)
-        additional_schema = ""
-        return (directly_schema, additional_schema, unstructured_docs_truncated, True)
+        return (d_schema, "", unstructured_docs_truncated, True)
 
     def _sanitize_name(self, name: str) -> str:
         if not name: return "_"
@@ -32219,6 +36486,8 @@ The user provided Strategic Goals that MUST be followed during generation.
                     "use_cases": use_cases
                 }
                 catalog_json["domains"].append(domain_obj)
+
+            self.final_inspire_results_json = catalog_json
             
             # Save to workspace
             json_path = os.path.join(self.docs_output_dir, f"{self.business_name}-dbx_inspire.json")
@@ -32240,7 +36509,7 @@ The user provided Strategic Goals that MUST be followed during generation.
             return summary_dict
             
         except Exception as e:
-            self.logger.error(f"Failed to save JSON Catalog: {e}")
+            self.logger.error(f"Failed to save JSON Catalog: {get_clean_error_message(e)}")
             return summary_dict
 
     def _run_queries_fixing_mode(self):
@@ -32276,9 +36545,10 @@ The user provided Strategic Goals that MUST be followed during generation.
             file_info = self.w_client.workspace.export(path=json_file_path, format=workspace.ExportFormat.AUTO)
             json_content = base64.b64decode(file_info.content).decode('utf-8')
             catalog_json = json.loads(json_content)
+            self.final_inspire_results_json = catalog_json
         except Exception as e:
-            self.logger.error(f"Failed to load JSON file: {e}")
-            log_print(f"❌ Failed to load JSON file: {e}")
+            self.logger.error(f"Failed to load JSON file: {get_clean_error_message(e)}")
+            log_print(f"❌ Failed to load JSON file: {get_clean_error_message(e, max_chars=200)}")
             return
         
         json_business_name = catalog_json.get("business_name", None)
@@ -32374,7 +36644,7 @@ The user provided Strategic Goals that MUST be followed during generation.
                 )
                 self.logger.info(f"✅ DataLoader initialized for catalogs: {catalogs_str if catalogs_str else '(all)'}")
             except Exception as e:
-                self.logger.warning(f"⚠️ Could not initialize DataLoader for dynamic loading: {e}")
+                self.logger.warning(f"⚠️ Could not initialize DataLoader for dynamic loading: {get_clean_error_message(e)}")
                 self.logger.warning("   User-requested tables not in JSON will cause hallucinated columns!")
                 log_print(f"   ⚠️ Dynamic table loading unavailable - user-requested tables may have hallucinated columns", level="WARNING")
         
@@ -32437,8 +36707,8 @@ The user provided Strategic Goals that MUST be followed during generation.
         try:
             notebook_list = list(self.w_client.workspace.list(self.notebook_output_dir))
         except Exception as e:
-            self.logger.error(f"Failed to list notebooks in {self.notebook_output_dir}: {e}")
-            log_print(f"❌ Failed to list notebooks: {e}", level="ERROR")
+            self.logger.error(f"Failed to list notebooks in {self.notebook_output_dir}: {get_clean_error_message(e)}")
+            log_print(f"❌ Failed to list notebooks: {get_clean_error_message(e, max_chars=200)}", level="ERROR")
             return
         
         # Match use case ID from header and find regenerate_sql status anywhere in the cell
@@ -32504,7 +36774,7 @@ The user provided Strategic Goals that MUST be followed during generation.
                                 log_print(f"   🔄 [{uc_id}] regenerate_sql:Yes")
                         
             except Exception as e:
-                self.logger.debug(f"Could not parse notebook {item.path}: {e}")
+                self.logger.debug(f"Could not parse notebook {item.path}: {get_clean_error_message(e, max_chars=2000)}")
                 continue
         
         log_print(f"   • Notebooks scanned: {len(notebook_list)}")
@@ -32696,7 +36966,7 @@ The user provided Strategic Goals that MUST be followed during generation.
                                         self.logger.warning(f"[{uc_id}] Invalid table name format '{tbl_name}' - expected catalog.schema.table")
                                         tables_not_found.append(tbl_name)
                                 except Exception as e:
-                                    self.logger.warning(f"[{uc_id}] Failed to load table '{tbl_name}' dynamically: {e}")
+                                    self.logger.warning(f"[{uc_id}] Failed to load table '{tbl_name}' dynamically: {get_clean_error_message(e)}")
                                     tables_not_found.append(tbl_name)
                         
                         if additional_schema_lines:
@@ -32748,7 +37018,7 @@ The user has provided regeneration instructions which have been interpreted into
                     uc['_interpretation_status'] = 'success'
                     
                 except Exception as e:
-                    self.logger.warning(f"[{uc_id}] Failed to interpret user instructions: {e}. Proceeding with raw instructions.")
+                    self.logger.warning(f"[{uc_id}] Failed to interpret user instructions: {get_clean_error_message(e)}. Proceeding with raw instructions.")
                     # Fallback: use raw instructions in a simpler format
                     uc['_interpreted_regeneration_context'] = f"""
 **🔥 REGENERATION MODE - USER INSTRUCTIONS 🔥**
@@ -32766,7 +37036,6 @@ The user has provided the following instructions for regenerating this SQL query
             
             # Execute interpretation in parallel using ThreadPoolExecutor
             # ADAPTIVE PARALLELISM: Calculate based on use cases to interpret
-            from concurrent.futures import ThreadPoolExecutor, as_completed
             
             interpretation_parallelism, reason = calculate_adaptive_parallelism(
                 "sql_generation", self.max_parallelism,
@@ -32777,12 +37046,12 @@ The user has provided the following instructions for regenerating this SQL query
             
             interpretation_results = {}
             _interp_total_timeout = max(600, len(use_cases_with_instructions) * 120)
-            with ThreadPoolExecutor(max_workers=interpretation_parallelism, thread_name_prefix="InterpretInstr") as executor:
-                future_to_uc = {executor.submit(interpret_single_use_case, uc): uc.get('No', 'UNKNOWN') for uc in use_cases_with_instructions}
+            with _SafeExecutorContext(max_workers=interpretation_parallelism, thread_name_prefix="InterpretInstr", logger=self.logger, name="InterpretInstr") as ctx:
+                future_to_uc = {ctx.submit(interpret_single_use_case, uc): uc.get('No', 'UNKNOWN') for uc in use_cases_with_instructions}
                 
                 completed_count = 0
                 try:
-                    for future in as_completed(future_to_uc, timeout=_interp_total_timeout):
+                    for future in safe_as_completed(future_to_uc, timeout=_interp_total_timeout):
                         uc_id = future_to_uc[future]
                         try:
                             updated_uc = future.result(timeout=120)
@@ -32794,7 +37063,7 @@ The user has provided the following instructions for regenerating this SQL query
                             else:
                                 log_print(f"   ⚠️ [{uc_id}] Using fallback instructions ({completed_count}/{len(use_cases_with_instructions)})")
                         except Exception as e:
-                            self.logger.error(f"[{uc_id}] Interpretation failed with error: {e}")
+                            self.logger.error(f"[{uc_id}] Interpretation failed with error: {get_clean_error_message(e)}")
                             log_print(f"   ❌ [{uc_id}] Interpretation error: {str(e)[:50]}")
                             for uc in use_cases_with_instructions:
                                 if uc.get('No') == uc_id:
@@ -32812,6 +37081,7 @@ The user has provided the following instructions for regenerating this SQL query
                                     interpretation_results[uc_id] = uc
                                     break
                 except concurrent.futures.TimeoutError:
+                    ctx.mark_timed_out()
                     self.logger.error(f"⏱️ Interpretation total timeout after {_interp_total_timeout}s. Completed {completed_count}/{len(use_cases_with_instructions)}.")
                     for future in future_to_uc:
                         if not future.done():
@@ -32931,6 +37201,7 @@ The user has provided the following instructions for regenerating this SQL query
         
         try:
             updated_json = json.dumps(catalog_json, indent=2, ensure_ascii=False)
+            self.final_inspire_results_json = catalog_json
             import_content = base64.b64encode(updated_json.encode('utf-8')).decode('utf-8')
             self.w_client.workspace.import_(
                 path=json_file_path,
@@ -32941,8 +37212,8 @@ The user has provided the following instructions for regenerating this SQL query
             log_print(f"\n✅ JSON file updated: {json_file_path}")
             self.logger.info(f"JSON file updated successfully: {json_file_path}")
         except Exception as e:
-            self.logger.error(f"Failed to update JSON file: {e}")
-            log_print(f"⚠️ Failed to update JSON file: {e}", level="WARNING")
+            self.logger.error(f"Failed to update JSON file: {get_clean_error_message(e)}")
+            log_print(f"⚠️ Failed to update JSON file: {get_clean_error_message(e, max_chars=200)}", level="WARNING")
         
         # Update notebook cells with new SQL and reset header
         # FIX: Batch updates by notebook to avoid lost updates from eventual consistency
@@ -33009,8 +37280,8 @@ The user has provided the following instructions for regenerating this SQL query
         try:
             self._run_generate_sample_result_mode(called_from_sql_regen=True)
         except Exception as e:
-            self.logger.warning(f"Sample generation after SQL regeneration failed: {e}")
-            log_print(f"⚠️ Sample generation encountered an issue: {e}", level="WARNING")
+            self.logger.warning(f"Sample generation after SQL regeneration failed: {get_clean_error_message(e)}")
+            log_print(f"⚠️ Sample generation encountered an issue: {get_clean_error_message(e, max_chars=200)}", level="WARNING")
         
         self._upload_log_file()
         AIAgent.get_summary_report()
@@ -33043,7 +37314,7 @@ The user has provided the following instructions for regenerating this SQL query
             notebook_json = json.loads(notebook_json_str)
             self.logger.info(f"[BATCH] Successfully loaded notebook with {len(notebook_json.get('cells', []))} cells")
         except Exception as e:
-            self.logger.warning(f"[BATCH] Could not load notebook {notebook_path}: {e}")
+            self.logger.warning(f"[BATCH] Could not load notebook {notebook_path}: {get_clean_error_message(e)}")
             return 0
         
         cells = notebook_json.get('cells', [])
@@ -33122,7 +37393,7 @@ The user has provided the following instructions for regenerating this SQL query
                 self.logger.info(f"[BATCH] Saved notebook {notebook_path} with {cells_updated} updated cells")
                 log_print(f"   ✅ [{notebook_name}] {cells_updated} cells updated (batched save)")
             except Exception as e:
-                self.logger.error(f"[BATCH] Failed to save notebook {notebook_path}: {e}")
+                self.logger.error(f"[BATCH] Failed to save notebook {notebook_path}: {get_clean_error_message(e)}")
                 return 0
         
         return cells_updated
@@ -33182,7 +37453,7 @@ The user has provided the following instructions for regenerating this SQL query
             notebook_json = json.loads(notebook_json_str)
             self.logger.info(f"[{uc_id}] Successfully loaded notebook with {len(notebook_json.get('cells', []))} cells")
         except Exception as e:
-            self.logger.warning(f"[{uc_id}] Could not find notebook for domain '{domain_name}' at {notebook_path}: {e}")
+            self.logger.warning(f"[{uc_id}] Could not find notebook for domain '{domain_name}' at {notebook_path}: {get_clean_error_message(e)}")
             return False
         
         cells = notebook_json.get('cells', [])
@@ -33245,7 +37516,7 @@ The user has provided the following instructions for regenerating this SQL query
             log_print(f"   ✅ [{uc_id}] Updated in {notebook_name}")
             return True
         except Exception as e:
-            self.logger.error(f"Failed to update notebook for [{uc_id}]: {e}")
+            self.logger.error(f"Failed to update notebook for [{uc_id}]: {get_clean_error_message(e)}")
             return False
 
     def _extract_clean_sql_error(self, error: Exception) -> str:
@@ -33349,9 +37620,12 @@ The user has provided the following instructions for regenerating this SQL query
                     log_print(f"   ⚠️ [{uc_id}] Fix returned same SQL, skipping retry", level="WARNING")
                     continue
                 
+                fixed_sql, _ = self._extract_sql_and_columns_from_response(fixed_sql)
                 fixed_sql = self._apply_sql_auto_fixes(fixed_sql, uc_id)
                 df = self._execute_sql_statements(fixed_sql)
-                pdf = df.toPandas()
+                pdf = df.limit(1000).toPandas()
+                del df
+                gc.collect()
                 
                 log_print(f"   ✅ [{uc_id}] SQL fixed successfully on attempt {attempt}")
                 return (True, fixed_sql, pdf)
@@ -33417,7 +37691,7 @@ The user has provided the following instructions for regenerating this SQL query
             self.logger.info(f"Loaded {len(use_case_lookup)} use cases and {len(schema_lookup)} table schemas for SQL fixing")
             
         except Exception as e:
-            self.logger.warning(f"Could not load JSON for SQL fixing: {e}")
+            self.logger.warning(f"Could not load JSON for SQL fixing: {get_clean_error_message(e)}")
         
         return (use_case_lookup, schema_lookup)
 
@@ -33489,7 +37763,7 @@ The user has provided the following instructions for regenerating this SQL query
             return False
             
         except Exception as e:
-            self.logger.error(f"Failed to update notebook for [{uc_id}]: {e}")
+            self.logger.error(f"Failed to update notebook for [{uc_id}]: {get_clean_error_message(e)}")
             return False
 
     def _run_generate_sample_result_mode(self, called_from_sql_regen: bool = False):
@@ -33520,6 +37794,13 @@ The user has provided the following instructions for regenerating this SQL query
         import json
         import base64
         import pandas as pd
+        
+        try:
+            self.spark.sql("SET spark.sql.execution.arrow.pyspark.enabled=true")
+        except Exception:
+            pass
+        
+        _TOPANDAS_ROW_LIMIT = 1000
         
         # Try to import openpyxl, install if needed, fall back to markdown-only if unavailable
         excel_available = False
@@ -33553,19 +37834,20 @@ The user has provided the following instructions for regenerating this SQL query
                 self.w_client.workspace.mkdirs(dir_path)
                 self.logger.info(f"Created directory: {dir_path}")
             except Exception as e:
-                self.logger.debug(f"Directory may already exist: {dir_path}: {e}")
+                self.logger.debug(f"Directory may already exist: {dir_path}: {get_clean_error_message(e, max_chars=2000)}")
         
         # Scan notebooks
         try:
             notebook_list = list(self.w_client.workspace.list(self.notebook_output_dir))
         except Exception as e:
-            self.logger.error(f"Failed to list notebooks in {self.notebook_output_dir}: {e}")
-            log_print(f"❌ Failed to list notebooks: {e}", level="ERROR")
+            self.logger.error(f"Failed to list notebooks in {self.notebook_output_dir}: {get_clean_error_message(e)}")
+            log_print(f"❌ Failed to list notebooks: {get_clean_error_message(e, max_chars=200)}", level="ERROR")
             return
         
-        # Patterns for parsing notebook cells
+        # Patterns for parsing notebook cells (compiled once, used across all cells)
         use_case_id_pattern = re.compile(r'--Use Case:\s*([A-Za-z0-9_-]+)\s*-\s*(.+?)$', re.MULTILINE)
         generate_sample_pattern = re.compile(r'generate_sample_result:\s*(Yes|No)', re.IGNORECASE)
+        dummy_sql_pattern = re.compile(r'^\s*SELECT\s+\*\s+FROM\s+\S+\s+LIMIT\s+10\s*;?\s*$', re.IGNORECASE)
         
         # Collect all use cases that need sample generation
         notebooks_with_samples = {}  # notebook_path -> list of (use_case_id, use_case_name, sql, markdown_table)
@@ -33612,14 +37894,22 @@ The user has provided the following instructions for regenerating this SQL query
                             uc_id = uc_match.group(1).strip()
                             uc_name = uc_match.group(2).strip()
                             
-                            # Extract SQL (remove header lines)
+                            # Extract SQL (remove header lines and block comments)
                             sql_lines = []
                             in_sql = False
+                            in_block_comment = False
                             for line in cell_content.split('\n'):
                                 line_stripped = line.strip()
-                                if line_stripped.startswith('--') or line_stripped.startswith('/**') or line_stripped.startswith('*/'):
+                                if not in_block_comment and line_stripped.startswith('/**'):
+                                    in_block_comment = True
+                                    if line_stripped.endswith('**/') or line_stripped.endswith('*/'):
+                                        in_block_comment = False
                                     continue
-                                if 'Regeneration Instruction' in line:
+                                if in_block_comment:
+                                    if line_stripped.endswith('**/') or line_stripped.endswith('*/'):
+                                        in_block_comment = False
+                                    continue
+                                if line_stripped.startswith('--'):
                                     continue
                                 if line_stripped:
                                     in_sql = True
@@ -33628,11 +37918,15 @@ The user has provided the following instructions for regenerating this SQL query
                             
                             sql = '\n'.join(sql_lines).strip()
                             if sql:
+                                if dummy_sql_pattern.match(sql) or 'This is a dummy SQL' in cell_content:
+                                    log_print(f"   ⏭️ Skipping [{uc_id}] - dummy/placeholder SQL (no AI analysis to sample)")
+                                    self.logger.info(f"[{uc_id}] Skipped sample generation: dummy SQL detected")
+                                    continue
                                 notebook_samples.append((uc_id, uc_name, sql, current_markdown_table))
                                 log_print(f"   📝 Found [{uc_id}] in {notebook_name}")
                 
             except Exception as e:
-                self.logger.debug(f"Could not parse notebook {item.path}: {e}")
+                self.logger.debug(f"Could not parse notebook {item.path}: {get_clean_error_message(e, max_chars=2000)}")
                 continue
             
             if notebook_samples:
@@ -33650,12 +37944,11 @@ The user has provided the following instructions for regenerating this SQL query
         
         use_case_lookup, schema_lookup = self._load_json_for_sample_fixing()
         
-        from concurrent.futures import ThreadPoolExecutor, as_completed
         import threading
         import gc
         
-        WAVE_SIZE = 4
-        MAX_CONCURRENT_FIXES = 2
+        WAVE_SIZE = 8
+        MAX_CONCURRENT_FIXES = 4
         fix_semaphore = threading.Semaphore(MAX_CONCURRENT_FIXES)
         
         sample_parallelism = min(WAVE_SIZE, max(2, self.max_parallelism // 2))
@@ -33667,6 +37960,31 @@ The user has provided the following instructions for regenerating this SQL query
         log_print(f"   └─ Processing notebook-by-notebook with immediate memory release")
         log_print(f"   └─ Max concurrent SQL fixes: {MAX_CONCURRENT_FIXES} (backpressure)")
         log_print(f"{'='*80}\n")
+        
+        AI_COLUMN_PREFIXES = ('ai_cat_', 'ai_txt_', 'ai_num_', 'ai_bool_', 'ai_sys_')
+        
+        def prettify_column_name(col_name: str) -> str:
+            """Convert SQL column names to human-readable display names.
+            
+            Strips known AI prefixes (ai_cat_, ai_txt_, ai_num_, ai_bool_, ai_sys_)
+            and converts underscore_separated_names to Title Case.
+            
+            Examples:
+                ai_cat_fraud_levels       -> Fraud Levels
+                ai_txt_executive_summary  -> Executive Summary
+                ai_num_total_revenue      -> Total Revenue
+                ai_bool_is_active         -> Is Active
+                customer_name             -> Customer Name
+                next_renewal_date         -> Next Renewal Date
+                Name                      -> Name (unchanged)
+            """
+            if not col_name:
+                return col_name
+            for prefix in AI_COLUMN_PREFIXES:
+                if col_name.startswith(prefix):
+                    col_name = col_name[len(prefix):]
+                    break
+            return col_name.replace('_', ' ').strip().title()
         
         def extract_transposed_data(pdf, uc_id: str, max_records: int = 10) -> list:
             """Extract transposed data for up to max_records rows.
@@ -33801,8 +38119,9 @@ The user has provided the following instructions for regenerating this SQL query
             pdf = None
             try:
                 df = self._execute_sql_statements(sql)
-                pdf = df.toPandas()
+                pdf = df.limit(_TOPANDAS_ROW_LIMIT).toPandas()
                 del df
+                gc.collect()
                 
                 if pdf is not None and not pdf.empty:
                     result['transposed_data'] = extract_transposed_data(pdf, uc_id)
@@ -33888,11 +38207,11 @@ The user has provided the following instructions for regenerating this SQL query
                 self.logger.info(f"[{notebook_name}] Wave {wave_num}/{total_waves}: Processing {len(wave_samples)} samples")
                 
                 _wave_total_timeout = max(600, len(wave_samples) * 300)
-                with ThreadPoolExecutor(max_workers=sample_parallelism, thread_name_prefix=f"Wave{wave_num}") as executor:
-                    futures = {executor.submit(execute_single_sample_memory_safe, s): s['uc_id'] for s in wave_samples}
+                with _SafeExecutorContext(max_workers=sample_parallelism, thread_name_prefix=f"Wave{wave_num}", logger=self.logger, name=f"Wave{wave_num}") as ctx:
+                    futures = {ctx.submit(execute_single_sample_memory_safe, s): s['uc_id'] for s in wave_samples}
                     
                     try:
-                      for future in as_completed(futures, timeout=_wave_total_timeout):
+                      for future in safe_as_completed(futures, timeout=_wave_total_timeout):
                         uc_id = futures[future]
                         try:
                             result = future.result(timeout=300)
@@ -33911,14 +38230,17 @@ The user has provided the following instructions for regenerating this SQL query
                                     sheet_name = uc_id[:31]
                                     ws = wb.create_sheet(title=sheet_name)
                                     
-                                    right_align = Alignment(horizontal='right')
-                                    left_align_wrap = Alignment(horizontal='left', wrap_text=True)
+                                    right_align = Alignment(horizontal='right', vertical='center')
+                                    left_align_wrap = Alignment(horizontal='left', wrap_text=True, vertical='center')
+                                    center_valign = Alignment(vertical='center')
                                     info_fill = PatternFill(start_color="E6F3FF", end_color="E6F3FF", fill_type="solid")
                                     
                                     ws['A1'] = f"Use Case: {uc_id}"
                                     ws['A1'].font = Font(bold=True, size=14)
+                                    ws['A1'].alignment = center_valign
                                     ws['A2'] = f"Name: {result['uc_name']}"
                                     ws['A2'].font = Font(bold=True, size=12)
+                                    ws['A2'].alignment = center_valign
                                     ws.merge_cells('A1:B1')
                                     ws.merge_cells('A2:B2')
                                     
@@ -33928,6 +38250,7 @@ The user has provided the following instructions for regenerating this SQL query
                                     if uc_info:
                                         ws.cell(row=current_row, column=1, value='USE CASE INFORMATION')
                                         ws.cell(row=current_row, column=1).font = Font(bold=True, size=11, color="0066CC")
+                                        ws.cell(row=current_row, column=1).alignment = center_valign
                                         ws.merge_cells(f'A{current_row}:B{current_row}')
                                         current_row += 1
                                         
@@ -33951,16 +38274,21 @@ The user has provided the following instructions for regenerating this SQL query
                                     
                                     ws.cell(row=current_row, column=1, value=f'SAMPLE DATA ({num_records} record{"s" if num_records > 1 else ""})')
                                     ws.cell(row=current_row, column=1).font = Font(bold=True, size=11, color="0066CC")
+                                    ws.cell(row=current_row, column=1).alignment = center_valign
                                     ws.merge_cells(f'A{current_row}:B{current_row}')
                                     current_row += 1
                                     
                                     separator_fill = PatternFill(start_color="D9D9D9", end_color="D9D9D9", fill_type="solid")
+                                    ai_result_prefixes = ('ai_cat_', 'ai_txt_', 'ai_num_', 'ai_bool_')
+                                    ai_separator_fill = PatternFill(start_color="FF8C00", end_color="FF8C00", fill_type="solid")
+                                    ai_separator_align = Alignment(horizontal='center', vertical='center')
                                     
                                     for record_idx, record_data in enumerate(all_records):
                                         if record_idx > 0:
                                             ws.cell(row=current_row, column=1, value=f'--- Record {record_idx + 1} ---')
                                             ws.cell(row=current_row, column=1).font = Font(bold=True, size=10, italic=True)
                                             ws.cell(row=current_row, column=1).fill = separator_fill
+                                            ws.cell(row=current_row, column=1).alignment = center_valign
                                             ws.cell(row=current_row, column=2).fill = separator_fill
                                             ws.merge_cells(f'A{current_row}:B{current_row}')
                                             current_row += 1
@@ -33974,13 +38302,27 @@ The user has provided the following instructions for regenerating this SQL query
                                             ws.cell(row=current_row, column=1).border = thin_border
                                             ws.cell(row=current_row, column=2).border = thin_border
                                             ws.cell(row=current_row, column=1).alignment = right_align
+                                            ws.cell(row=current_row, column=2).alignment = center_valign
                                             current_row += 1
                                         
+                                        ai_separator_inserted = False
                                         for row_data in record_data:
                                             col_name = row_data['Column']
                                             if col_name.startswith('ai_sys_'):
                                                 continue
-                                            ws.cell(row=current_row, column=1, value=col_name)
+                                            if not ai_separator_inserted and any(col_name.startswith(p) for p in ai_result_prefixes):
+                                                ai_separator_inserted = True
+                                                ws.cell(row=current_row, column=1, value='Inspire AI Analysis Result')
+                                                ws.cell(row=current_row, column=1).font = Font(bold=True, size=11, color="FFFFFF")
+                                                ws.cell(row=current_row, column=1).fill = ai_separator_fill
+                                                ws.cell(row=current_row, column=1).alignment = ai_separator_align
+                                                ws.cell(row=current_row, column=2).fill = ai_separator_fill
+                                                ws.cell(row=current_row, column=1).border = thin_border
+                                                ws.cell(row=current_row, column=2).border = thin_border
+                                                ws.merge_cells(f'A{current_row}:B{current_row}')
+                                                current_row += 1
+                                            display_name = prettify_column_name(col_name)
+                                            ws.cell(row=current_row, column=1, value=display_name)
                                             ws.cell(row=current_row, column=2, value=row_data['Value'])
                                             ws.cell(row=current_row, column=1).font = column_font
                                             ws.cell(row=current_row, column=1).border = thin_border
@@ -34017,6 +38359,7 @@ The user has provided the following instructions for regenerating this SQL query
                             notebook_failed += 1
                             log_print(f"   ❌ [{uc_id}] Exception: {str(e)[:50]} ({global_processed}/{total_samples})", level="ERROR")
                     except concurrent.futures.TimeoutError:
+                        ctx.mark_timed_out()
                         self.logger.error(f"⏱️ Wave {wave_num} total timeout after {_wave_total_timeout}s. Cancelling remaining.")
                         for f in futures:
                             if not f.done():
@@ -34051,7 +38394,7 @@ The user has provided the following instructions for regenerating this SQL query
                     del excel_content
                     
                 except Exception as e:
-                    self.logger.error(f"Failed to save Excel for {notebook_name}: {e}")
+                    self.logger.error(f"Failed to save Excel for {notebook_name}: {get_clean_error_message(e)}")
                     log_print(f"   ❌ Failed to save Excel: {str(e)[:80]}", level="ERROR")
             
             if wb is not None:
@@ -34098,6 +38441,7 @@ The user has provided the following instructions for regenerating this SQL query
                     
                     md_content += f"### Sample Result ({num_records} record{'s' if num_records > 1 else ''})\n\n"
                     
+                    ai_result_prefixes_md = ('ai_cat_', 'ai_txt_', 'ai_num_', 'ai_bool_')
                     for record_idx, record_data in enumerate(all_records):
                         if record_idx > 0:
                             md_content += f"\n**--- Record {record_idx + 1} ---**\n\n"
@@ -34105,11 +38449,16 @@ The user has provided the following instructions for regenerating this SQL query
                         md_content += "| Column | Value |\n"
                         md_content += "|-------:|-------|\n"
                         
+                        ai_separator_inserted_md = False
                         for row in record_data:
                             col_name = row['Column']
                             if col_name.startswith('ai_sys_'):
                                 continue
-                            col = col_name.replace('|', '\\|')
+                            if not ai_separator_inserted_md and any(col_name.startswith(p) for p in ai_result_prefixes_md):
+                                ai_separator_inserted_md = True
+                                md_content += f"| **--- Inspire AI Analysis Result ---** | |\n"
+                            display_name = prettify_column_name(col_name)
+                            col = display_name.replace('|', '\\|')
                             val = str(row['Value'])[:200].replace('|', '\\|').replace('\n', ' ')
                             md_content += f"| {col} | {val} |\n"
                     
@@ -34127,7 +38476,7 @@ The user has provided the following instructions for regenerating this SQL query
                     md_files_created += 1
                     log_print(f"   📝 Saved: {notebook_name}_samples.md ({len(results)} use cases)")
                 except Exception as e:
-                    self.logger.error(f"Failed to save MD file for {notebook_name}: {e}")
+                    self.logger.error(f"Failed to save MD file for {notebook_name}: {get_clean_error_message(e)}")
                     log_print(f"   ❌ Failed to save MD: {notebook_name}_samples.md: {str(e)[:60]}", level="ERROR")
         
         log_print(f"\n{'='*80}")
@@ -34237,7 +38586,7 @@ The user has provided the following instructions for regenerating this SQL query
             return (final_consolidated_use_cases, summary_dict, english_grouped_data)
             
         except Exception as e:
-            self.logger.error(f"Failed to load JSON Catalog: {e}")
+            self.logger.error(f"Failed to load JSON Catalog: {get_clean_error_message(e)}")
             raise
 
     def _upload_log_file(self):
@@ -34259,18 +38608,23 @@ The user has provided the following instructions for regenerating this SQL query
                 self.logger.warning("Log file is empty. Skipping upload.")
                 return
             
-            # Copy log file to base output directory for easy access
             output_log_path = os.path.join(self.base_output_dir, "log.txt")
             try:
-                if self.base_output_dir.startswith("/tmp/") or self.base_output_dir.startswith("/dbfs/"):
-                    os.makedirs(self.base_output_dir, exist_ok=True)
-                    shutil.copy2(log_file_path, output_log_path)
-                    self.logger.info(f"✅ Log file copied to output directory: {output_log_path}")
-                    log_print(f"✅ Log file available at: {output_log_path}")
-                else:
-                    self.logger.info(f"Skipping local copy of log file (non-local path): {output_log_path}")
+                os.makedirs(os.path.dirname(output_log_path), exist_ok=True)
+                shutil.copy2(log_file_path, output_log_path)
+                self.logger.info(f"✅ Log file copied to output directory: {output_log_path}")
+                log_print(f"✅ Log file available at: {output_log_path}")
             except Exception as copy_error:
                 self.logger.warning(f"Failed to copy log file to output directory: {copy_error}")
+            
+            local_backup_log = os.path.join("/tmp", self.sanitized_customer_name, "log.txt")
+            if log_file_path != local_backup_log:
+                try:
+                    os.makedirs(os.path.dirname(local_backup_log), exist_ok=True)
+                    shutil.copy2(log_file_path, local_backup_log)
+                    self.logger.info(f"✅ Log file backup saved to: {local_backup_log}")
+                except Exception:
+                    pass
             
             # Also upload to workspace for Databricks UI access
             workspace_log_path = os.path.join(self.docs_output_dir, "generation_log.txt")
@@ -34285,7 +38639,7 @@ The user has provided the following instructions for regenerating this SQL query
             self.logger.info(f"Successfully uploaded log file to workspace: {abs_path}")
             log_print(f"✅ Log file also uploaded to workspace: {abs_path}")
         except Exception as e:
-            self.logger.error(f"Failed to upload log file: {e}")
+            self.logger.error(f"Failed to upload log file: {get_clean_error_message(e)}")
             if log_file_path:
                 self.logger.error(f"Log file was at: {log_file_path}")
 
@@ -34295,105 +38649,4 @@ The user has provided the following instructions for regenerating this SQL query
 # ==============================================================================
 # 4. MAIN EXECUTION METHOD (MODIFIED)
 # ==============================================================================
-
-
-# COMMAND ----------
-
-
-# ════════════════════════════════════════════════════════════════════
-# PIPELINE STATE PERSISTENCE (for multi-notebook workflow)
-# ════════════════════════════════════════════════════════════════════
-import json as _json
-
-class PipelineState:
-    """Persist state between workflow tasks using Delta tables."""
-    
-    def __init__(self, spark, inspire_database):
-        self.spark = spark
-        self.inspire_database = inspire_database
-        self._state_table = f"{inspire_database}._inspire_pipeline_state"
-    
-    def save(self, phase_name, data):
-        """Save phase output state as JSON to Delta table."""
-        json_str = _json.dumps(data, default=str)
-        self.spark.sql(f"""
-            MERGE INTO {self._state_table} AS target
-            USING (SELECT '{phase_name}' AS phase_name, '{json_str.replace("'", "''")}' AS state_json, current_timestamp() AS updated_at) AS source
-            ON target.phase_name = source.phase_name
-            WHEN MATCHED THEN UPDATE SET state_json = source.state_json, updated_at = source.updated_at
-            WHEN NOT MATCHED THEN INSERT (phase_name, state_json, updated_at) VALUES (source.phase_name, source.state_json, source.updated_at)
-        """)
-        log_print(f"💾 Saved pipeline state for phase: {phase_name}")
-    
-    def load(self, phase_name):
-        """Load phase output state from Delta table."""
-        try:
-            rows = self.spark.sql(f"SELECT state_json FROM {self._state_table} WHERE phase_name = '{phase_name}'").collect()
-            if rows:
-                return _json.loads(rows[0]['state_json'])
-        except Exception as e:
-            log_print(f"⚠️ Could not load state for phase {phase_name}: {e}", level="WARNING")
-        return None
-    
-    def ensure_table(self):
-        """Create the state table if it doesn't exist.
-        NOTE: The catalog must already exist — only creates the schema if needed.
-        """
-        parts = self.inspire_database.split('.')
-        if len(parts) == 2:
-            catalog_name = parts[0].strip()
-            # Verify catalog exists before attempting schema creation
-            try:
-                self.spark.sql(f"USE CATALOG `{catalog_name}`")
-            except Exception as e:
-                raise RuntimeError(
-                    f"Catalog '{catalog_name}' does not exist in your workspace. "
-                    f"Please create it first (CREATE CATALOG `{catalog_name}`) or use an existing catalog. "
-                    f"Inspire Database was set to '{self.inspire_database}'."
-                ) from e
-            # Don't create catalog — it must exist. Only create the schema.
-            self.spark.sql(f"CREATE SCHEMA IF NOT EXISTS {self.inspire_database}")
-        self.spark.sql(f"""
-            CREATE TABLE IF NOT EXISTS {self._state_table} (
-                phase_name STRING,
-                state_json STRING,
-                updated_at TIMESTAMP
-            ) USING DELTA
-        """)
-    
-    def save_use_cases_delta(self, use_cases, table_suffix="_pipeline_use_cases"):
-        """Save use cases list to a Delta table for cross-notebook sharing."""
-        import pyspark.sql.functions as F
-        json_rows = [_json.dumps(uc, default=str) for uc in use_cases]
-        df = self.spark.createDataFrame([(i, j) for i, j in enumerate(json_rows)], ["idx", "use_case_json"])
-        df.write.mode("overwrite").saveAsTable(f"{self.inspire_database}.{table_suffix}")
-        log_print(f"💾 Saved {len(use_cases)} use cases to {self.inspire_database}.{table_suffix}")
-    
-    def load_use_cases_delta(self, table_suffix="_pipeline_use_cases"):
-        """Load use cases list from Delta table."""
-        try:
-            rows = self.spark.sql(f"SELECT use_case_json FROM {self.inspire_database}.{table_suffix} ORDER BY idx").collect()
-            return [_json.loads(r['use_case_json']) for r in rows]
-        except Exception as e:
-            log_print(f"⚠️ Could not load use cases from Delta: {e}", level="WARNING")
-            return []
-    
-    def save_schema_delta(self, schema_details, table_suffix="_pipeline_schema"):
-        """Save schema details (column tuples) to Delta for cross-notebook sharing."""
-        rows = []
-        for detail in schema_details:
-            (catalog, schema, table, col_name, col_type, col_comment) = detail
-            rows.append((catalog, schema, table, col_name, col_type, str(col_comment) if col_comment else ""))
-        df = self.spark.createDataFrame(rows, ["catalog", "schema", "table_name", "col_name", "col_type", "col_comment"])
-        df.write.mode("overwrite").saveAsTable(f"{self.inspire_database}.{table_suffix}")
-        log_print(f"💾 Saved {len(schema_details)} column details to {self.inspire_database}.{table_suffix}")
-    
-    def load_schema_delta(self, table_suffix="_pipeline_schema"):
-        """Load schema details from Delta table."""
-        try:
-            rows = self.spark.sql(f"SELECT * FROM {self.inspire_database}.{table_suffix}").collect()
-            return [(r['catalog'], r['schema'], r['table_name'], r['col_name'], r['col_type'], r['col_comment']) for r in rows]
-        except Exception as e:
-            log_print(f"⚠️ Could not load schema from Delta: {e}", level="WARNING")
-            return []
 

@@ -4,8 +4,27 @@ import {
   BarChart3, Target, Lightbulb, Users, Table2, Sparkles,
   TrendingUp, Shield, Clock, Layers, Brain, AlertTriangle,
   Star, ArrowUpDown, X, Eye, Code, Building2, GitBranch,
-  Gauge, CheckCircle2, XCircle, Tag, Briefcase
+  Gauge, CheckCircle2, XCircle, Tag, Briefcase, FileText,
+  Calendar, Hash, RefreshCw
 } from 'lucide-react';
+
+/* ─── Priority/Quality string → numeric mapping ─── */
+const QUALITY_RANK = {
+  'Ultra High': 10,
+  'Very High': 8.5,
+  'High': 7,
+  'Medium': 5,
+  'Low': 3,
+  'Very Low': 1.5,
+  'Ultra Low': 0.5,
+};
+
+function qualityToNumber(q) {
+  if (!q) return 0;
+  const n = parseFloat(q);
+  if (!isNaN(n)) return n;
+  return QUALITY_RANK[q] ?? 5;
+}
 
 /* ─── Quality badge colors ─── */
 const QUALITY_COLORS = {
@@ -14,6 +33,8 @@ const QUALITY_COLORS = {
   'High': 'bg-teal-500/20 text-teal-300 border-teal-500/30',
   'Medium': 'bg-amber-500/20 text-amber-300 border-amber-500/30',
   'Low': 'bg-red-500/20 text-red-300 border-red-500/30',
+  'Very Low': 'bg-red-500/20 text-red-300 border-red-500/30',
+  'Ultra Low': 'bg-red-500/20 text-red-300 border-red-500/30',
 };
 
 const TYPE_ICONS = {
@@ -25,6 +46,10 @@ const TYPE_ICONS = {
   'Prediction': Brain,
   'Monitoring': Gauge,
   'Alert': AlertTriangle,
+  'Risk': Shield,
+  'Opportunity': TrendingUp,
+  'Improvement': Lightbulb,
+  'Problem': AlertTriangle,
 };
 
 /* ─── Score bar ─── */
@@ -78,30 +103,41 @@ function ScoreDonut({ value, max = 10, size = 48, label }) {
   );
 }
 
+/* ─── Resolve table IDs from table_registry ─── */
+function resolveTableIds(tablesStr, tableRegistry) {
+  if (!tablesStr) return [];
+  return tablesStr.split(',').map(t => {
+    const id = t.trim();
+    if (tableRegistry && tableRegistry[id]) return tableRegistry[id];
+    return id;
+  }).filter(Boolean);
+}
+
 /* ─── Use Case Card ─── */
-function UseCaseCard({ uc, index }) {
+function UseCaseCard({ uc, index, tableRegistry }) {
   const [expanded, setExpanded] = useState(false);
   const [showSql, setShowSql] = useState(false);
 
   const quality = uc.Quality || 'Medium';
   const qualityClass = QUALITY_COLORS[quality] || QUALITY_COLORS.Medium;
   const TypeIcon = TYPE_ICONS[uc.type] || Lightbulb;
-  const priority = parseFloat(uc.Priority) || 0;
-  const value = parseFloat(uc.Value) || 0;
-  const feasibility = parseFloat(uc.Feasibility) || 0;
+  const priority = qualityToNumber(uc.Priority);
+  const value = qualityToNumber(uc.Value || uc.Priority);
+  const feasibility = qualityToNumber(uc.Feasibility || uc.Quality);
 
   const scores = [
-    { label: 'Strategic Align.', value: parseFloat(uc['Strategic Alignment']) || 0, icon: Target },
-    { label: 'ROI', value: parseFloat(uc['Return on Investment']) || 0, icon: TrendingUp },
-    { label: 'Reusability', value: parseFloat(uc['Reusability']) || 0, icon: Layers },
-    { label: 'Time to Value', value: parseFloat(uc['Time to Value']) || 0, icon: Clock },
-    { label: 'Data Availability', value: parseFloat(uc['Data Availability']) || 0, icon: Database },
-    { label: 'Data Accessibility', value: parseFloat(uc['Data Accessibility']) || 0, icon: Shield },
-    { label: 'Arch. Fitness', value: parseFloat(uc['Architecture Fitness']) || 0, icon: Building2 },
-    { label: 'Team Skills', value: parseFloat(uc['Team Skills']) || 0, icon: Users },
+    { label: 'Strategic Align.', value: qualityToNumber(uc['Strategic Alignment']), icon: Target },
+    { label: 'ROI', value: qualityToNumber(uc['Return on Investment']), icon: TrendingUp },
+    { label: 'Reusability', value: qualityToNumber(uc['Reusability']), icon: Layers },
+    { label: 'Time to Value', value: qualityToNumber(uc['Time to Value']), icon: Clock },
+    { label: 'Data Availability', value: qualityToNumber(uc['Data Availability']), icon: Database },
+    { label: 'Data Accessibility', value: qualityToNumber(uc['Data Accessibility']), icon: Shield },
+    { label: 'Arch. Fitness', value: qualityToNumber(uc['Architecture Fitness']), icon: Building2 },
+    { label: 'Team Skills', value: qualityToNumber(uc['Team Skills']), icon: Users },
   ];
+  const hasScores = scores.some(s => s.value > 0);
 
-  const tablesInvolved = (uc['Tables Involved'] || '').split(',').map(t => t.trim()).filter(Boolean);
+  const tablesInvolved = resolveTableIds(uc['Tables Involved'], tableRegistry);
 
   return (
     <div className="group relative rounded-xl border border-white/5 bg-db-navy/20 hover:bg-db-navy/30 hover:border-white/10 transition-all duration-300 overflow-hidden">
@@ -133,6 +169,11 @@ function UseCaseCard({ uc, index }) {
               {uc.type && (
                 <span className="px-2 py-0.5 rounded-full text-[9px] font-medium bg-db-navy/60 text-slate-400 border border-white/5">
                   {uc.type}
+                </span>
+              )}
+              {uc.Priority && uc.Priority !== uc.Quality && (
+                <span className="px-2 py-0.5 rounded-full text-[9px] font-medium bg-purple-500/10 text-purple-300 border border-purple-500/20">
+                  Priority: {uc.Priority}
                 </span>
               )}
             </div>
@@ -186,6 +227,12 @@ function UseCaseCard({ uc, index }) {
             <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] bg-blue-500/10 text-blue-300 border border-blue-500/20">
               <Users className="w-2.5 h-2.5" />
               {uc.Beneficiary}
+            </span>
+          )}
+          {uc.result_table && (
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] bg-emerald-500/10 text-emerald-300 border border-emerald-500/20">
+              <Database className="w-2.5 h-2.5" />
+              result table
             </span>
           )}
 
@@ -248,6 +295,16 @@ function UseCaseCard({ uc, index }) {
               )}
             </div>
 
+            {/* Technical Design */}
+            {uc['Technical Design'] && (
+              <div>
+                <h4 className="text-[11px] font-semibold text-slate-300 uppercase tracking-wider mb-1 flex items-center gap-1">
+                  <GitBranch className="w-3 h-3 text-cyan-400" /> Technical Design
+                </h4>
+                <p className="text-xs text-slate-400 leading-relaxed">{uc['Technical Design']}</p>
+              </div>
+            )}
+
             {/* Sponsor */}
             {uc.Sponsor && (
               <div>
@@ -269,16 +326,18 @@ function UseCaseCard({ uc, index }) {
             )}
 
             {/* Scores */}
-            <div>
-              <h4 className="text-[11px] font-semibold text-slate-300 uppercase tracking-wider mb-2 flex items-center gap-1">
-                <BarChart3 className="w-3 h-3 text-db-orange" /> Scoring Breakdown
-              </h4>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
-                {scores.map(s => (
-                  <ScoreBar key={s.label} label={s.label} value={s.value} icon={s.icon} />
-                ))}
+            {hasScores && (
+              <div>
+                <h4 className="text-[11px] font-semibold text-slate-300 uppercase tracking-wider mb-2 flex items-center gap-1">
+                  <BarChart3 className="w-3 h-3 text-db-orange" /> Scoring Breakdown
+                </h4>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                  {scores.filter(s => s.value > 0).map(s => (
+                    <ScoreBar key={s.label} label={s.label} value={s.value} icon={s.icon} />
+                  ))}
+                </div>
               </div>
-            </div>
+            )}
 
             {/* Tables */}
             {tablesInvolved.length > 0 && (
@@ -296,8 +355,20 @@ function UseCaseCard({ uc, index }) {
               </div>
             )}
 
+            {/* Result table */}
+            {uc.result_table && (
+              <div>
+                <h4 className="text-[11px] font-semibold text-slate-300 uppercase tracking-wider mb-1 flex items-center gap-1">
+                  <Database className="w-3 h-3 text-emerald-400" /> Result Table
+                </h4>
+                <span className="px-2 py-1 rounded-md text-[10px] font-mono bg-db-darkest border border-white/5 text-emerald-300">
+                  {uc.result_table}
+                </span>
+              </div>
+            )}
+
             {/* SQL */}
-            {uc.SQL && (
+            {uc.SQL && !uc.SQL.startsWith('-- SQL generation failed') && !uc.SQL.startsWith('-- TODO:') && (
               <div>
                 <button
                   onClick={() => setShowSql(!showSql)}
@@ -308,7 +379,7 @@ function UseCaseCard({ uc, index }) {
                   {showSql ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
                 </button>
                 {showSql && (
-                  <pre className="p-3 rounded-lg bg-db-darkest border border-white/5 text-[11px] font-mono text-slate-400 overflow-x-auto leading-relaxed whitespace-pre-wrap">
+                  <pre className="p-3 rounded-lg bg-db-darkest border border-white/5 text-[11px] font-mono text-slate-400 overflow-x-auto leading-relaxed whitespace-pre-wrap max-h-96">
                     {uc.SQL}
                   </pre>
                 )}
@@ -324,23 +395,24 @@ function UseCaseCard({ uc, index }) {
 /* ─── Stats summary bar ─── */
 function StatsSummary({ useCases }) {
   const domains = [...new Set(useCases.map(uc => uc['Business Domain']).filter(Boolean))];
-  const avgPriority = useCases.length
-    ? (useCases.reduce((s, uc) => s + (parseFloat(uc.Priority) || 0), 0) / useCases.length)
-    : 0;
-  const withSql = useCases.filter(uc => uc.SQL).length;
+  const withSql = useCases.filter(uc => uc.SQL && !uc.SQL.startsWith('--')).length;
+  const withResultTable = useCases.filter(uc => uc.result_table).length;
+
+  // Count qualities
   const qualityCounts = {};
   useCases.forEach(uc => {
     const q = uc.Quality || 'Unknown';
     qualityCounts[q] = (qualityCounts[q] || 0) + 1;
   });
+  const topQuality = Object.entries(qualityCounts).sort((a, b) => b[1] - a[1])[0];
 
   return (
     <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
       {[
         { label: 'Use Cases', value: useCases.length, icon: Lightbulb, color: 'from-db-red to-db-orange' },
         { label: 'Domains', value: domains.length, icon: Building2, color: 'from-purple-500 to-blue-500' },
-        { label: 'Avg Priority', value: avgPriority.toFixed(1), icon: Target, color: 'from-emerald-500 to-teal-500' },
         { label: 'With SQL', value: withSql, icon: Code, color: 'from-db-gold to-amber-500' },
+        { label: 'Result Tables', value: withResultTable, icon: Database, color: 'from-emerald-500 to-teal-500' },
       ].map(stat => {
         const Icon = stat.icon;
         return (
@@ -359,8 +431,77 @@ function StatsSummary({ useCases }) {
   );
 }
 
+/* ─── Executive Summary Panel ─── */
+function ExecutiveSummary({ results }) {
+  const [expanded, setExpanded] = useState(false);
+  if (!results?.executive_summary) return null;
+
+  return (
+    <div className="rounded-xl border border-white/5 bg-db-navy/20 p-4 space-y-3">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full flex items-center justify-between"
+      >
+        <h2 className="text-xs font-semibold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
+          <FileText className="w-3.5 h-3.5 text-db-gold" />
+          Executive Summary
+        </h2>
+        {expanded ? <ChevronUp className="w-4 h-4 text-slate-500" /> : <ChevronDown className="w-4 h-4 text-slate-500" />}
+      </button>
+      {expanded && (
+        <div className="space-y-3 animate-fade-in-up">
+          <p className="text-xs text-slate-400 leading-relaxed whitespace-pre-line">{results.executive_summary}</p>
+          {results.domains_summary && (
+            <div className="pt-2 border-t border-white/5">
+              <h4 className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1">Domains Overview</h4>
+              <p className="text-xs text-slate-400">{results.domains_summary}</p>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ─── Session Picker ─── */
+function SessionPicker({ sessions, selectedSession, onSelect, loading }) {
+  if (loading) {
+    return (
+      <div className="flex items-center gap-2 px-3 py-2.5 text-xs text-slate-500 rounded-lg bg-db-darkest/80 border border-white/10">
+        <Loader2 className="w-3 h-3 animate-spin" /> Loading sessions...
+      </div>
+    );
+  }
+  if (sessions.length === 0) {
+    return (
+      <div className="flex items-center gap-2 px-3 py-2.5 text-xs text-amber-400 rounded-lg bg-amber-500/5 border border-amber-500/20">
+        <AlertTriangle className="w-3 h-3" /> No Inspire sessions found. Run a pipeline first.
+      </div>
+    );
+  }
+  return (
+    <select
+      value={selectedSession || ''}
+      onChange={e => onSelect(e.target.value)}
+      className="w-full px-3 py-2.5 rounded-lg bg-db-darkest/80 border border-white/10 text-white text-sm focus:outline-none focus:ring-2 focus:ring-db-red/40 focus:border-db-red/40 transition-all appearance-none"
+    >
+      <option value="">Select a session...</option>
+      {sessions.map(s => {
+        const date = s.create_at ? new Date(s.create_at).toLocaleString() : 'Unknown time';
+        const pct = s.completed_percent != null ? `${Math.round(s.completed_percent)}%` : '—';
+        const done = s.completed_on != null;
+        return (
+          <option key={s.session_id} value={s.session_id}>
+            {done ? '✅' : '🔄'} Session {String(s.session_id).slice(-8)} — {date} — {pct} complete
+          </option>
+        );
+      })}
+    </select>
+  );
+}
+
 /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-   MAIN RESULTS PAGE
+   MAIN RESULTS PAGE (v41 — reads from __inspire_session.results_json)
    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
 export default function ResultsPage({ apiFetch, inspireDatabase: initialDb }) {
   // Restore last used values from localStorage
@@ -370,12 +511,18 @@ export default function ResultsPage({ apiFetch, inspireDatabase: initialDb }) {
   const [inspireDatabase, setInspireDatabase] = useState(savedDb);
   const [warehouseId, setWarehouseId] = useState(savedWarehouse);
   const [warehouses, setWarehouses] = useState([]);
+  const [warehouseLoading, setWarehouseLoading] = useState(false);
+
+  // Session-based state (v41)
+  const [sessions, setSessions] = useState([]);
+  const [sessionsLoading, setSessionsLoading] = useState(false);
+  const [selectedSessionId, setSelectedSessionId] = useState('');
+  const [resultsJson, setResultsJson] = useState(null);   // Full results_json
   const [useCases, setUseCases] = useState([]);
-  const [sourceTable, setSourceTable] = useState('');
-  const [pipelineState, setPipelineState] = useState(null);
+  const [tableRegistry, setTableRegistry] = useState({});
+  const [columnRegistry, setColumnRegistry] = useState({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-  const [warehouseLoading, setWarehouseLoading] = useState(false);
 
   // Catalog/schema pickers
   const [catalogs, setCatalogs] = useState([]);
@@ -445,7 +592,6 @@ export default function ResultsPage({ apiFetch, inspireDatabase: initialDb }) {
       .then(data => {
         const wh = data.warehouses || [];
         setWarehouses(wh);
-        // Auto-select saved warehouse if still valid, else first running
         if (savedWarehouse && wh.find(w => w.id === savedWarehouse)) {
           setWarehouseId(savedWarehouse);
         } else {
@@ -458,71 +604,130 @@ export default function ResultsPage({ apiFetch, inspireDatabase: initialDb }) {
       .finally(() => setWarehouseLoading(false));
   }, [apiFetch]);
 
-  // Available tables state
-  const [availableTables, setAvailableTables] = useState([]);
-
-  // Fetch use cases
-  const fetchResults = useCallback(async () => {
+  // ─── Fetch sessions when inspireDatabase + warehouseId are set ───
+  const fetchSessions = useCallback(async () => {
     if (!inspireDatabase || !inspireDatabase.includes('.') || !warehouseId) return;
+    setSessionsLoading(true);
+    setError(null);
+    try {
+      const res = await apiFetch(
+        `/api/inspire/sessions?inspire_database=${encodeURIComponent(inspireDatabase)}&warehouse_id=${encodeURIComponent(warehouseId)}`
+      );
+      const data = await res.json();
+      if (data.error) {
+        // Table might not exist yet — not a critical error
+        console.warn('Sessions query error:', data.error);
+        setSessions([]);
+      } else {
+        const sessionList = data.sessions || [];
+        setSessions(sessionList);
+        // Auto-select the most recent completed session
+        const completed = sessionList.find(s => s.completed_on != null);
+        if (completed) {
+          setSelectedSessionId(String(completed.session_id));
+        } else if (sessionList.length > 0) {
+          setSelectedSessionId(String(sessionList[0].session_id));
+        }
+      }
+    } catch (err) {
+      console.warn('Sessions fetch failed:', err.message);
+      setSessions([]);
+    } finally {
+      setSessionsLoading(false);
+    }
+  }, [apiFetch, inspireDatabase, warehouseId]);
+
+  // Auto-fetch sessions when DB + warehouse are available
+  const [autoFetched, setAutoFetched] = useState(false);
+  useEffect(() => {
+    if (inspireDatabase && inspireDatabase.includes('.') && warehouseId && !autoFetched) {
+      setAutoFetched(true);
+      fetchSessions();
+    }
+  }, [inspireDatabase, warehouseId, autoFetched, fetchSessions]);
+
+  // ─── Fetch results_json for selected session ───
+  const fetchResults = useCallback(async () => {
+    if (!inspireDatabase || !warehouseId || !selectedSessionId) return;
     setLoading(true);
     setError(null);
-    setAvailableTables([]);
+    setUseCases([]);
+    setResultsJson(null);
+    setTableRegistry({});
+    setColumnRegistry({});
     try {
-      // Step 1: List available tables in the schema
-      let tables = [];
-      try {
-        const tablesResp = await apiFetch(`/api/results/tables?inspire_database=${encodeURIComponent(inspireDatabase)}`);
-        const tablesData = await tablesResp.json();
-        tables = tablesData.all_tables || [];
-        setAvailableTables(tables);
-      } catch (e) {
-        console.warn('Could not list tables:', e);
-      }
+      const res = await apiFetch(
+        `/api/inspire/results?inspire_database=${encodeURIComponent(inspireDatabase)}&warehouse_id=${encodeURIComponent(warehouseId)}&session_id=${selectedSessionId}`
+      );
+      const data = await res.json();
 
-      // Step 2: Fetch use cases
-      const ucResp = await apiFetch(`/api/results/use-cases?inspire_database=${encodeURIComponent(inspireDatabase)}&warehouse_id=${encodeURIComponent(warehouseId)}`);
-      const ucData = await ucResp.json();
-      if (ucData.error) throw new Error(ucData.error);
-      setUseCases(ucData.use_cases || []);
-      setSourceTable(ucData.source_table || '');
+      if (data.error) throw new Error(data.error);
 
-      // Step 3: Fetch pipeline state (non-blocking — don't let it break the page)
-      try {
-        const stateResp = await apiFetch(`/api/results/pipeline-state?inspire_database=${encodeURIComponent(inspireDatabase)}&warehouse_id=${encodeURIComponent(warehouseId)}`);
-        const stateData = await stateResp.json();
-        if (!stateData.error) {
-          setPipelineState(stateData.states || null);
+      if (!data.results) {
+        // Session might not be completed yet — try reading full session for partial results
+        const sessionRes = await apiFetch(
+          `/api/inspire/session?inspire_database=${encodeURIComponent(inspireDatabase)}&warehouse_id=${encodeURIComponent(warehouseId)}&session_id=${selectedSessionId}`
+        );
+        const sessionData = await sessionRes.json();
+        if (sessionData.session?.results_json) {
+          processResultsJson(sessionData.session.results_json);
+        } else if (sessionData.session && !sessionData.session.completed_on) {
+          setError('This session is still running. Results will be available once the pipeline completes. Check the Monitor tab for progress.');
+        } else {
+          setError('No results found for this session. The pipeline may not have produced output.');
         }
-      } catch (e) {
-        console.warn('Pipeline state fetch failed (non-critical):', e);
+        return;
       }
 
-      // If no use cases found, show what tables exist and what was tried
-      if ((ucData.use_cases || []).length === 0) {
-        const tried = ucData.tried_tables || [];
-        const available = ucData.available_tables || tables.map(t => t.name);
-        const msg = available.length > 0
-          ? `No use case data found. Tried: ${tried.join(', ') || 'none'}. Available tables in ${inspireDatabase}: ${available.join(', ')}`
-          : `Schema ${inspireDatabase} appears to be empty or inaccessible. Make sure a pipeline has completed successfully.`;
-        setError(msg);
-      }
+      processResultsJson(data.results);
     } catch (err) {
       setError(err.message);
     } finally {
       setLoading(false);
     }
-  }, [apiFetch, inspireDatabase, warehouseId]);
+  }, [apiFetch, inspireDatabase, warehouseId, selectedSessionId]);
 
-  // Auto-fetch when both inspireDatabase and warehouseId are set
-  const [autoFetched, setAutoFetched] = useState(false);
+  // ─── Process results_json into displayable use cases ───
+  function processResultsJson(results) {
+    setResultsJson(results);
+
+    // Extract registries
+    const tReg = results.table_registry || {};
+    const cReg = results.column_registry || {};
+    setTableRegistry(tReg);
+    setColumnRegistry(cReg);
+
+    // Flatten use cases from all domains
+    const allUseCases = [];
+    if (results.domains && Array.isArray(results.domains)) {
+      for (const domain of results.domains) {
+        if (domain.use_cases && Array.isArray(domain.use_cases)) {
+          for (const uc of domain.use_cases) {
+            // Ensure domain info is set from parent if missing
+            const enriched = {
+              ...uc,
+              'Business Domain': uc['Business Domain'] || domain.domain_name || '',
+            };
+            allUseCases.push(enriched);
+          }
+        }
+      }
+    }
+
+    setUseCases(allUseCases);
+    if (allUseCases.length === 0 && results.domains?.length > 0) {
+      setError(`Found ${results.domains.length} domains but no use cases within them.`);
+    }
+  }
+
+  // Auto-fetch results when session is selected
   useEffect(() => {
-    if (inspireDatabase && inspireDatabase.includes('.') && warehouseId && !autoFetched && useCases.length === 0 && !loading) {
-      setAutoFetched(true);
+    if (selectedSessionId) {
       fetchResults();
     }
-  }, [inspireDatabase, warehouseId, autoFetched, useCases.length, loading, fetchResults]);
+  }, [selectedSessionId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Derived data
+  // ─── Derived data ───
   const domains = useMemo(() =>
     [...new Set(useCases.map(uc => uc['Business Domain']).filter(Boolean))].sort(),
     [useCases]
@@ -536,7 +741,7 @@ export default function ResultsPage({ apiFetch, inspireDatabase: initialDb }) {
     [useCases]
   );
 
-  // Filtered & sorted use cases
+  // ─── Filtered & sorted use cases ───
   const filteredUseCases = useMemo(() => {
     let list = [...useCases];
 
@@ -548,37 +753,34 @@ export default function ResultsPage({ apiFetch, inspireDatabase: initialDb }) {
         (uc.Statement || '').toLowerCase().includes(q) ||
         (uc.Solution || '').toLowerCase().includes(q) ||
         (uc['Business Domain'] || '').toLowerCase().includes(q) ||
-        (uc['Tables Involved'] || '').toLowerCase().includes(q)
+        (uc['Tables Involved'] || '').toLowerCase().includes(q) ||
+        (uc.Beneficiary || '').toLowerCase().includes(q) ||
+        (uc['Analytics Technique'] || '').toLowerCase().includes(q)
       );
     }
 
     // Domain filter
-    if (domainFilter) {
-      list = list.filter(uc => uc['Business Domain'] === domainFilter);
-    }
-
+    if (domainFilter) list = list.filter(uc => uc['Business Domain'] === domainFilter);
     // Quality filter
-    if (qualityFilter) {
-      list = list.filter(uc => uc.Quality === qualityFilter);
-    }
-
+    if (qualityFilter) list = list.filter(uc => uc.Quality === qualityFilter);
     // Type filter
-    if (typeFilter) {
-      list = list.filter(uc => uc.type === typeFilter);
-    }
+    if (typeFilter) list = list.filter(uc => uc.type === typeFilter);
 
     // Sort
     list.sort((a, b) => {
       let va, vb;
       if (sortBy === 'priority') {
-        va = parseFloat(a.Priority) || 0;
-        vb = parseFloat(b.Priority) || 0;
+        va = qualityToNumber(a.Priority);
+        vb = qualityToNumber(b.Priority);
       } else if (sortBy === 'value') {
-        va = parseFloat(a.Value) || 0;
-        vb = parseFloat(b.Value) || 0;
+        va = qualityToNumber(a.Value || a.Priority);
+        vb = qualityToNumber(b.Value || b.Priority);
       } else if (sortBy === 'feasibility') {
-        va = parseFloat(a.Feasibility) || 0;
-        vb = parseFloat(b.Feasibility) || 0;
+        va = qualityToNumber(a.Feasibility || a.Quality);
+        vb = qualityToNumber(b.Feasibility || b.Quality);
+      } else if (sortBy === 'quality') {
+        va = qualityToNumber(a.Quality);
+        vb = qualityToNumber(b.Quality);
       } else if (sortBy === 'name') {
         va = (a.Name || '').toLowerCase();
         vb = (b.Name || '').toLowerCase();
@@ -608,7 +810,7 @@ export default function ResultsPage({ apiFetch, inspireDatabase: initialDb }) {
         </div>
         <h1 className="text-xl font-bold text-white">Results Explorer</h1>
         <p className="text-sm text-slate-400 mt-1 max-w-md mx-auto">
-          Browse and explore the AI-generated use cases from your pipeline run.
+          Browse and explore the AI-generated use cases from your Inspire pipeline.
         </p>
       </div>
 
@@ -631,7 +833,7 @@ export default function ResultsPage({ apiFetch, inspireDatabase: initialDb }) {
             ) : (
               <select
                 value={selectedCatalog}
-                onChange={e => { setSelectedCatalog(e.target.value); setSelectedSchema(''); }}
+                onChange={e => { setSelectedCatalog(e.target.value); setSelectedSchema(''); setSessions([]); setUseCases([]); setAutoFetched(false); }}
                 className="w-full px-3 py-2.5 rounded-lg bg-db-darkest/80 border border-white/10 text-white text-sm focus:outline-none focus:ring-2 focus:ring-db-red/40 focus:border-db-red/40 transition-all appearance-none"
               >
                 <option value="">Select a catalog...</option>
@@ -654,7 +856,7 @@ export default function ResultsPage({ apiFetch, inspireDatabase: initialDb }) {
             ) : (
               <select
                 value={selectedSchema}
-                onChange={e => setSelectedSchema(e.target.value)}
+                onChange={e => { setSelectedSchema(e.target.value); setSessions([]); setUseCases([]); setAutoFetched(false); }}
                 disabled={!selectedCatalog}
                 className="w-full px-3 py-2.5 rounded-lg bg-db-darkest/80 border border-white/10 text-white text-sm focus:outline-none focus:ring-2 focus:ring-db-red/40 focus:border-db-red/40 transition-all appearance-none disabled:opacity-40 disabled:cursor-not-allowed"
               >
@@ -695,6 +897,9 @@ export default function ResultsPage({ apiFetch, inspireDatabase: initialDb }) {
                   setSelectedCatalog(parts[0]);
                   setSelectedSchema(parts[1]);
                 }
+                setSessions([]);
+                setUseCases([]);
+                setAutoFetched(false);
               }}
               placeholder="catalog.schema"
               className="w-full px-3 py-2 rounded-lg bg-db-darkest/80 border border-white/10 text-white placeholder-slate-600 text-sm focus:outline-none focus:ring-2 focus:ring-db-red/40 focus:border-db-red/40 transition-all font-mono"
@@ -702,10 +907,10 @@ export default function ResultsPage({ apiFetch, inspireDatabase: initialDb }) {
           </div>
         </details>
 
-        {/* Row 2: Warehouse + Fetch */}
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        {/* Row 2: Warehouse + Session */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           {/* Warehouse */}
-          <div className="sm:col-span-2">
+          <div>
             <label className="text-[10px] text-slate-500 font-medium mb-1 block">SQL Warehouse</label>
             {warehouseLoading ? (
               <div className="flex items-center gap-2 px-3 py-2.5 text-xs text-slate-500 rounded-lg bg-db-darkest/80 border border-white/10">
@@ -713,12 +918,12 @@ export default function ResultsPage({ apiFetch, inspireDatabase: initialDb }) {
               </div>
             ) : warehouses.length === 0 ? (
               <div className="flex items-center gap-2 px-3 py-2.5 text-xs text-amber-400 rounded-lg bg-amber-500/5 border border-amber-500/20">
-                <AlertTriangle className="w-3 h-3" /> No SQL warehouses found. Create one in your Databricks workspace.
+                <AlertTriangle className="w-3 h-3" /> No SQL warehouses found.
               </div>
             ) : (
               <select
                 value={warehouseId}
-                onChange={e => setWarehouseId(e.target.value)}
+                onChange={e => { setWarehouseId(e.target.value); setSessions([]); setUseCases([]); setAutoFetched(false); }}
                 className="w-full px-3 py-2.5 rounded-lg bg-db-darkest/80 border border-white/10 text-white text-sm focus:outline-none focus:ring-2 focus:ring-db-red/40 focus:border-db-red/40 transition-all appearance-none"
               >
                 <option value="">Select warehouse...</option>
@@ -731,33 +936,46 @@ export default function ResultsPage({ apiFetch, inspireDatabase: initialDb }) {
             )}
           </div>
 
-          {/* Fetch button */}
+          {/* Load sessions button */}
           <div className="flex items-end">
             <button
-              onClick={fetchResults}
-              disabled={!inspireDatabase || !inspireDatabase.includes('.') || !warehouseId || loading}
+              onClick={() => { setAutoFetched(false); fetchSessions(); }}
+              disabled={!inspireDatabase || !inspireDatabase.includes('.') || !warehouseId || sessionsLoading}
               className="w-full px-4 py-2.5 rounded-lg font-semibold text-white text-sm bg-gradient-to-r from-db-red to-db-orange hover:from-db-red-light hover:to-db-orange disabled:opacity-40 disabled:cursor-not-allowed transition-all flex items-center justify-center gap-2 shadow-lg shadow-db-red/10 hover:shadow-db-red/20"
             >
-              {loading ? (
-                <>
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                  Querying...
-                </>
+              {sessionsLoading ? (
+                <><Loader2 className="w-4 h-4 animate-spin" /> Loading...</>
               ) : (
-                <>
-                  <Search className="w-4 h-4" />
-                  Fetch Results
-                </>
+                <><RefreshCw className="w-4 h-4" /> Load Sessions</>
               )}
             </button>
           </div>
         </div>
 
-        {/* Source table indicator */}
-        {sourceTable && (
+        {/* Session Picker */}
+        {sessions.length > 0 && (
+          <div>
+            <label className="text-[10px] text-slate-500 font-medium mb-1 block">Inspire Session</label>
+            <SessionPicker
+              sessions={sessions}
+              selectedSession={selectedSessionId}
+              onSelect={setSelectedSessionId}
+              loading={sessionsLoading}
+            />
+          </div>
+        )}
+
+        {/* Selected session info */}
+        {selectedSessionId && resultsJson && (
           <div className="flex items-center gap-2 text-[11px] text-db-teal">
             <CheckCircle2 className="w-3 h-3" />
-            <span>Loaded <strong>{useCases.length}</strong> use cases from <span className="font-mono text-slate-400">{inspireDatabase}.{sourceTable}</span></span>
+            <span>
+              Loaded <strong>{useCases.length}</strong> use cases
+              from <span className="font-mono text-slate-400">{resultsJson.title || 'Inspire session'}</span>
+              {resultsJson.domains?.length > 0 && (
+                <span className="text-slate-500"> across {resultsJson.domains.length} domain{resultsJson.domains.length !== 1 ? 's' : ''}</span>
+              )}
+            </span>
           </div>
         )}
 
@@ -772,14 +990,58 @@ export default function ResultsPage({ apiFetch, inspireDatabase: initialDb }) {
         )}
       </div>
 
+      {/* Executive Summary */}
+      {resultsJson && useCases.length > 0 && (
+        <ExecutiveSummary results={resultsJson} />
+      )}
+
       {/* Pipeline Summary */}
-      {pipelineState && useCases.length > 0 && (
+      {useCases.length > 0 && (
         <div className="space-y-3">
           <h2 className="text-xs font-semibold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
             <BarChart3 className="w-3.5 h-3.5 text-db-orange" />
-            Pipeline Summary
+            Overview
           </h2>
           <StatsSummary useCases={useCases} />
+        </div>
+      )}
+
+      {/* Domain breakdown chips */}
+      {resultsJson?.domains?.length > 1 && useCases.length > 0 && (
+        <div className="rounded-xl border border-white/5 bg-db-navy/20 p-4 space-y-3">
+          <h2 className="text-xs font-semibold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
+            <Building2 className="w-3.5 h-3.5 text-purple-400" />
+            Domains
+          </h2>
+          <div className="flex flex-wrap gap-2">
+            {resultsJson.domains.map(d => {
+              const count = d.use_cases?.length || 0;
+              const isActive = domainFilter === d.domain_name;
+              return (
+                <button
+                  key={d.domain_name}
+                  onClick={() => setDomainFilter(isActive ? '' : d.domain_name)}
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                    isActive
+                      ? 'bg-purple-500/20 text-purple-300 border border-purple-500/30'
+                      : 'bg-white/5 text-slate-400 border border-white/5 hover:bg-white/10 hover:text-white'
+                  }`}
+                >
+                  <Building2 className="w-3 h-3" />
+                  {d.domain_name}
+                  <span className="text-[10px] opacity-60">({count})</span>
+                </button>
+              );
+            })}
+            {domainFilter && (
+              <button
+                onClick={() => setDomainFilter('')}
+                className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[10px] text-db-red-light hover:text-db-red transition-colors"
+              >
+                <X className="w-3 h-3" /> Clear
+              </button>
+            )}
+          </div>
         </div>
       )}
 
@@ -808,7 +1070,7 @@ export default function ResultsPage({ apiFetch, inspireDatabase: initialDb }) {
               type="text"
               value={searchQuery}
               onChange={e => setSearchQuery(e.target.value)}
-              placeholder="Search use cases by name, description, tables..."
+              placeholder="Search use cases by name, description, tables, technique..."
               className="w-full pl-10 pr-4 py-2.5 rounded-lg bg-db-darkest/80 border border-white/10 text-white placeholder-slate-600 text-sm focus:outline-none focus:ring-2 focus:ring-db-red/40 focus:border-db-red/40 transition-all"
             />
           </div>
@@ -853,9 +1115,8 @@ export default function ResultsPage({ apiFetch, inspireDatabase: initialDb }) {
             >
               <option value="priority:desc">Priority ↓</option>
               <option value="priority:asc">Priority ↑</option>
-              <option value="value:desc">Value ↓</option>
-              <option value="value:asc">Value ↑</option>
-              <option value="feasibility:desc">Feasibility ↓</option>
+              <option value="quality:desc">Quality ↓</option>
+              <option value="quality:asc">Quality ↑</option>
               <option value="name:asc">Name A→Z</option>
               <option value="name:desc">Name Z→A</option>
               <option value="domain:asc">Domain A→Z</option>
@@ -873,7 +1134,7 @@ export default function ResultsPage({ apiFetch, inspireDatabase: initialDb }) {
       {useCases.length > 0 && (
         <div className="space-y-3">
           {filteredUseCases.map((uc, i) => (
-            <UseCaseCard key={uc.No || i} uc={uc} index={i} />
+            <UseCaseCard key={uc.No || i} uc={uc} index={i} tableRegistry={tableRegistry} />
           ))}
           {filteredUseCases.length === 0 && hasFilters && (
             <div className="text-center py-12">
@@ -917,19 +1178,34 @@ export default function ResultsPage({ apiFetch, inspireDatabase: initialDb }) {
                 Pick a <strong className="text-slate-400">SQL Warehouse</strong> to query the data. Make sure it is in a <em>RUNNING</em> state.
               </p>
             </>
-          ) : (
+          ) : sessions.length === 0 && !sessionsLoading ? (
             <>
-              <h3 className="text-sm font-semibold text-slate-300 mb-1">Ready to fetch</h3>
+              <h3 className="text-sm font-semibold text-slate-300 mb-1">No Sessions Found</h3>
               <p className="text-xs text-slate-500 max-w-sm mx-auto mb-4">
-                Database <code className="text-slate-400 bg-white/5 px-1 rounded">{inspireDatabase}</code> selected. Click the button below to load your use cases.
+                No Inspire sessions found in <code className="text-slate-400 bg-white/5 px-1 rounded">{inspireDatabase}</code>.
+                Run a pipeline first, or check that the correct database is selected.
               </p>
               <button
-                onClick={() => { setAutoFetched(false); fetchResults(); }}
+                onClick={() => { setAutoFetched(false); fetchSessions(); }}
                 className="px-6 py-2.5 rounded-lg font-semibold text-white text-sm bg-gradient-to-r from-db-red to-db-orange hover:from-db-red-light hover:to-db-orange transition-all flex items-center gap-2 mx-auto shadow-lg shadow-db-red/20"
               >
-                <Search className="w-4 h-4" />
-                Fetch Results
+                <RefreshCw className="w-4 h-4" />
+                Retry
               </button>
+            </>
+          ) : selectedSessionId && !loading ? (
+            <>
+              <h3 className="text-sm font-semibold text-slate-300 mb-1">No Use Cases Yet</h3>
+              <p className="text-xs text-slate-500 max-w-sm mx-auto">
+                The selected session hasn't produced use cases yet. If the pipeline is still running, check back later.
+              </p>
+            </>
+          ) : (
+            <>
+              <h3 className="text-sm font-semibold text-slate-300 mb-1">Select a Session</h3>
+              <p className="text-xs text-slate-500 max-w-sm mx-auto">
+                Choose an Inspire session above to view its results.
+              </p>
             </>
           )}
         </div>
@@ -941,7 +1217,7 @@ export default function ResultsPage({ apiFetch, inspireDatabase: initialDb }) {
           <Loader2 className="w-10 h-10 text-db-red-light animate-spin mx-auto mb-4" />
           <h3 className="text-sm font-semibold text-slate-300 mb-1">Querying Databricks...</h3>
           <p className="text-xs text-slate-500 max-w-sm mx-auto">
-            Fetching use cases from <code className="text-slate-400 bg-white/5 px-1 rounded">{inspireDatabase}</code>. This may take a few seconds if the warehouse is starting up.
+            Fetching results from <code className="text-slate-400 bg-white/5 px-1 rounded">{inspireDatabase}</code>. This may take a few seconds if the warehouse is starting up.
           </p>
         </div>
       )}
