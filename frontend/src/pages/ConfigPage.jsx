@@ -229,7 +229,7 @@ function SinglePublishSection({ settings, onChange, apiFetch }) {
         if (cancelled) return;
         if (data.username) {
           setUsername(data.username);
-          if (!destPath) setDestPath(`/Users/${data.username}/databricks_inspire_v38`);
+          if (!destPath) setDestPath(`/Users/${data.username}/databricks_inspire_v41`);
         }
         setPublishState('ready');
       })
@@ -315,7 +315,7 @@ function SinglePublishSection({ settings, onChange, apiFetch }) {
             type="text"
             value={destPath}
             onChange={(e) => setDestPath(e.target.value)}
-            placeholder="/Users/you@company.com/databricks_inspire_v38"
+            placeholder="/Users/you@company.com/databricks_inspire_v41"
             className="w-full pl-9 pr-4 py-2.5 rounded-lg bg-db-darkest/80 border border-white/10 text-white placeholder-slate-600 text-sm focus:outline-none focus:ring-1 focus:ring-db-red/30 transition-all"
           />
         </div>
@@ -347,7 +347,7 @@ function SinglePublishSection({ settings, onChange, apiFetch }) {
           <div className="py-1">
             <CloudUpload className="w-5 h-5 text-slate-500 mx-auto mb-1" />
             <p className="text-[11px] text-slate-500"><span className="text-slate-400 font-medium">Optional:</span> drop a custom <code className="text-slate-400">.dbc</code> file</p>
-            <p className="text-[10px] text-slate-600">or use the bundled Inspire v38 notebook</p>
+            <p className="text-[10px] text-slate-600">or use the bundled Inspire v41 notebook</p>
           </div>
         )}
       </div>

@@ -33,6 +33,9 @@ const BUNDLED_DBC_PATH = path.resolve(__dirname, '..', 'databricks_inspire_v41.d
 // Path to the split notebooks directory
 const NOTEBOOKS_DIR = path.resolve(__dirname, '..', 'notebooks');
 
+// Workflow definition
+const WORKFLOW_DEF_PATH = path.resolve(NOTEBOOKS_DIR, 'workflow_definition.json');
+
 // Helper: make authenticated Databricks API calls
 async function dbFetch(token, apiPath, options = {}) {
   const url = `${DATABRICKS_HOST}${apiPath}`;
@@ -70,8 +73,8 @@ function requireToken(req, res, next) {
 // Health check
 app.get('/api/health', (req, res) => {
   const hasBundledDbc = fs.existsSync(BUNDLED_DBC_PATH);
-  const hasNotebooks = fs.existsSync(NOTEBOOKS_DIR);
-  res.json({ status: 'ok', host: DATABRICKS_HOST, hasBundledDbc, hasNotebooks, version: 'v41' });
+  const hasPipeline = fs.existsSync(NOTEBOOKS_DIR) && fs.existsSync(WORKFLOW_DEF_PATH);
+  res.json({ status: 'ok', host: DATABRICKS_HOST, hasBundledDbc, hasPipeline });
 });
 
 // ─── Get current user info (to build default publish path) ───
@@ -258,14 +261,223 @@ app.post('/api/publish/upload', requireToken, upload.single('file'), async (req,
   }
 });
 
-// ─── Get pipeline info (v41: single notebook) ───
+// ─── Publish split notebooks (multi-task pipeline) ───
+app.post('/api/publish/pipeline', requireToken, async (req, res) => {
+  try {
+    const { destination_path } = req.body;
+    if (!destination_path) {
+      return res.status(400).json({ error: 'destination_path is required.' });
+    }
+
+    // Check that the notebooks directory exists
+    if (!fs.existsSync(NOTEBOOKS_DIR)) {
+      return res.status(404).json({ error: 'Split notebooks directory not found. Run split_notebook.py first.' });
+    }
+
+    // Get all .py notebook files
+    const notebookFiles = fs.readdirSync(NOTEBOOKS_DIR)
+      .filter(f => f.endsWith('.py'))
+      .sort();
+
+    if (notebookFiles.length === 0) {
+      return res.status(404).json({ error: 'No notebook files found in notebooks directory.' });
+    }
+
+    console.log(`📦 Publishing ${notebookFiles.length} notebooks to ${destination_path}/`);
+
+    // Ensure the destination directory exists
+    try {
+      await dbFetch(req.dbToken, '/api/2.0/workspace/mkdirs', {
+        method: 'POST',
+        body: JSON.stringify({ path: destination_path }),
+      });
+    } catch (_) {}
+
+    const published = [];
+    const errors = [];
+
+    for (const filename of notebookFiles) {
+      const notebookName = filename.replace('.py', '');
+      const notebookPath = `${destination_path}/${notebookName}`;
+      const filePath = path.join(NOTEBOOKS_DIR, filename);
+
+      try {
+        // Read the notebook source file
+        let content = fs.readFileSync(filePath, 'utf-8');
+
+        // Remove the "# Databricks notebook source" header — the API adds it
+        content = content.replace(/^# Databricks notebook source\n/, '');
+
+        const base64Content = Buffer.from(content, 'utf-8').toString('base64');
+
+        // Upload as SOURCE format (Python)
+        const response = await dbFetch(req.dbToken, '/api/2.0/workspace/import', {
+          method: 'POST',
+          body: JSON.stringify({
+            path: notebookPath,
+            format: 'SOURCE',
+            language: 'PYTHON',
+            content: base64Content,
+            overwrite: true,
+          }),
+        });
+
+        if (!response.ok) {
+          const errText = await response.text();
+          console.error(`   ❌ ${notebookName}: ${errText}`);
+          errors.push({ notebook: notebookName, error: errText });
+        } else {
+          console.log(`   ✅ ${notebookName}`);
+          published.push(notebookPath);
+        }
+      } catch (err) {
+        console.error(`   ❌ ${notebookName}: ${err.message}`);
+        errors.push({ notebook: notebookName, error: err.message });
+      }
+    }
+
+    console.log(`📦 Published ${published.length}/${notebookFiles.length} notebooks`);
+
+    res.json({
+      success: errors.length === 0,
+      published,
+      errors,
+      base_path: destination_path,
+      total: notebookFiles.length,
+      message: `Published ${published.length}/${notebookFiles.length} notebooks to ${destination_path}`,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Submit multi-task Lakeflow workflow ───
+app.post('/api/run/pipeline', requireToken, async (req, res) => {
+  try {
+    const { params, cluster_id, notebook_base_path, inspire_database } = req.body;
+
+    if (!notebook_base_path) {
+      return res.status(400).json({ error: 'notebook_base_path is required. Publish the pipeline notebooks first.' });
+    }
+
+    // Load the workflow definition
+    let workflowDef;
+    try {
+      workflowDef = JSON.parse(fs.readFileSync(WORKFLOW_DEF_PATH, 'utf-8'));
+    } catch (err) {
+      return res.status(500).json({ error: `Could not load workflow definition: ${err.message}` });
+    }
+
+    const businessName = params?.['00_business_name'] || 'Run';
+    const runName = `Inspire AI Pipeline - ${businessName} - ${new Date().toISOString().slice(0, 19)}`;
+
+    // Build the tasks array with resolved paths and parameters
+    const tasks = workflowDef.tasks.map(task => {
+      // Replace placeholders in notebook_path
+      const notebookPath = task.notebook_task.notebook_path
+        .replace('{{BASE_PATH}}', notebook_base_path);
+
+      // Build base_parameters: merge task-specific params with the inspire_database
+      const baseParams = { ...(task.notebook_task.base_parameters || {}) };
+      if (baseParams.inspire_database === '{{INSPIRE_DATABASE}}') {
+        baseParams.inspire_database = inspire_database || '';
+      }
+
+      // The first task (01_init_validate) gets all widget params
+      if (task.task_key === '01_init_validate') {
+        Object.assign(baseParams, params);
+      }
+
+      const taskDef = {
+        task_key: task.task_key,
+        notebook_task: {
+          notebook_path: notebookPath,
+          base_parameters: baseParams,
+          source: 'WORKSPACE',
+        },
+      };
+
+      // Add dependencies
+      if (task.depends_on) {
+        taskDef.depends_on = task.depends_on;
+      }
+
+      // Add cluster
+      if (cluster_id) {
+        taskDef.existing_cluster_id = cluster_id;
+      }
+
+      return taskDef;
+    });
+
+    const payload = {
+      run_name: runName,
+      tasks,
+    };
+
+    console.log(`📋 Submitting multi-task pipeline with ${tasks.length} tasks`);
+    console.log(`   Base path: ${notebook_base_path}`);
+    console.log(`   Cluster: ${cluster_id || '(auto/job cluster)'}`);
+    tasks.forEach(t => {
+      console.log(`   📌 ${t.task_key}: ${t.notebook_task.notebook_path}`);
+    });
+
+    const response = await dbFetch(req.dbToken, '/api/2.1/jobs/runs/submit', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      console.error(`❌ Pipeline submit failed (${response.status}): ${errText}`);
+      let errorMsg;
+      try { errorMsg = JSON.parse(errText).message || errText; } catch { errorMsg = errText; }
+      return res.status(response.status).json({ error: errorMsg });
+    }
+
+    const data = await response.json();
+    console.log(`✅ Pipeline submitted: run_id=${data.run_id}`);
+    res.json({
+      run_id: data.run_id,
+      mode: 'pipeline',
+      task_count: tasks.length,
+      task_keys: tasks.map(t => t.task_key),
+    });
+  } catch (err) {
+    console.error(`❌ Pipeline submit exception:`, err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Get pipeline status (info about split notebooks availability) ───
 app.get('/api/pipeline/info', (req, res) => {
-  const hasDbc = fs.existsSync(BUNDLED_DBC_PATH);
+  const hasNotebooks = fs.existsSync(NOTEBOOKS_DIR);
+  const hasWorkflow = fs.existsSync(WORKFLOW_DEF_PATH);
+  let notebooks = [];
+  let workflowDef = null;
+
+  if (hasNotebooks) {
+    notebooks = fs.readdirSync(NOTEBOOKS_DIR)
+      .filter(f => f.endsWith('.py'))
+      .sort()
+      .map(f => f.replace('.py', ''));
+  }
+
+  if (hasWorkflow) {
+    try {
+      workflowDef = JSON.parse(fs.readFileSync(WORKFLOW_DEF_PATH, 'utf-8'));
+    } catch (_) {}
+  }
+
   res.json({
-    available: hasDbc,
-    version: 'v41',
-    mode: 'single_notebook',
-    description: 'Inspire AI v41 single-notebook pipeline with session/step tracking',
+    available: hasNotebooks && hasWorkflow && notebooks.length > 0,
+    notebooks,
+    task_count: workflowDef?.tasks?.length || 0,
+    tasks: (workflowDef?.tasks || []).map(t => ({
+      task_key: t.task_key,
+      description: t.description,
+      depends_on: t.depends_on?.map(d => d.task_key) || [],
+    })),
   });
 });
 
@@ -578,192 +790,6 @@ async function executeSqlStatement(token, warehouseId, sqlStatement) {
   return result;
 }
 
-// ═══════════════════════════════════════════════════════════════
-// V41 INTEGRATION: Session & Step Tracking (Inspire Integration Guide)
-// ═══════════════════════════════════════════════════════════════
-
-// ─── List all Inspire sessions ───
-app.get('/api/inspire/sessions', requireToken, async (req, res) => {
-  try {
-    const { inspire_database, warehouse_id } = req.query;
-    if (!inspire_database || !warehouse_id) {
-      return res.status(400).json({ error: 'inspire_database and warehouse_id query params required.' });
-    }
-    const [catalog, schema] = inspire_database.split('.');
-    const tableName = `\`${catalog}\`.\`${schema}\`.\`__inspire_session\``;
-
-    const result = await executeSqlStatement(
-      req.dbToken, warehouse_id,
-      `SELECT session_id, processing_status, completed_percent, create_at, last_updated, completed_on,
-              widget_values::STRING AS widget_values_str
-       FROM ${tableName}
-       ORDER BY create_at DESC
-       LIMIT 50`
-    );
-
-    const columns = (result.manifest?.schema?.columns || []).map(c => c.name);
-    const sessions = (result.result?.data_array || []).map(row => {
-      const obj = {};
-      columns.forEach((col, i) => { obj[col] = row[i]; });
-      // Parse widget_values
-      try { obj.widget_values = JSON.parse(obj.widget_values_str); } catch { obj.widget_values = null; }
-      delete obj.widget_values_str;
-      return obj;
-    });
-
-    console.log(`📋 Found ${sessions.length} Inspire sessions`);
-    res.json({ sessions, count: sessions.length });
-  } catch (err) {
-    console.error(`❌ Sessions error:`, err.message);
-    res.json({ sessions: [], count: 0, error: err.message });
-  }
-});
-
-// ─── Poll a specific session (for progress monitoring) ───
-app.get('/api/inspire/session', requireToken, async (req, res) => {
-  try {
-    const { inspire_database, warehouse_id, session_id } = req.query;
-    if (!inspire_database || !warehouse_id || !session_id) {
-      return res.status(400).json({ error: 'inspire_database, warehouse_id, and session_id are required.' });
-    }
-    const [catalog, schema] = inspire_database.split('.');
-    const tableName = `\`${catalog}\`.\`${schema}\`.\`__inspire_session\``;
-
-    const result = await executeSqlStatement(
-      req.dbToken, warehouse_id,
-      `SELECT session_id, processing_status, completed_percent, create_at, last_updated, completed_on,
-              widget_values::STRING AS widget_values_str,
-              inspire_json::STRING AS inspire_json_str,
-              results_json::STRING AS results_json_str
-       FROM ${tableName}
-       WHERE session_id = ${session_id}
-       LIMIT 1`
-    );
-
-    if (!result.result?.data_array?.length) {
-      return res.json({ session: null });
-    }
-
-    const columns = (result.manifest?.schema?.columns || []).map(c => c.name);
-    const row = result.result.data_array[0];
-    const session = {};
-    columns.forEach((col, i) => { session[col] = row[i]; });
-
-    // Parse JSON fields
-    try { session.widget_values = JSON.parse(session.widget_values_str); } catch { session.widget_values = null; }
-    try { session.inspire_json = JSON.parse(session.inspire_json_str); } catch { session.inspire_json = null; }
-    try { session.results_json = JSON.parse(session.results_json_str); } catch { session.results_json = null; }
-    delete session.widget_values_str;
-    delete session.inspire_json_str;
-    delete session.results_json_str;
-
-    res.json({ session });
-  } catch (err) {
-    console.error(`❌ Session poll error:`, err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ─── Get steps (delta: new steps since last poll) ───
-app.get('/api/inspire/steps', requireToken, async (req, res) => {
-  try {
-    const { inspire_database, warehouse_id, session_id, since } = req.query;
-    if (!inspire_database || !warehouse_id || !session_id) {
-      return res.status(400).json({ error: 'inspire_database, warehouse_id, and session_id are required.' });
-    }
-    const [catalog, schema] = inspire_database.split('.');
-    const tableName = `\`${catalog}\`.\`${schema}\`.\`__inspire_step\``;
-
-    let sql = `SELECT step_id, session_id, last_updated, stage_name, step_name, sub_step_name,
-                      progress_increment, message, status,
-                      result_json::STRING AS result_json_str
-               FROM ${tableName}
-               WHERE session_id = ${session_id}`;
-
-    if (since) {
-      sql += ` AND last_updated > '${since}'`;
-    }
-    sql += ` ORDER BY last_updated, step_id`;
-
-    const result = await executeSqlStatement(req.dbToken, warehouse_id, sql);
-
-    const columns = (result.manifest?.schema?.columns || []).map(c => c.name);
-    const steps = (result.result?.data_array || []).map(row => {
-      const obj = {};
-      columns.forEach((col, i) => { obj[col] = row[i]; });
-      try { obj.result_json = JSON.parse(obj.result_json_str); } catch { obj.result_json = null; }
-      delete obj.result_json_str;
-      return obj;
-    });
-
-    res.json({ steps, count: steps.length });
-  } catch (err) {
-    console.error(`❌ Steps error:`, err.message);
-    res.json({ steps: [], count: 0, error: err.message });
-  }
-});
-
-// ─── ACK: Set processing_status = 'done' (READY/DONE handshake) ───
-app.post('/api/inspire/ack', requireToken, async (req, res) => {
-  try {
-    const { inspire_database, warehouse_id, session_id } = req.body;
-    if (!inspire_database || !warehouse_id || !session_id) {
-      return res.status(400).json({ error: 'inspire_database, warehouse_id, and session_id are required.' });
-    }
-    const [catalog, schema] = inspire_database.split('.');
-    const tableName = `\`${catalog}\`.\`${schema}\`.\`__inspire_session\``;
-
-    await executeSqlStatement(
-      req.dbToken, warehouse_id,
-      `UPDATE ${tableName} SET processing_status = 'done' WHERE session_id = ${session_id} AND processing_status = 'ready'`
-    );
-
-    console.log(`✅ ACK sent for session ${session_id}`);
-    res.json({ success: true });
-  } catch (err) {
-    console.error(`❌ ACK error:`, err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ─── Get final results (results_json from completed session) ───
-app.get('/api/inspire/results', requireToken, async (req, res) => {
-  try {
-    const { inspire_database, warehouse_id, session_id } = req.query;
-    if (!inspire_database || !warehouse_id || !session_id) {
-      return res.status(400).json({ error: 'inspire_database, warehouse_id, and session_id are required.' });
-    }
-    const [catalog, schema] = inspire_database.split('.');
-    const tableName = `\`${catalog}\`.\`${schema}\`.\`__inspire_session\``;
-
-    const result = await executeSqlStatement(
-      req.dbToken, warehouse_id,
-      `SELECT results_json::STRING AS results_json_str, completed_percent, completed_on
-       FROM ${tableName}
-       WHERE session_id = ${session_id} AND completed_on IS NOT NULL
-       LIMIT 1`
-    );
-
-    if (!result.result?.data_array?.length) {
-      return res.json({ results: null, completed: false });
-    }
-
-    const columns = (result.manifest?.schema?.columns || []).map(c => c.name);
-    const row = result.result.data_array[0];
-    const data = {};
-    columns.forEach((col, i) => { data[col] = row[i]; });
-
-    let results = null;
-    try { results = JSON.parse(data.results_json_str); } catch { results = null; }
-
-    console.log(`📊 Results for session ${session_id}: ${results ? 'found' : 'null'}`);
-    res.json({ results, completed: true, completed_on: data.completed_on });
-  } catch (err) {
-    console.error(`❌ Results error:`, err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
-
 // ─── List pipeline tables in inspire_database ───
 app.get('/api/results/tables', requireToken, async (req, res) => {
   try {
@@ -786,10 +812,139 @@ app.get('/api/results/tables', requireToken, async (req, res) => {
       full_name: t.full_name,
       table_type: t.table_type,
     }));
-    const inspireTables = tables.filter(t =>
-      t.name.startsWith('__inspire_') || t.name.startsWith('_pipeline_') || t.name.startsWith('_inspire_')
+    // Filter to pipeline tables only
+    const pipelineTables = tables.filter(t =>
+      t.name.startsWith('_pipeline_') || t.name === '_inspire_tracking'
     );
-    res.json({ tables: inspireTables, all_tables: tables, count: inspireTables.length });
+    res.json({ tables: pipelineTables, all_tables: tables, count: pipelineTables.length });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Fetch use cases from the Delta table ───
+app.get('/api/results/use-cases', requireToken, async (req, res) => {
+  try {
+    const { inspire_database, warehouse_id } = req.query;
+    if (!inspire_database || !warehouse_id) {
+      return res.status(400).json({ error: 'inspire_database and warehouse_id query params required.' });
+    }
+
+    // First, discover what tables exist
+    const [catalog, schema] = inspire_database.split('.');
+    let availableTables = [];
+    try {
+      const listResp = await dbFetch(
+        req.dbToken,
+        `/api/2.1/unity-catalog/tables?catalog_name=${encodeURIComponent(catalog)}&schema_name=${encodeURIComponent(schema)}&max_results=500`
+      );
+      if (listResp.ok) {
+        const listData = await listResp.json();
+        availableTables = (listData.tables || []).map(t => t.name);
+        console.log(`📋 Tables in ${inspire_database}: ${availableTables.join(', ')}`);
+      }
+    } catch (e) {
+      console.log(`   ⚠️ Could not list tables: ${e.message}`);
+    }
+
+    // Try known use case table suffixes, plus any table containing "use_case" in its name
+    const knownSuffixes = ['_pipeline_use_cases_final', '_pipeline_use_cases_scored', '_pipeline_use_cases_raw'];
+    const dynamicTables = availableTables.filter(t =>
+      t.toLowerCase().includes('use_case') && !knownSuffixes.includes(t)
+    );
+    const tableSuffixes = [...knownSuffixes, ...dynamicTables];
+
+    let useCases = [];
+    let sourceTable = '';
+    const triedTables = [];
+
+    for (const suffix of tableSuffixes) {
+      // Only try tables that actually exist (if we have the list)
+      if (availableTables.length > 0 && !availableTables.includes(suffix)) {
+        continue;
+      }
+      const tableName = `\`${catalog}\`.\`${schema}\`.\`${suffix}\``;
+      triedTables.push(suffix);
+      try {
+        console.log(`   🔍 Trying: ${tableName}`);
+        const result = await executeSqlStatement(
+          req.dbToken,
+          warehouse_id,
+          `SELECT * FROM ${tableName} ORDER BY idx LIMIT 1000`
+        );
+
+        console.log(`   📄 Result status: ${result.status?.state}, rows: ${result.result?.row_count || 0}`);
+
+        if (result.result?.data_array && result.result.data_array.length > 0) {
+          // Find the column index for use_case_json
+          const columns = result.manifest?.schema?.columns || [];
+          const colNames = columns.map(c => c.name);
+          const jsonColIdx = colNames.indexOf('use_case_json');
+
+          console.log(`   📊 Columns: ${colNames.join(', ')}, use_case_json at index: ${jsonColIdx}`);
+
+          if (jsonColIdx >= 0) {
+            useCases = result.result.data_array.map(row => {
+              try { return JSON.parse(row[jsonColIdx]); } catch { return null; }
+            }).filter(Boolean);
+          } else {
+            // If there's no use_case_json column, try to build from available columns
+            console.log(`   ⚠️ No use_case_json column found. Columns: ${colNames.join(', ')}`);
+            // Try returning all columns as a use case object
+            useCases = result.result.data_array.map(row => {
+              const obj = {};
+              colNames.forEach((col, i) => { obj[col] = row[i]; });
+              return obj;
+            });
+          }
+          sourceTable = suffix;
+          break;
+        }
+      } catch (e) {
+        console.log(`   ℹ️ Table ${suffix}: ${e.message}`);
+        continue;
+      }
+    }
+
+    console.log(`📊 Fetched ${useCases.length} use cases from ${sourceTable || 'none'} (tried: ${triedTables.join(', ')})`);
+    res.json({
+      use_cases: useCases,
+      source_table: sourceTable,
+      count: useCases.length,
+      available_tables: availableTables,
+      tried_tables: triedTables,
+    });
+  } catch (err) {
+    console.error(`❌ Use cases fetch error:`, err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Fetch pipeline state from Delta ───
+app.get('/api/results/pipeline-state', requireToken, async (req, res) => {
+  try {
+    const { inspire_database, warehouse_id } = req.query;
+    if (!inspire_database || !warehouse_id) {
+      return res.status(400).json({ error: 'inspire_database and warehouse_id query params required.' });
+    }
+
+    const tableName = `${inspire_database}._pipeline_state`;
+    const result = await executeSqlStatement(
+      req.dbToken,
+      warehouse_id,
+      `SELECT phase_name, state_json, updated_at FROM ${tableName} ORDER BY updated_at`
+    );
+
+    const states = {};
+    if (result.result?.data_array) {
+      for (const row of result.result.data_array) {
+        try {
+          states[row[0]] = { data: JSON.parse(row[1]), updated_at: row[2] };
+        } catch { /* skip */ }
+      }
+    }
+
+    res.json({ states, phases: Object.keys(states) });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -815,9 +970,11 @@ app.post('/api/run/:runId/cancel', requireToken, async (req, res) => {
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   const hasDbc = fs.existsSync(BUNDLED_DBC_PATH);
-  console.log(`\n🚀 Inspire AI v41 Backend running on http://localhost:${PORT}`);
+  const hasNotebooks = fs.existsSync(NOTEBOOKS_DIR);
+  const notebookCount = hasNotebooks ? fs.readdirSync(NOTEBOOKS_DIR).filter(f => f.endsWith('.py')).length : 0;
+  console.log(`\n🚀 Inspire Backend running on http://localhost:${PORT}`);
   console.log(`   Databricks Host: ${DATABRICKS_HOST}`);
-  console.log(`   Bundled DBC:     ${hasDbc ? '✅ v41 Found' : '❌ Not found'}`);
-  console.log(`   Mode:            Single notebook with session/step tracking`);
+  console.log(`   Bundled DBC:     ${hasDbc ? '✅ Found' : '❌ Not found'}`);
+  console.log(`   Pipeline Mode:   ${hasNotebooks ? `✅ ${notebookCount} notebooks` : '❌ Not available'}`);
   console.log(`   Default Notebook: ${DEFAULT_NOTEBOOK_PATH || '(publish via UI)'}\n`);
 });
