@@ -1,0 +1,85 @@
+@import "tailwindcss";
+
+@theme {
+  --color-db-red: #FF3621;
+  --color-db-red-light: #FF6A52;
+  --color-db-red-dark: #D42A15;
+  --color-db-orange: #FF6F42;
+  --color-db-dark: #1B3139;
+  --color-db-darker: #0F1F25;
+  --color-db-darkest: #09171D;
+  --color-db-navy: #0D2733;
+  --color-db-teal: #00A972;
+  --color-db-gold: #F2A900;
+}
+
+/* Step transition animations */
+@keyframes slideInRight {
+  from { opacity: 0; transform: translateX(24px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+@keyframes slideInLeft {
+  from { opacity: 0; transform: translateX(-24px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.animate-slide-in-right {
+  animation: slideInRight 0.3s ease-out both;
+}
+.animate-slide-in-left {
+  animation: slideInLeft 0.3s ease-out both;
+}
+.animate-fade-in-up {
+  animation: fadeInUp 0.35s ease-out both;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.2); }
+
+/* Tooltip */
+.tooltip-trigger:hover + .tooltip-content,
+.tooltip-content:hover {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* ─── Landing page: scanline overlay ─── */
+.scanlines {
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0, 0, 0, 0.05) 2px,
+    rgba(0, 0, 0, 0.05) 4px
+  );
+  pointer-events: none;
+}
+
+/* ─── Landing page: ASCII art glow ─── */
+.ascii-art {
+  text-shadow:
+    0 0 4px rgba(255, 54, 33, 0.5),
+    0 0 12px rgba(255, 54, 33, 0.2),
+    0 0 30px rgba(255, 54, 33, 0.08);
+}
+
+.ascii-line {
+  animation: asciiReveal 0.3s ease-out both;
+}
+
+@keyframes asciiReveal {
+  from {
+    opacity: 0;
+    filter: blur(2px);
+  }
+  to {
+    opacity: 1;
+    filter: blur(0px);
+  }
+}

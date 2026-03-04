@@ -1,0 +1,11 @@
+{
+  "name": "inspire-app",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev:backend": "cd backend && node --watch server.js",
+    "dev:frontend": "cd frontend && npm run dev",
+    "dev": "npx --yes concurrently -n backend,frontend -c blue,green \"npm run dev:backend\" \"npm run dev:frontend\"",
+    "install:all": "cd frontend && npm install && cd ../backend && npm install"
+  }
+}

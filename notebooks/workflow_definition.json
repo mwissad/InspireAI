@@ -1,0 +1,126 @@
+{
+  "name": "Inspire AI Pipeline",
+  "description": "Multi-step Databricks Inspire AI data strategy generation pipeline",
+  "tasks": [
+    {
+      "task_key": "01_init_validate",
+      "description": "Initialize & validate all widget inputs",
+      "notebook_task": {
+        "notebook_path": "{{BASE_PATH}}/01_init_validate",
+        "source": "WORKSPACE"
+      }
+    },
+    {
+      "task_key": "02_business_context",
+      "description": "Extract business context & strategic goals",
+      "depends_on": [
+        {
+          "task_key": "01_init_validate"
+        }
+      ],
+      "notebook_task": {
+        "notebook_path": "{{BASE_PATH}}/02_business_context",
+        "base_parameters": {
+          "inspire_database": "{{INSPIRE_DATABASE}}"
+        },
+        "source": "WORKSPACE"
+      }
+    },
+    {
+      "task_key": "03_schema_discovery",
+      "description": "Discover UC metadata & filter tables",
+      "depends_on": [
+        {
+          "task_key": "02_business_context"
+        }
+      ],
+      "notebook_task": {
+        "notebook_path": "{{BASE_PATH}}/03_schema_discovery",
+        "base_parameters": {
+          "inspire_database": "{{INSPIRE_DATABASE}}"
+        },
+        "source": "WORKSPACE"
+      }
+    },
+    {
+      "task_key": "04_use_case_gen",
+      "description": "Generate use cases (2-pass ensemble)",
+      "depends_on": [
+        {
+          "task_key": "03_schema_discovery"
+        }
+      ],
+      "notebook_task": {
+        "notebook_path": "{{BASE_PATH}}/04_use_case_gen",
+        "base_parameters": {
+          "inspire_database": "{{INSPIRE_DATABASE}}"
+        },
+        "source": "WORKSPACE"
+      }
+    },
+    {
+      "task_key": "05_scoring_quality",
+      "description": "Cluster, score & quality-filter use cases",
+      "depends_on": [
+        {
+          "task_key": "04_use_case_gen"
+        }
+      ],
+      "notebook_task": {
+        "notebook_path": "{{BASE_PATH}}/05_scoring_quality",
+        "base_parameters": {
+          "inspire_database": "{{INSPIRE_DATABASE}}"
+        },
+        "source": "WORKSPACE"
+      }
+    },
+    {
+      "task_key": "06_sql_notebooks",
+      "description": "Generate SQL & assemble notebooks",
+      "depends_on": [
+        {
+          "task_key": "05_scoring_quality"
+        }
+      ],
+      "notebook_task": {
+        "notebook_path": "{{BASE_PATH}}/06_sql_notebooks",
+        "base_parameters": {
+          "inspire_database": "{{INSPIRE_DATABASE}}"
+        },
+        "source": "WORKSPACE"
+      }
+    },
+    {
+      "task_key": "07_documentation",
+      "description": "Generate PDF, PPTX, Excel catalogs",
+      "depends_on": [
+        {
+          "task_key": "06_sql_notebooks"
+        }
+      ],
+      "notebook_task": {
+        "notebook_path": "{{BASE_PATH}}/07_documentation",
+        "base_parameters": {
+          "inspire_database": "{{INSPIRE_DATABASE}}"
+        },
+        "source": "WORKSPACE"
+      }
+    },
+    {
+      "task_key": "08_samples_finalize",
+      "description": "Execute samples & finalize pipeline",
+      "depends_on": [
+        {
+          "task_key": "07_documentation"
+        }
+      ],
+      "notebook_task": {
+        "notebook_path": "{{BASE_PATH}}/08_samples_finalize",
+        "base_parameters": {
+          "inspire_database": "{{INSPIRE_DATABASE}}"
+        },
+        "source": "WORKSPACE"
+      }
+    }
+  ]
+}
