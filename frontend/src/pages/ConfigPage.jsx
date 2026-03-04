@@ -62,7 +62,11 @@ export default function ConfigPage({ settings, update, onConfigured }) {
     if (tokenStatus !== 'valid') return;
     setWarehouseLoading(true);
     apiFetch('/api/warehouses')
-      .then((d) => setWarehouses(d.warehouses || []))
+      .then((d) => {
+        setWarehouses(d.warehouses || []);
+        if (!warehouseId && d.warehouses?.length > 0)
+          update('warehouseId', d.warehouses[0].id);
+      })
       .catch(() => {})
       .finally(() => setWarehouseLoading(false));
 
@@ -84,6 +88,7 @@ export default function ConfigPage({ settings, update, onConfigured }) {
         body: JSON.stringify({ destination_path: destPath }),
       });
       update('notebookPath', data.path || destPath);
+      update('publishedFolder', data.folder_path || destPath);
       setPublishStatus('done');
       setPublishMessage(`Published to ${data.path || destPath}`);
     } catch (e) {
@@ -111,7 +116,7 @@ export default function ConfigPage({ settings, update, onConfigured }) {
 
       {/* Steps */}
       <div className="space-y-6">
-        {/* Step 1: Token */}
+      {/* Step 1: Token */}
         <section className="bg-surface border border-border rounded-lg overflow-hidden">
           <div className="flex items-center gap-3 px-5 py-3 border-b border-border bg-panel">
             <StepBadge step={1} done={step1Done} />
@@ -124,21 +129,21 @@ export default function ConfigPage({ settings, update, onConfigured }) {
             <div className="flex gap-3">
               <div className="relative flex-1">
                 <Key size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-tertiary" />
-                <input
-                  type="password"
+          <input
+            type="password"
                   value={token}
                   onChange={(e) => {
                     update('token', e.target.value);
                     setTokenStatus(null);
                   }}
-                  placeholder="dapi..."
+            placeholder="dapi..."
                   autoComplete="off"
                   data-1p-ignore
                   data-lpignore="true"
                   className="w-full pl-9 pr-3 py-2 text-sm border border-border rounded-md bg-surface text-text-primary placeholder:text-text-tertiary glow-focus transition-smooth"
                 />
-              </div>
-              <button
+        </div>
+          <button
                 onClick={testConnection}
                 disabled={!token || tokenStatus === 'loading'}
                 className="px-4 py-2 text-sm font-medium rounded-md border border-border text-text-primary hover:bg-bg-subtle disabled:opacity-50 disabled:cursor-not-allowed transition-smooth flex items-center gap-2"
@@ -158,8 +163,8 @@ export default function ConfigPage({ settings, update, onConfigured }) {
                 <CheckCircle2 size={14} className="text-success" />
                 <span className="text-sm text-success">
                   Connected as <span className="font-medium">{username}</span>
-                </span>
-              </div>
+              </span>
+            </div>
             )}
             {tokenStatus === 'invalid' && (
               <div className="flex items-center gap-2 mt-3 p-2.5 bg-error-bg rounded-md">
@@ -167,9 +172,9 @@ export default function ConfigPage({ settings, update, onConfigured }) {
                 <span className="text-sm text-error">
                   Authentication failed. Check your token.
                 </span>
-              </div>
-            )}
-          </div>
+        </div>
+      )}
+    </div>
         </section>
 
         {/* Step 2: SQL Warehouse */}
@@ -179,21 +184,21 @@ export default function ConfigPage({ settings, update, onConfigured }) {
             <div>
               <h2 className="text-sm font-semibold text-text-primary">SQL Warehouse</h2>
               <p className="text-xs text-text-secondary">Select a warehouse for query execution</p>
-            </div>
+    </div>
           </div>
           <div className="px-5 py-4">
             {warehouseLoading ? (
               <div className="flex items-center gap-2 text-sm text-text-secondary py-4">
                 <Loader2 size={14} className="animate-spin" />
                 Loading warehouses...
-              </div>
+        </div>
             ) : (
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 {warehouses.map((w) => {
                   const selected = warehouseId === w.id;
                   const running = w.state === 'RUNNING';
                   return (
-                    <button
+        <button
                       key={w.id}
                       onClick={() => update('warehouseId', w.id)}
                       className={`
@@ -218,13 +223,13 @@ export default function ConfigPage({ settings, update, onConfigured }) {
                             {w.state}
                           </span>
                           <span className="text-xs text-text-tertiary">{w.cluster_size}</span>
-                        </div>
-                      </div>
+      </div>
+      </div>
                       {selected && <CheckCircle2 size={16} className="text-db-red mt-0.5" />}
                     </button>
                   );
                 })}
-              </div>
+        </div>
             )}
           </div>
         </section>
@@ -247,8 +252,8 @@ export default function ConfigPage({ settings, update, onConfigured }) {
                 <span className="text-text-tertiary">
                   ({(dbcInfo.size / 1024).toFixed(0)} KB, {dbcInfo.notebooks?.length || 0} notebook{dbcInfo.notebooks?.length !== 1 ? 's' : ''})
                 </span>
-              </div>
-            )}
+          </div>
+        )}
 
             <div className="flex items-center gap-3">
               <div className="relative flex-1">
@@ -260,8 +265,8 @@ export default function ConfigPage({ settings, update, onConfigured }) {
                   className="w-full pl-9 pr-3 py-2 text-sm border border-border rounded-md bg-bg text-text-secondary"
                   placeholder="Destination path"
                 />
-              </div>
-              <button
+      </div>
+      <button
                 onClick={publish}
                 disabled={publishStatus === 'loading' || !username}
                 className="px-4 py-2 text-sm font-medium rounded-md bg-db-red text-white hover:bg-db-red-hover disabled:opacity-50 disabled:cursor-not-allowed transition-smooth flex items-center gap-2"
@@ -272,8 +277,8 @@ export default function ConfigPage({ settings, update, onConfigured }) {
                   <Upload size={14} />
                 )}
                 Publish
-              </button>
-            </div>
+      </button>
+    </div>
 
             {/* Publish status */}
             {publishStatus === 'done' && (
@@ -290,7 +295,7 @@ export default function ConfigPage({ settings, update, onConfigured }) {
             )}
           </div>
         </section>
-      </div>
+        </div>
 
       {/* Continue button */}
       <div className="mt-8 flex justify-end">
@@ -303,9 +308,9 @@ export default function ConfigPage({ settings, update, onConfigured }) {
           <ArrowRight size={16} />
         </button>
       </div>
-    </div>
-  );
-}
+      </div>
+    );
+  }
 
 // Step badge component
 function StepBadge({ step, done }) {

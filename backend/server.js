@@ -699,7 +699,14 @@ app.get('/api/inspire/results', requireToken, async (req, res) => {
     }
 
     let results = null;
-    try { results = JSON.parse(rows[0].results_json); } catch { results = null; }
+    const raw = rows[0].results_json;
+    if (raw && typeof raw === 'object') {
+      // VARIANT type already returned as object
+      results = raw;
+    } else if (raw && typeof raw === 'string') {
+      try { results = JSON.parse(raw); } catch { results = null; }
+    }
+    console.log('   📊 results_json type:', typeof raw, '| domains:', Array.isArray(results?.domains) ? results.domains.length : 'N/A', '| has use_cases:', !!results?.use_cases);
 
     res.json({
       results,

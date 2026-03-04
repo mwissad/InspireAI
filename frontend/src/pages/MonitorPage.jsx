@@ -27,7 +27,7 @@ export default function MonitorPage({ settings, sessionId, runId, onComplete }) 
   const [steps, setSteps] = useState([]);
   const [polling, setPolling] = useState(true);
   const lastPollRef = useRef(null);
-  const runStartTimeRef = useRef(Date.now());
+  const trackedSessionRef = useRef(null); // track which session_id we're following
 
   const apiFetch = useCallback(
     async (url, opts = {}) => {
@@ -86,85 +86,83 @@ export default function MonitorPage({ settings, sessionId, runId, onComplete }) 
       }
 
       // ── 2. Poll session & steps only if we have a warehouse + database ──
+      // Always fetch the LATEST session (no session_id filter) so we
+      // automatically pick up new runs.
       if (warehouseId && inspireDatabase) {
         try {
           const sessQ = new URLSearchParams({
             inspire_database: inspireDatabase,
             warehouse_id: warehouseId,
-            ...(sessionId ? { session_id: sessionId } : {}),
           });
           const sessData = await apiFetch(`/api/inspire/session?${sessQ}`);
 
           if (sessData.session) {
             const sess = sessData.session;
+            const sid = sess.session_id;
 
-            // Guard: Only accept session if it was created AFTER we launched the run.
-            // This prevents picking up old completed sessions.
-            const sessCreated = sess.create_at
-              ? new Date(sess.create_at).getTime()
-              : 0;
-            const isCurrentSession = sessCreated >= runStartTimeRef.current - 60000; // 1min grace
+            // Detect session change → reset steps and delta pointer
+            if (trackedSessionRef.current && trackedSessionRef.current !== String(sid)) {
+              setSteps([]);
+              lastPollRef.current = null;
+            }
+            trackedSessionRef.current = String(sid);
 
-            if (isCurrentSession || !runId) {
-              setSession(sess);
-              const sid = sess.session_id;
+            setSession(sess);
 
-              // Poll steps
-              try {
-                const stepQ = new URLSearchParams({
-                  inspire_database: inspireDatabase,
-                  warehouse_id: warehouseId,
-                  session_id: String(sid),
-                  ...(lastPollRef.current ? { since: lastPollRef.current } : {}),
+            // Poll steps for the current session
+            try {
+              const stepQ = new URLSearchParams({
+                inspire_database: inspireDatabase,
+                warehouse_id: warehouseId,
+                session_id: String(sid),
+                ...(lastPollRef.current ? { since: lastPollRef.current } : {}),
+              });
+              const stepData = await apiFetch(`/api/inspire/steps?${stepQ}`);
+              if (stepData.steps?.length > 0) {
+                setSteps((prev) => {
+                  const map = new Map(prev.map((s) => [s.step_id, s]));
+                  for (const s of stepData.steps) {
+                    map.set(s.step_id, s);
+                  }
+                  return Array.from(map.values()).sort(
+                    (a, b) =>
+                      (a.last_updated || '').localeCompare(b.last_updated || '')
+                  );
                 });
-                const stepData = await apiFetch(`/api/inspire/steps?${stepQ}`);
-                if (stepData.steps?.length > 0) {
-                  setSteps((prev) => {
-                    const map = new Map(prev.map((s) => [s.step_id, s]));
-                    for (const s of stepData.steps) {
-                      map.set(s.step_id, s);
-                    }
-                    return Array.from(map.values()).sort(
-                      (a, b) =>
-                        (a.last_updated || '').localeCompare(b.last_updated || '')
-                    );
-                  });
-                  lastPollRef.current =
-                    stepData.steps[stepData.steps.length - 1].last_updated;
-                }
+                lastPollRef.current =
+                  stepData.steps[stepData.steps.length - 1].last_updated;
+              }
+            } catch {
+              // Steps table might not exist yet
+            }
+
+            // ACK if status === 'ready'
+            if (sess.processing_status === 'ready') {
+              try {
+                await apiFetch('/api/inspire/ack', {
+                  method: 'POST',
+                  body: JSON.stringify({
+                    inspire_database: inspireDatabase,
+                    warehouse_id: warehouseId,
+                    session_id: sid,
+                  }),
+                });
               } catch {
-                // Steps table might not exist yet
+                // silent
               }
+            }
 
-              // ACK if status === 'ready'
-              if (sess.processing_status === 'ready') {
-                try {
-                  await apiFetch('/api/inspire/ack', {
-                    method: 'POST',
-                    body: JSON.stringify({
-                      inspire_database: inspireDatabase,
-                      warehouse_id: warehouseId,
-                      session_id: sid,
-                    }),
-                  });
-                } catch {
-                  // silent
-                }
-              }
+            // Only stop polling when the Databricks run has terminated
+            // AND the session confirms completion.
+            const runDone =
+              !runId ||
+              currentRunInfo?.life_cycle_state === 'TERMINATED' ||
+              currentRunInfo?.life_cycle_state === 'INTERNAL_ERROR';
+            const sessionDone =
+              sess.completed_on || sess.completed_percent >= 100;
 
-              // Only mark as fully complete when BOTH conditions are met:
-              // a) The Databricks run has terminated successfully, AND
-              // b) The session shows completion
-              const runDone =
-                !runId ||
-                (currentRunInfo?.life_cycle_state === 'TERMINATED' &&
-                  currentRunInfo?.result_state === 'SUCCESS');
-              const sessionDone =
-                sess.completed_on || sess.completed_percent >= 100;
-
-              if (runDone && sessionDone) {
-                setPolling(false);
-              }
+            if (runDone && sessionDone) {
+              setPolling(false);
             }
           }
         } catch {
@@ -182,7 +180,13 @@ export default function MonitorPage({ settings, sessionId, runId, onComplete }) 
   }, [polling, warehouseId, inspireDatabase, sessionId, runId, apiFetch]); // eslint-disable-line
 
   // ── Derived display state ──
-  const percent = session?.completed_percent || 0;
+
+  // Detect stale session: if session shows completed but the run is still active,
+  // the session belongs to a previous run — ignore its progress.
+  const isStaleSession =
+    session?.completed_on && runPhase !== PHASE_TERMINATED;
+
+  const percent = isStaleSession ? 0 : (session?.completed_percent || 0);
 
   const isFailed =
     runInfo?.result_state === 'FAILED' ||
@@ -190,6 +194,7 @@ export default function MonitorPage({ settings, sessionId, runId, onComplete }) 
 
   const isComplete =
     !isFailed &&
+    !isStaleSession &&
     runPhase === PHASE_TERMINATED &&
     runInfo?.result_state === 'SUCCESS' &&
     (session?.completed_on || percent >= 100);
@@ -205,15 +210,19 @@ export default function MonitorPage({ settings, sessionId, runId, onComplete }) 
     statusDetail = 'Provisioning compute resources...';
   } else if (isRunning) {
     statusLabel = 'Running';
-    statusDetail = session
-      ? `${Math.round(percent)}% complete`
-      : 'Notebook is initializing...';
+    statusDetail = isStaleSession || !session
+      ? 'Notebook is initializing...'
+      : `${Math.round(percent)}% complete`;
   } else if (isComplete) {
     statusLabel = 'Completed';
     statusDetail = 'Pipeline finished successfully.';
   } else if (isFailed) {
     statusLabel = 'Failed';
     statusDetail = runInfo?.state_message || 'Pipeline execution failed.';
+  } else if (runPhase === PHASE_TERMINATED && runInfo?.result_state === 'SUCCESS' && !session?.completed_on) {
+    // Run terminated with success but session not yet complete
+    statusLabel = 'Finalizing';
+    statusDetail = 'Run completed, waiting for results...';
   }
 
   // Elapsed time
@@ -221,12 +230,14 @@ export default function MonitorPage({ settings, sessionId, runId, onComplete }) 
     ? formatDuration(runInfo.execution_duration)
     : null;
 
-  // Group steps by stage
+  // Group steps by stage (hide stale steps from old sessions)
   const stages = {};
-  for (const step of steps) {
-    const stage = step.stage_name || 'Pipeline';
-    if (!stages[stage]) stages[stage] = [];
-    stages[stage].push(step);
+  if (!isStaleSession) {
+    for (const step of steps) {
+      const stage = step.stage_name || 'Pipeline';
+      if (!stages[stage]) stages[stage] = [];
+      stages[stage].push(step);
+    }
   }
 
   return (
@@ -263,22 +274,36 @@ export default function MonitorPage({ settings, sessionId, runId, onComplete }) 
               isFailed={isFailed}
             />
             <div>
-              <span className="text-sm font-semibold text-text-primary">
+              <span className={`text-sm font-semibold ${
+                isComplete ? 'text-success' : isFailed ? 'text-error' : 'text-text-primary'
+              }`}>
                 {statusLabel}
-              </span>
+                  </span>
               {statusDetail && (
-                <p className="text-xs text-text-secondary mt-0.5">
+                <p className={`text-xs mt-0.5 ${
+                  isComplete ? 'text-success' : isFailed ? 'text-error' : 'text-text-secondary'
+                }`}>
                   {statusDetail}
                 </p>
               )}
             </div>
           </div>
-          <div className="flex items-center gap-4 text-xs text-text-tertiary">
-            {elapsed && <span>{elapsed}</span>}
+          <div className="flex items-center gap-4 text-xs">
+            {elapsed && <span className="text-text-tertiary">{elapsed}</span>}
             {runInfo?.life_cycle_state && (
-              <span className="font-mono px-2 py-0.5 bg-bg rounded">
-                {runInfo.life_cycle_state}
-                {runInfo.result_state ? ` / ${runInfo.result_state}` : ''}
+              <span className={`font-mono px-2 py-0.5 rounded font-medium ${
+                isComplete
+                  ? 'bg-success-bg text-success'
+                  : isFailed
+                    ? 'bg-error-bg text-error'
+                    : isPending
+                      ? 'bg-info-bg text-info'
+                      : 'bg-db-red-50 text-db-red'
+              }`}>
+                {isComplete
+                  ? 'TERMINATED / SUCCESS'
+                  : runInfo.life_cycle_state}
+                {!isComplete && runInfo.result_state ? ` / ${runInfo.result_state}` : ''}
               </span>
             )}
             {isRunning && (
@@ -298,12 +323,22 @@ export default function MonitorPage({ settings, sessionId, runId, onComplete }) 
                 : isFailed
                   ? 'bg-error'
                   : isPending
-                    ? 'bg-text-tertiary'
-                    : 'bg-db-red progress-glow'
+                    ? 'bg-text-tertiary animate-pulse'
+                    : isStaleSession
+                      ? 'bg-db-red/40 animate-pulse'
+                      : 'bg-db-red progress-glow'
             }`}
-            style={{ width: `${isPending ? 2 : Math.max(Math.min(percent, 100), 1)}%` }}
-          />
-        </div>
+                style={{
+              width: isComplete
+                ? '100%'
+                : isPending
+                  ? '3%'
+                  : isStaleSession
+                    ? '15%'
+                    : `${Math.max(Math.min(percent, 100), 1)}%`,
+                }}
+              />
+            </div>
 
         {/* Run name */}
         {runInfo?.run_name && (
@@ -341,17 +376,17 @@ export default function MonitorPage({ settings, sessionId, runId, onComplete }) 
                   {stageName}
                 </h3>
                 <span className="text-xs text-text-tertiary">
-                  {stageSteps.filter((s) => s.status === 'completed').length}/{stageSteps.length} completed
-                </span>
+                  {stageSteps.filter((s) => isStepDone(s.status)).length}/{stageSteps.length} completed
+              </span>
               </div>
               <div className="divide-y divide-border-subtle">
                 {stageSteps.map((step) => (
                   <StepRow key={step.step_id} step={step} />
                 ))}
               </div>
-            </div>
+          </div>
           ))}
-        </div>
+                    </div>
       ) : isRunning || isPending ? (
         <div className="bg-surface border border-border rounded-lg p-8 text-center">
           <Loader2
@@ -365,8 +400,8 @@ export default function MonitorPage({ settings, sessionId, runId, onComplete }) 
           </p>
           <p className="text-xs text-text-tertiary mt-1">
             Steps will appear here as the notebook executes.
-          </p>
-        </div>
+                      </p>
+                    </div>
       ) : null}
 
       {/* Failed state */}
@@ -404,7 +439,7 @@ export default function MonitorPage({ settings, sessionId, runId, onComplete }) 
         <div className="mt-6 bg-success-bg border border-success/20 rounded-lg p-5 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <CheckCircle2 size={20} className="text-success" />
-            <div>
+              <div>
               <p className="text-sm font-semibold text-text-primary">
                 Pipeline completed successfully
               </p>
@@ -412,7 +447,7 @@ export default function MonitorPage({ settings, sessionId, runId, onComplete }) 
                 Results are ready for review.
                 {elapsed && ` Total execution time: ${elapsed}.`}
               </p>
-            </div>
+              </div>
           </div>
           <button
             onClick={onComplete}
@@ -441,20 +476,73 @@ function StatusIcon({ isPending, isRunning, isComplete, isFailed }) {
   return <Play size={18} className="text-text-tertiary" />;
 }
 
-function StepRow({ step }) {
-  const statusIcon = {
-    completed: <CheckCircle2 size={14} className="text-success" />,
-    running: <Loader2 size={14} className="animate-spin text-db-red" />,
-    pending: <Clock size={14} className="text-text-tertiary" />,
-    failed: <XCircle size={14} className="text-error" />,
-    error: <AlertCircle size={14} className="text-error" />,
-  };
+// Map notebook status values to display config
+function getStepStyle(status) {
+  switch (status) {
+    case 'ended_success':
+      return {
+        icon: <CheckCircle2 size={14} className="text-success" />,
+        badge: 'bg-success-bg text-success',
+        label: 'Success',
+      };
+    case 'started':
+      return {
+        icon: <Loader2 size={14} className="animate-spin text-info" />,
+        badge: 'bg-info-bg text-info',
+        label: 'In Progress',
+      };
+    case 'ended_warning':
+      return {
+        icon: <AlertCircle size={14} className="text-warning" />,
+        badge: 'bg-warning-bg text-warning',
+        label: 'Warning',
+      };
+    case 'ended_error':
+      return {
+        icon: <XCircle size={14} className="text-error" />,
+        badge: 'bg-error-bg text-error',
+        label: 'Error',
+      };
+    // Fallbacks for any other status values
+    case 'completed':
+      return {
+        icon: <CheckCircle2 size={14} className="text-success" />,
+        badge: 'bg-success-bg text-success',
+        label: 'Success',
+      };
+    case 'running':
+      return {
+        icon: <Loader2 size={14} className="animate-spin text-info" />,
+        badge: 'bg-info-bg text-info',
+        label: 'Running',
+      };
+    case 'failed':
+    case 'error':
+      return {
+        icon: <XCircle size={14} className="text-error" />,
+        badge: 'bg-error-bg text-error',
+        label: 'Failed',
+      };
+    default:
+      return {
+        icon: <Clock size={14} className="text-text-tertiary" />,
+        badge: 'bg-bg text-text-tertiary',
+        label: status || 'Pending',
+      };
+  }
+}
 
-  const icon = statusIcon[step.status] || statusIcon.pending;
+// Check if a step is "done" (for counter)
+function isStepDone(status) {
+  return status === 'ended_success' || status === 'ended_warning' || status === 'completed';
+}
+
+function StepRow({ step }) {
+  const style = getStepStyle(step.status);
 
   return (
     <div className="flex items-center gap-3 px-4 py-2.5 hover:bg-bg-subtle transition-smooth">
-      {icon}
+      {style.icon}
       <div className="flex-1 min-w-0">
         <div className="text-sm text-text-primary font-medium truncate">
           {step.step_name || step.sub_step_name || 'Step'}
@@ -471,18 +559,8 @@ function StepRow({ step }) {
             +{step.progress_increment}%
           </span>
         )}
-        <span
-          className={`text-xs font-medium capitalize px-2 py-0.5 rounded-full ${
-            step.status === 'completed'
-              ? 'bg-success-bg text-success'
-              : step.status === 'running'
-                ? 'bg-db-red-50 text-db-red'
-                : step.status === 'failed' || step.status === 'error'
-                  ? 'bg-error-bg text-error'
-                  : 'bg-bg text-text-tertiary'
-          }`}
-        >
-          {step.status || 'pending'}
+        <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${style.badge}`}>
+          {style.label}
         </span>
       </div>
     </div>

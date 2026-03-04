@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, Component } from 'react';
 import Header from './components/Header';
 import SettingsPanel from './components/SettingsPanel';
 import LandingPage from './pages/LandingPage';
@@ -6,6 +6,46 @@ import ConfigPage from './pages/ConfigPage';
 import LaunchPage from './pages/LaunchPage';
 import MonitorPage from './pages/MonitorPage';
 import ResultsPage from './pages/ResultsPage';
+
+// Error Boundary to catch rendering crashes and display useful info
+class ErrorBoundary extends Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, error: null, info: null };
+  }
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error };
+  }
+  componentDidCatch(error, info) {
+    console.error('ErrorBoundary caught:', error, info);
+    this.setState({ info });
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{ padding: 32, fontFamily: 'monospace' }}>
+          <h2 style={{ color: '#DC2626' }}>Component Crash</h2>
+          <pre style={{ whiteSpace: 'pre-wrap', background: '#FEF2F2', padding: 16, borderRadius: 8 }}>
+            {this.state.error?.toString()}
+          </pre>
+          <details>
+            <summary>Stack trace</summary>
+            <pre style={{ whiteSpace: 'pre-wrap', fontSize: 11 }}>
+              {this.state.info?.componentStack}
+            </pre>
+          </details>
+          <button
+            onClick={() => this.setState({ hasError: false, error: null, info: null })}
+            style={{ marginTop: 12, padding: '8px 16px', cursor: 'pointer' }}
+          >
+            Retry
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 export default function App() {
   const [page, setPage] = useState('landing');
@@ -103,9 +143,11 @@ export default function App() {
         )}
 
         {page === 'results' && (
-          <div className="max-w-6xl mx-auto px-6 py-8">
-            <ResultsPage settings={settings} sessionId={sessionId} />
-          </div>
+          <ErrorBoundary key="results">
+            <div className="max-w-6xl mx-auto px-6 py-8">
+              <ResultsPage settings={settings} update={update} sessionId={sessionId} />
+            </div>
+          </ErrorBoundary>
         )}
       </main>
 
