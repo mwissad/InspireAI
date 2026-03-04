@@ -223,7 +223,15 @@ app.get('/api/tables/:catalog/:schema', requireToken, async (req, res) => {
     const tables = (data.tables || []).map(t => ({
       name: t.name,
       full_name: t.full_name,
+      catalog_name: t.catalog_name || catalog,
+      schema_name: t.schema_name || schema,
       table_type: t.table_type,
+      data_source_format: t.data_source_format || '',
+      updated_at: t.updated_at ? new Date(t.updated_at).toISOString() : null,
+      created_at: t.created_at ? new Date(t.created_at).toISOString() : null,
+      comment: t.comment || '',
+      owner: t.owner || '',
+      columns: (t.columns || []).length,
     }));
     res.json({ tables, count: tables.length });
   } catch (err) {

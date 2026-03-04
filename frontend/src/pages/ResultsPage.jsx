@@ -1,473 +1,440 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import {
-  Database, Loader2, AlertCircle, Search, ChevronDown, ChevronUp,
-  BarChart3, Target, Building2, FileText, Sparkles, RefreshCw,
-  Calendar, Zap, Filter, ArrowDownUp, Eye, Cpu, Brain
+  Loader2,
+  AlertCircle,
+  Search,
+  ChevronDown,
+  ChevronUp,
+  FileText,
+  BarChart3,
+  Target,
+  Code,
+  Filter,
+  Download,
+  Clock,
 } from 'lucide-react';
-import DatabricksLogo from '../components/DatabricksLogo';
 
-const PRIORITY_COLORS = {
-  'Ultra High': 'bg-red-500/12 text-red-400 border-red-500/20',
-  'Very High':  'bg-db-orange/12 text-db-orange border-db-orange/20',
-  'High':       'bg-db-gold/12 text-db-gold border-db-gold/20',
-  'Medium':     'bg-blue-400/12 text-blue-400 border-blue-400/20',
-  'Low':        'bg-slate-500/12 text-slate-400 border-slate-500/20',
-  'Very Low':   'bg-slate-600/12 text-slate-500 border-slate-600/20',
-  'Ultra Low':  'bg-slate-700/12 text-slate-600 border-slate-700/20',
-};
+export default function ResultsPage({ settings, sessionId: propSessionId }) {
+  const { token, warehouseId, inspireDatabase } = settings;
 
-const TYPE_ICONS = {
-  'Risk': '🛡️',
-  'Opportunity': '💡',
-  'Problem': '🔍',
-  'Improvement': '📈',
-};
-
-export default function ResultsPage({ settings, update, apiFetch }) {
   const [sessions, setSessions] = useState([]);
-  const [selectedSessionId, setSelectedSessionId] = useState(null);
+  const [selectedSession, setSelectedSession] = useState(propSessionId || '');
   const [results, setResults] = useState(null);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-  const [searchQuery, setSearchQuery] = useState('');
-  const [filterDomain, setFilterDomain] = useState('all');
-  const [filterPriority, setFilterPriority] = useState('all');
-  const [filterType, setFilterType] = useState('all');
-  const [sortBy, setSortBy] = useState('priority');
-  const [expandedUseCase, setExpandedUseCase] = useState(null);
-  const [inspireDb, setInspireDb] = useState(settings.inspireDatabase || '');
-  const [warehouseId, setWarehouseId] = useState(settings.warehouseId || '');
+  const [error, setError] = useState(null);
 
+  // Filters
+  const [search, setSearch] = useState('');
+  const [filterDomain, setFilterDomain] = useState('');
+  const [filterPriority, setFilterPriority] = useState('');
+
+  const apiFetch = useCallback(
+    async (url) => {
+      const resp = await fetch(url, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!resp.ok) throw new Error(`${resp.status}`);
+      return resp.json();
+    },
+    [token]
+  );
+
+  // Load sessions
   useEffect(() => {
-    if (!inspireDb || !warehouseId) return;
-    loadSessions();
-  }, [inspireDb, warehouseId]);
+    if (!warehouseId || !inspireDatabase) return;
+    const q = new URLSearchParams({
+      inspire_database: inspireDatabase,
+      warehouse_id: warehouseId,
+    });
+    apiFetch(`/api/inspire/sessions?${q}`)
+      .then((d) => {
+        setSessions(d.sessions || []);
+        if (!selectedSession && d.sessions?.length > 0) {
+          setSelectedSession(d.sessions[0].session_id);
+        }
+      })
+      .catch(() => {});
+  }, [warehouseId, inspireDatabase, apiFetch, selectedSession]);
 
-  const loadSessions = async () => {
-    try {
-      const params = new URLSearchParams({ inspire_database: inspireDb, warehouse_id: warehouseId });
-      const res = await apiFetch(`/api/inspire/sessions?${params}`);
-      if (!res.ok) return;
-      const data = await res.json();
-      setSessions(data.sessions || []);
-      const completed = (data.sessions || []).find(s => s.completed_percent >= 100);
-      if (completed) {
-        setSelectedSessionId(completed.session_id);
-        loadResults(completed.session_id);
-      }
-    } catch (err) { console.warn('Failed to load sessions:', err.message); }
-  };
-
-  const loadResults = async (sid) => {
+  // Load results for selected session
+  useEffect(() => {
+    if (!selectedSession || !warehouseId || !inspireDatabase) return;
     setLoading(true);
-    setError('');
-    setResults(null);
-    try {
-      const params = new URLSearchParams({ inspire_database: inspireDb, warehouse_id: warehouseId });
-      if (sid) params.set('session_id', sid);
-      const res = await apiFetch(`/api/inspire/results?${params}`);
-      if (!res.ok) throw new Error(`Failed: ${res.status}`);
-      const data = await res.json();
-      if (!data.results) { setError(data.message || 'No results found.'); return; }
-      setResults(data.results);
-    } catch (err) { setError(err.message); }
-    finally { setLoading(false); }
-  };
+    setError(null);
+    const q = new URLSearchParams({
+      inspire_database: inspireDatabase,
+      warehouse_id: warehouseId,
+      session_id: selectedSession,
+    });
+    apiFetch(`/api/inspire/results?${q}`)
+      .then((d) => {
+        if (d.results) {
+          setResults(d.results);
+        } else {
+          setResults(null);
+          setError(d.message || 'No results found for this session.');
+        }
+      })
+      .catch((e) => setError(e.message))
+      .finally(() => setLoading(false));
+  }, [selectedSession, warehouseId, inspireDatabase, apiFetch]);
 
   // Extract use cases
-  const allUseCases = [];
-  if (results?.domains) {
-    for (const domain of results.domains) {
-      for (const uc of (domain.use_cases || []))
-        allUseCases.push({ ...uc, _domain: domain.domain_name });
-    }
-  }
+  const useCases = results?.use_cases || results || [];
+  const ucList = Array.isArray(useCases) ? useCases : [];
 
-  // Filter & sort
-  const filteredUseCases = allUseCases
-    .filter(uc => {
-      if (filterDomain !== 'all' && uc._domain !== filterDomain) return false;
-      if (filterPriority !== 'all' && uc.Priority !== filterPriority) return false;
-      if (filterType !== 'all' && uc.type !== filterType) return false;
-      if (searchQuery) {
-        const q = searchQuery.toLowerCase();
-        return (uc.Name || '').toLowerCase().includes(q) ||
-               (uc.Statement || '').toLowerCase().includes(q) ||
-               (uc.Solution || '').toLowerCase().includes(q);
-      }
-      return true;
-    })
-    .sort((a, b) => {
-      const po = ['Ultra High', 'Very High', 'High', 'Medium', 'Low', 'Very Low', 'Ultra Low'];
-      if (sortBy === 'priority') return (po.indexOf(a.Priority) ?? 99) - (po.indexOf(b.Priority) ?? 99);
-      if (sortBy === 'domain') return (a._domain || '').localeCompare(b._domain || '');
-      if (sortBy === 'name') return (a.Name || '').localeCompare(b.Name || '');
-      return 0;
+  // Compute domains and priorities
+  const domains = [...new Set(ucList.map((uc) => uc.domain || uc.category || '').filter(Boolean))];
+  const priorities = [...new Set(ucList.map((uc) => uc.priority || '').filter(Boolean))];
+
+  // Filter use cases
+  const filtered = ucList.filter((uc) => {
+    const matchSearch =
+      !search ||
+      JSON.stringify(uc).toLowerCase().includes(search.toLowerCase());
+    const matchDomain =
+      !filterDomain || (uc.domain || uc.category || '') === filterDomain;
+    const matchPriority =
+      !filterPriority || uc.priority === filterPriority;
+    return matchSearch && matchDomain && matchPriority;
+  });
+
+  // Export to JSON
+  const handleExport = () => {
+    const blob = new Blob([JSON.stringify(filtered, null, 2)], {
+      type: 'application/json',
     });
-
-  const domains = [...new Set(allUseCases.map(uc => uc._domain).filter(Boolean))];
-  const priorities = [...new Set(allUseCases.map(uc => uc.Priority).filter(Boolean))];
-  const types = [...new Set(allUseCases.map(uc => uc.type).filter(Boolean))];
-
-  const resolveTable = (id) => {
-    if (!results?.table_registry || !id) return id;
-    return results.table_registry[id] || id;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `inspire_results_session_${selectedSession}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
   };
 
   return (
-    <div className="min-h-screen bg-db-darkest relative">
-      {/* Background */}
-      <div className="absolute inset-0 pointer-events-none overflow-hidden">
-        <div className="absolute top-[-10%] left-[20%] w-[500px] h-[500px] bg-db-teal/3 rounded-full blur-[180px]" />
-        <div className="absolute bottom-[-10%] right-[-5%] w-[400px] h-[400px] bg-db-gold/3 rounded-full blur-[150px]" />
-        <div
-          className="absolute inset-0 opacity-[0.02]"
-          style={{
-            backgroundImage: 'linear-gradient(rgba(255,54,33,0.3) 1px, transparent 1px), linear-gradient(90deg, rgba(255,54,33,0.3) 1px, transparent 1px)',
-            backgroundSize: '60px 60px',
-          }}
-        />
+    <div>
+      {/* Page header */}
+      <div className="flex items-center justify-between mb-6">
+        <div>
+          <h1 className="text-2xl font-bold text-text-primary">Results</h1>
+          <p className="text-sm text-text-secondary mt-1">
+            Review generated use cases and recommendations.
+          </p>
+        </div>
+        {filtered.length > 0 && (
+          <button
+            onClick={handleExport}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm text-text-secondary border border-border rounded-md hover:bg-bg-subtle transition-smooth"
+          >
+            <Download size={14} />
+            Export JSON
+          </button>
+        )}
       </div>
 
-      <div className="relative z-10 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
-        {/* Hero */}
-        <div className="text-center mb-4">
-          <div className="flex items-center justify-center gap-2 mb-4">
-            <span className="h-px w-10 bg-gradient-to-r from-transparent to-db-teal/60" />
-            <span className="text-[11px] font-bold uppercase tracking-[0.2em] text-db-teal flex items-center gap-1.5">
-              <Sparkles className="w-3 h-3" /> Results
-            </span>
-            <span className="h-px w-10 bg-gradient-to-l from-transparent to-db-teal/60" />
-          </div>
-          <h1 className="text-3xl sm:text-4xl font-black text-white tracking-tight mb-2">
-            Use Case{' '}
-            <span className="bg-gradient-to-r from-db-teal via-emerald-400 to-db-gold bg-clip-text text-transparent">
-              Catalog
-            </span>
-          </h1>
-          <p className="text-sm text-slate-400">Explore your AI-generated data strategy</p>
-        </div>
-
-        {/* ── Source picker ── */}
-        {(!results && !loading) && (
-          <div className="rounded-2xl border border-white/5 bg-db-navy/15 backdrop-blur-sm overflow-hidden">
-            <div className="flex items-center gap-3 px-6 py-4 border-b border-white/5 bg-db-navy/30">
-              <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-db-teal to-emerald-600 flex items-center justify-center shadow-lg">
-                <Database className="w-4 h-4 text-white" />
-              </div>
-              <div>
-                <h2 className="text-sm font-bold text-white tracking-tight">Data Source</h2>
-                <p className="text-[11px] text-slate-500">Select your Inspire session to view results</p>
-              </div>
-            </div>
-
-            <div className="p-6 space-y-4">
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                <div>
-                  <label className="text-xs font-semibold text-slate-300 block mb-1.5">Inspire Database</label>
-                  <div className="relative group">
-                    <Database className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-600 group-focus-within:text-db-teal transition-colors" size={14} />
-                    <input
-                      type="text"
-                      className="w-full bg-db-darkest/60 border border-white/8 rounded-xl pl-9 pr-3 py-2.5 text-sm text-white placeholder:text-slate-600 focus:outline-none focus:border-db-teal/40 focus:ring-1 focus:ring-db-teal/20 transition-all"
-                      placeholder="catalog._inspire"
-                      value={inspireDb}
-                      onChange={e => { setInspireDb(e.target.value); update('inspireDatabase', e.target.value); }}
-                    />
-                  </div>
-                </div>
-                <div>
-                  <label className="text-xs font-semibold text-slate-300 block mb-1.5">Warehouse ID</label>
-                  <div className="relative group">
-                    <Cpu className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-600 group-focus-within:text-db-teal transition-colors" size={14} />
-                    <input
-                      type="text"
-                      className="w-full bg-db-darkest/60 border border-white/8 rounded-xl pl-9 pr-3 py-2.5 text-sm text-white placeholder:text-slate-600 focus:outline-none focus:border-db-teal/40 focus:ring-1 focus:ring-db-teal/20 transition-all"
-                      placeholder="SQL Warehouse ID"
-                      value={warehouseId}
-                      onChange={e => { setWarehouseId(e.target.value); update('warehouseId', e.target.value); }}
-                    />
-                  </div>
-                </div>
-                <div className="flex items-end">
-                  <button
-                    onClick={loadSessions}
-                    disabled={!inspireDb || !warehouseId}
-                    className="w-full py-2.5 bg-gradient-to-r from-db-teal to-emerald-500 hover:from-db-teal hover:to-emerald-400 disabled:from-slate-700 disabled:to-slate-700 disabled:text-slate-500 rounded-xl text-sm font-semibold flex items-center justify-center gap-2 transition-all shadow-lg shadow-db-teal/15 disabled:shadow-none"
-                  >
-                    <RefreshCw size={14} /> Load Sessions
-                  </button>
-                </div>
-              </div>
-
-              {/* Session picker */}
-              {sessions.length > 0 && (
-                <div className="space-y-2">
-                  <label className="text-xs font-semibold text-slate-300 block">Sessions</label>
-                  {sessions.map(s => {
-                    const selected = selectedSessionId === s.session_id;
-                    const isDone = s.completed_percent >= 100;
-                    return (
-                      <button
-                        key={s.session_id}
-                        onClick={() => { setSelectedSessionId(s.session_id); loadResults(s.session_id); }}
-                        className={`w-full text-left p-3.5 rounded-xl border transition-all duration-200 flex items-center justify-between ${
-                          selected
-                            ? 'bg-db-teal/8 border-db-teal/25 shadow-sm'
-                            : 'bg-db-darkest/40 border-white/5 hover:border-white/10 hover:bg-db-navy/20'
-                        }`}
-                      >
-                        <div>
-                          <span className="text-sm font-semibold text-white">
-                            {s.widget_values?.business || 'Session'} — {s.session_id}
-                          </span>
-                          <div className="text-[10px] text-slate-500 flex items-center gap-3 mt-1">
-                            <span className="flex items-center gap-1"><Calendar size={9} /> {s.create_at?.slice(0, 19) || 'Unknown'}</span>
-                            <span>Progress: {Math.round(s.completed_percent)}%</span>
-                          </div>
-                        </div>
-                        <span className={`text-[10px] px-2.5 py-1 rounded-full font-semibold border ${
-                          isDone
-                            ? 'bg-db-teal/10 text-db-teal border-db-teal/20'
-                            : 'bg-db-gold/10 text-db-gold border-db-gold/20'
-                        }`}>
-                          {isDone ? 'Complete' : `${Math.round(s.completed_percent)}%`}
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* Loading */}
-        {loading && (
-          <div className="flex flex-col items-center justify-center gap-3 py-16">
-            <DatabricksLogo className="w-12 h-12 opacity-30 animate-pulse" />
-            <span className="text-sm text-slate-400">Loading results...</span>
-          </div>
-        )}
-
-        {/* Error */}
-        {error && (
-          <div className="flex items-center gap-2 text-red-400 text-sm bg-red-500/5 p-4 rounded-xl border border-red-500/15">
-            <AlertCircle size={14} /> <span>{error}</span>
-          </div>
-        )}
-
-        {/* ── Results content ── */}
-        {results && (
-          <>
-            {/* Executive summary */}
-            <div className="rounded-2xl border border-white/5 bg-db-navy/15 backdrop-blur-sm overflow-hidden">
-              <div className="flex items-center gap-3 px-6 py-4 border-b border-white/5 bg-db-navy/30">
-                <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-db-gold to-amber-500 flex items-center justify-center shadow-lg">
-                  <Sparkles className="w-4 h-4 text-white" />
-                </div>
-                <h2 className="text-sm font-bold text-white">{results.title || 'Use Cases Catalog'}</h2>
-              </div>
-              <div className="p-6">
-                {results.executive_summary && (
-                  <p className="text-sm text-slate-300 leading-relaxed whitespace-pre-wrap">{results.executive_summary}</p>
-                )}
-                {results.domains_summary && (
-                  <p className="text-xs text-slate-500 mt-3 border-t border-white/5 pt-3">{results.domains_summary}</p>
-                )}
-              </div>
-            </div>
-
-            {/* Stats */}
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-              <StatCard icon={<Building2 size={18} />} label="Domains" value={results.domains?.length || 0} gradient="from-db-red to-db-orange" />
-              <StatCard icon={<FileText size={18} />} label="Use Cases" value={allUseCases.length} gradient="from-db-orange to-db-gold" />
-              <StatCard icon={<Target size={18} />} label="High Priority" value={allUseCases.filter(uc => ['Ultra High', 'Very High', 'High'].includes(uc.Priority)).length} gradient="from-db-gold to-db-teal" />
-              <StatCard icon={<BarChart3 size={18} />} label="With SQL" value={allUseCases.filter(uc => uc.SQL && !uc.SQL.startsWith('--')).length} gradient="from-db-teal to-emerald-500" />
-            </div>
-
-            {/* Filters */}
-            <div className="rounded-xl border border-white/5 bg-db-navy/10 backdrop-blur-sm p-4">
-              <div className="flex flex-wrap items-center gap-3">
-                <div className="relative flex-1 min-w-[200px] group">
-                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-600 group-focus-within:text-db-red-light transition-colors" size={13} />
-                  <input
-                    type="text"
-                    className="w-full bg-db-darkest/60 border border-white/8 rounded-xl pl-9 pr-3 py-2 text-sm text-white placeholder:text-slate-600 focus:outline-none focus:border-db-red/40 focus:ring-1 focus:ring-db-red/20 transition-all"
-                    placeholder="Search use cases..."
-                    value={searchQuery}
-                    onChange={e => setSearchQuery(e.target.value)}
-                  />
-                </div>
-                <FilterSelect value={filterDomain} onChange={setFilterDomain} options={domains} label="All Domains" />
-                <FilterSelect value={filterPriority} onChange={setFilterPriority} options={priorities} label="All Priorities" />
-                <FilterSelect value={filterType} onChange={setFilterType} options={types} label="All Types" />
-                <FilterSelect value={sortBy} onChange={setSortBy} options={['priority', 'domain', 'name']} label="Sort by" isSort />
-              </div>
-              <p className="text-[10px] text-slate-600 mt-2">
-                {filteredUseCases.length} of {allUseCases.length} use cases
-              </p>
-            </div>
-
-            {/* Use case cards */}
-            <div className="space-y-3">
-              {filteredUseCases.map((uc, idx) => (
-                <UseCaseCard
-                  key={uc.No || idx}
-                  uc={uc}
-                  expanded={expandedUseCase === (uc.No || idx)}
-                  onToggle={() => setExpandedUseCase(expandedUseCase === (uc.No || idx) ? null : (uc.No || idx))}
-                  resolveTable={resolveTable}
-                />
+      {/* Session picker */}
+      {sessions.length > 0 && (
+        <div className="bg-surface border border-border rounded-lg p-4 mb-6">
+          <label className="block text-xs font-semibold text-text-secondary uppercase tracking-wider mb-2">
+            Session
+          </label>
+          <div className="flex items-center gap-3">
+            <select
+              value={selectedSession}
+              onChange={(e) => setSelectedSession(e.target.value)}
+              className="flex-1 px-3 py-2 text-sm border border-border rounded-md bg-surface text-text-primary glow-focus transition-smooth"
+            >
+              {sessions.map((s) => (
+                <option key={s.session_id} value={s.session_id}>
+                  Session {s.session_id}
+                  {s.completed_on ? ` (completed)` : ` (${s.processing_status})`}
+                </option>
               ))}
+            </select>
+            {sessions.find((s) => s.session_id === selectedSession)?.widget_values
+              ?.['00_business_name'] && (
+              <span className="text-sm text-text-secondary">
+                {sessions.find((s) => s.session_id === selectedSession).widget_values['00_business_name']}
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Stats */}
+      {ucList.length > 0 && (
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
+          <StatCard label="Total Use Cases" value={ucList.length} icon={FileText} />
+          <StatCard
+            label="Domains"
+            value={domains.length}
+            icon={Target}
+          />
+          <StatCard
+            label="High Priority"
+            value={ucList.filter((uc) => uc.priority === 'High' || uc.priority === 'high').length}
+            icon={BarChart3}
+          />
+          <StatCard
+            label="With SQL"
+            value={ucList.filter((uc) => uc.sql || uc.sql_query).length}
+            icon={Code}
+          />
+        </div>
+      )}
+
+      {/* Filters */}
+      {ucList.length > 0 && (
+        <div className="bg-surface border border-border rounded-lg p-4 mb-6">
+          <div className="flex items-center gap-3 flex-wrap">
+            {/* Search */}
+            <div className="relative flex-1 min-w-[200px]">
+              <Search
+                size={14}
+                className="absolute left-3 top-1/2 -translate-y-1/2 text-text-tertiary"
+              />
+              <input
+                type="text"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search use cases..."
+                className="w-full pl-9 pr-3 py-2 text-sm border border-border rounded-md bg-surface text-text-primary placeholder:text-text-tertiary glow-focus transition-smooth"
+              />
             </div>
 
-            {filteredUseCases.length === 0 && allUseCases.length > 0 && (
-              <div className="text-center py-12">
-                <Search size={40} className="mx-auto text-slate-700 mb-3" />
-                <p className="text-sm text-slate-500">No use cases match your filters.</p>
+            {/* Domain filter */}
+            {domains.length > 0 && (
+              <div className="flex items-center gap-1.5">
+                <Filter size={12} className="text-text-tertiary" />
+                <select
+                  value={filterDomain}
+                  onChange={(e) => setFilterDomain(e.target.value)}
+                  className="px-2.5 py-2 text-sm border border-border rounded-md bg-surface text-text-primary transition-smooth"
+                >
+                  <option value="">All domains</option>
+                  {domains.map((d) => (
+                    <option key={d} value={d}>
+                      {d}
+                    </option>
+                  ))}
+                </select>
               </div>
             )}
 
-            {/* Back to source picker */}
-            <div className="flex justify-center">
-              <button
-                onClick={() => setResults(null)}
-                className="text-xs text-slate-500 hover:text-db-red-light flex items-center gap-1 transition-colors"
+            {/* Priority filter */}
+            {priorities.length > 0 && (
+              <select
+                value={filterPriority}
+                onChange={(e) => setFilterPriority(e.target.value)}
+                className="px-2.5 py-2 text-sm border border-border rounded-md bg-surface text-text-primary transition-smooth"
               >
-                <RefreshCw size={11} /> Load Different Session
-              </button>
-            </div>
-          </>
-        )}
-      </div>
-    </div>
-  );
-}
+                <option value="">All priorities</option>
+                {priorities.map((p) => (
+                  <option key={p} value={p}>
+                    {p}
+                  </option>
+                ))}
+              </select>
+            )}
 
-/* ── Stat card ── */
-function StatCard({ icon, label, value, gradient }) {
-  return (
-    <div className="rounded-xl border border-white/5 bg-db-navy/15 backdrop-blur-sm p-4 relative overflow-hidden group hover:border-white/10 transition-colors">
-      <div className={`absolute inset-0 bg-gradient-to-br ${gradient} opacity-[0.04] group-hover:opacity-[0.08] transition-opacity`} />
-      <div className="relative z-10">
-        <div className={`bg-gradient-to-br ${gradient} bg-clip-text text-transparent mb-2`}>{icon}</div>
-        <div className="text-2xl font-black text-white">{value}</div>
-        <div className="text-[10px] text-slate-500 font-semibold uppercase tracking-wider">{label}</div>
-      </div>
-    </div>
-  );
-}
-
-/* ── Filter select ── */
-function FilterSelect({ value, onChange, options, label, isSort }) {
-  return (
-    <select
-      className="bg-db-darkest/60 border border-white/8 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-db-red/40 focus:ring-1 focus:ring-db-red/20 transition-all appearance-none cursor-pointer"
-      value={value}
-      onChange={e => onChange(e.target.value)}
-      style={{
-        backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 24 24' fill='none' stroke='%23555' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E")`,
-        backgroundRepeat: 'no-repeat',
-        backgroundPosition: 'right 10px center',
-        paddingRight: '28px',
-      }}
-    >
-      {isSort ? (
-        options.map(o => <option key={o} value={o}>Sort: {o}</option>)
-      ) : (
-        <>
-          <option value="all">{label}</option>
-          {options.map(o => <option key={o} value={o}>{o}</option>)}
-        </>
-      )}
-    </select>
-  );
-}
-
-/* ── Use case card ── */
-function UseCaseCard({ uc, expanded, onToggle, resolveTable }) {
-  const priorityClass = PRIORITY_COLORS[uc.Priority] || PRIORITY_COLORS['Medium'];
-  const typeIcon = TYPE_ICONS[uc.type] || '📋';
-
-  return (
-    <div className="rounded-xl border border-white/5 bg-db-navy/10 backdrop-blur-sm overflow-hidden hover:border-white/10 transition-all duration-200 group">
-      {/* Header */}
-      <button onClick={onToggle} className="w-full text-left p-4 flex items-center gap-3">
-        <span className="text-lg">{typeIcon}</span>
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className="font-semibold text-sm text-white group-hover:text-db-red-light transition-colors">{uc.Name}</span>
-            <span className={`text-[10px] px-2 py-0.5 rounded-full border font-semibold ${priorityClass}`}>{uc.Priority || 'Unscored'}</span>
-            {uc.Quality && <span className="text-[10px] text-slate-600">Quality: {uc.Quality}</span>}
-          </div>
-          <div className="text-[10px] text-slate-500 mt-1 flex items-center gap-3">
-            <span>🏢 {uc._domain || uc['Business Domain'] || 'Unknown'}</span>
-            {uc.Subdomain && <span>→ {uc.Subdomain}</span>}
-            <span>🔬 {uc['Analytics Technique'] || uc.type}</span>
+            {/* Result count */}
+            <span className="text-xs text-text-tertiary ml-auto">
+              {filtered.length} of {ucList.length} use cases
+            </span>
           </div>
         </div>
-        <ChevronDown
-          size={14}
-          className={`text-slate-600 transition-transform duration-300 shrink-0 ${expanded ? 'rotate-180' : ''}`}
-        />
+      )}
+
+      {/* Content */}
+      {loading ? (
+        <div className="bg-surface border border-border rounded-lg p-12 text-center">
+          <Loader2 size={20} className="animate-spin text-text-tertiary mx-auto mb-3" />
+          <p className="text-sm text-text-secondary">Loading results...</p>
+        </div>
+      ) : error ? (
+        <div className="bg-surface border border-border rounded-lg p-8 text-center">
+          <AlertCircle size={20} className="text-text-tertiary mx-auto mb-3" />
+          <p className="text-sm text-text-secondary">{error}</p>
+        </div>
+      ) : filtered.length === 0 ? (
+        <div className="bg-surface border border-border rounded-lg p-12 text-center">
+          <FileText size={24} className="text-text-tertiary mx-auto mb-3" />
+          <p className="text-sm font-medium text-text-primary mb-1">No results yet</p>
+          <p className="text-xs text-text-secondary">
+            {ucList.length > 0
+              ? 'No use cases match your current filters.'
+              : 'Run the pipeline to generate use cases.'}
+          </p>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {filtered.map((uc, idx) => (
+            <UseCaseCard key={idx} uc={uc} index={idx} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StatCard({ label, value, icon: Icon }) {
+  return (
+    <div className="bg-surface border border-border rounded-lg p-4">
+      <div className="flex items-center gap-2 mb-1">
+        <Icon size={14} className="text-text-tertiary" />
+        <span className="text-xs text-text-secondary">{label}</span>
+      </div>
+      <div className="text-2xl font-bold text-text-primary">{value}</div>
+    </div>
+  );
+}
+
+function UseCaseCard({ uc, index }) {
+  const [expanded, setExpanded] = useState(false);
+
+  const title = uc.use_case_name || uc.name || uc.title || `Use Case ${index + 1}`;
+  const description = uc.description || uc.problem_statement || '';
+  const domain = uc.domain || uc.category || '';
+  const priority = uc.priority || '';
+  const score = uc.score || uc.business_value_score || '';
+  const sql = uc.sql || uc.sql_query || '';
+  const solution = uc.solution || uc.proposed_solution || '';
+  const impact = uc.business_impact || uc.value || '';
+
+  const priorityStyle =
+    priority?.toLowerCase() === 'high'
+      ? 'text-db-red bg-db-red-50'
+      : priority?.toLowerCase() === 'medium'
+        ? 'text-warning bg-warning-bg'
+        : 'text-text-secondary bg-bg';
+
+  return (
+    <div className="bg-surface border border-border rounded-lg overflow-hidden hover:border-border-strong transition-smooth">
+      {/* Header */}
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full flex items-center gap-3 px-5 py-4 text-left hover:bg-bg-subtle transition-smooth"
+      >
+        <span className="text-xs font-mono text-text-tertiary w-6 shrink-0">
+          {String(index + 1).padStart(2, '0')}
+        </span>
+        <div className="flex-1 min-w-0">
+          <div className="text-sm font-semibold text-text-primary truncate">
+            {title}
+          </div>
+          {description && (
+            <p className="text-xs text-text-secondary mt-0.5 line-clamp-1">
+              {description}
+            </p>
+          )}
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          {domain && (
+            <span className="text-xs text-text-secondary bg-bg px-2 py-0.5 rounded-full">
+              {domain}
+            </span>
+          )}
+          {priority && (
+            <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${priorityStyle}`}>
+              {priority}
+            </span>
+          )}
+          {score && (
+            <span className="text-xs font-mono text-text-tertiary">{score}</span>
+          )}
+          {expanded ? (
+            <ChevronUp size={16} className="text-text-tertiary" />
+          ) : (
+            <ChevronDown size={16} className="text-text-tertiary" />
+          )}
+        </div>
       </button>
 
-      {/* Expanded */}
+      {/* Expanded content */}
       {expanded && (
-        <div className="border-t border-white/5 p-5 space-y-4 bg-db-darkest/30">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <h4 className="text-[10px] font-bold text-db-red-light uppercase tracking-wider mb-1">Problem Statement</h4>
-              <p className="text-sm text-slate-300 leading-relaxed">{uc.Statement || 'N/A'}</p>
-            </div>
-            <div>
-              <h4 className="text-[10px] font-bold text-db-teal uppercase tracking-wider mb-1">Proposed Solution</h4>
-              <p className="text-sm text-slate-300 leading-relaxed">{uc.Solution || 'N/A'}</p>
-            </div>
-          </div>
+        <div className="border-t border-border px-5 py-4 bg-panel">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            {/* Description */}
+            {description && (
+              <DetailSection title="Problem Statement" icon={AlertCircle}>
+                <p className="text-sm text-text-secondary leading-relaxed">
+                  {description}
+                </p>
+              </DetailSection>
+            )}
 
-          <div>
-            <h4 className="text-[10px] font-bold text-db-gold uppercase tracking-wider mb-1">Business Value</h4>
-            <p className="text-sm text-slate-300 leading-relaxed">{uc['Business Value'] || 'N/A'}</p>
-          </div>
+            {/* Solution */}
+            {solution && (
+              <DetailSection title="Proposed Solution" icon={Target}>
+                <p className="text-sm text-text-secondary leading-relaxed">
+                  {solution}
+                </p>
+              </DetailSection>
+            )}
 
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-[11px]">
-            {[
-              { label: 'Beneficiary', val: uc.Beneficiary },
-              { label: 'Sponsor', val: uc.Sponsor },
-              { label: 'Priority Alignment', val: uc['Business Priority Alignment'] },
-              { label: 'Tables', val: (uc['Tables Involved'] || '').split(',').map(t => resolveTable(t.trim())).join(', '), mono: true },
-            ].map(item => (
-              <div key={item.label} className="bg-db-darkest/40 rounded-lg p-2.5 border border-white/3">
-                <span className="text-[9px] text-slate-600 uppercase tracking-wider font-bold block mb-0.5">{item.label}</span>
-                <span className={`text-slate-300 ${item.mono ? 'font-mono text-[10px]' : ''}`}>{item.val || 'N/A'}</span>
+            {/* Impact */}
+            {impact && (
+              <DetailSection title="Business Impact" icon={BarChart3}>
+                <p className="text-sm text-text-secondary leading-relaxed">
+                  {impact}
+                </p>
+              </DetailSection>
+            )}
+
+            {/* Metadata */}
+            <DetailSection title="Details" icon={Clock}>
+              <div className="space-y-1 text-xs text-text-secondary">
+                {Object.entries(uc)
+                  .filter(
+                    ([k]) =>
+                      !['sql', 'sql_query', 'description', 'problem_statement',
+                        'solution', 'proposed_solution', 'business_impact',
+                        'value', 'use_case_name', 'name', 'title'].includes(k) &&
+                      uc[k] !== null &&
+                      uc[k] !== ''
+                  )
+                  .slice(0, 8)
+                  .map(([k, v]) => (
+                    <div key={k} className="flex">
+                      <span className="font-medium text-text-primary w-32 shrink-0 truncate">
+                        {k.replace(/_/g, ' ')}
+                      </span>
+                      <span className="truncate">
+                        {typeof v === 'object' ? JSON.stringify(v) : String(v)}
+                      </span>
+                    </div>
+                  ))}
               </div>
-            ))}
+            </DetailSection>
           </div>
 
-          {uc['Technical Design'] && (
-            <div>
-              <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Technical Design</h4>
-              <p className="text-[11px] text-slate-400 bg-db-darkest/60 p-3 rounded-lg border border-white/5 font-mono whitespace-pre-wrap leading-relaxed">
-                {uc['Technical Design']}
-              </p>
-            </div>
-          )}
-
-          {uc.SQL && !uc.SQL.startsWith('--') && (
-            <div>
-              <h4 className="text-[10px] font-bold text-db-teal uppercase tracking-wider mb-1 flex items-center gap-1.5">
-                <Cpu size={10} /> SQL Implementation
-                {uc.result_table && <span className="text-slate-600 font-normal normal-case ml-1">→ {uc.result_table}</span>}
-              </h4>
-              <pre className="text-[11px] text-db-teal/70 bg-db-darkest/60 p-4 rounded-lg border border-db-teal/8 overflow-x-auto max-h-60 overflow-y-auto font-mono leading-relaxed">
-                {uc.SQL}
-              </pre>
+          {/* SQL */}
+          {sql && (
+            <div className="mt-4">
+              <DetailSection title="SQL Implementation" icon={Code}>
+                <pre className="p-3 bg-bg border border-border rounded-md overflow-x-auto text-xs font-mono text-text-primary whitespace-pre-wrap">
+                  {sql}
+                </pre>
+              </DetailSection>
             </div>
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+function DetailSection({ title, icon: Icon, children }) {
+  return (
+    <div>
+      <div className="flex items-center gap-1.5 mb-2">
+        <Icon size={12} className="text-text-tertiary" />
+        <h4 className="text-xs font-semibold text-text-primary uppercase tracking-wider">
+          {title}
+        </h4>
+      </div>
+      {children}
     </div>
   );
 }
