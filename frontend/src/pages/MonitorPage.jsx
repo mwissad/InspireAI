@@ -16,7 +16,7 @@ const PHASE_RUNNING   = 'RUNNING';
 const PHASE_TERMINATED = 'TERMINATED';
 
 export default function MonitorPage({ settings, sessionId, runId, onComplete }) {
-  const { token, warehouseId, inspireDatabase } = settings;
+  const { databricksHost, token, warehouseId, inspireDatabase } = settings;
 
   // Run-level state (primary source of truth)
   const [runInfo, setRunInfo] = useState(null);
@@ -31,18 +31,17 @@ export default function MonitorPage({ settings, sessionId, runId, onComplete }) 
 
   const apiFetch = useCallback(
     async (url, opts = {}) => {
-      const resp = await fetch(url, {
-        ...opts,
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-          ...opts.headers,
-        },
-      });
+      const headers = {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        ...opts.headers,
+      };
+      if (databricksHost) headers['X-Databricks-Host'] = databricksHost;
+      const resp = await fetch(url, { ...opts, headers });
       if (!resp.ok) throw new Error(`${resp.status}`);
       return resp.json();
     },
-    [token]
+    [token, databricksHost]
   );
 
   // Main polling loop

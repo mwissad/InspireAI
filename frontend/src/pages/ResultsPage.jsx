@@ -37,7 +37,7 @@ const TYPE_ICONS = {
 };
 
 export default function ResultsPage({ settings, update, sessionId: propSessionId }) {
-  const { token, warehouseId: settingsWarehouseId, inspireDatabase: settingsInspireDb } = settings;
+  const { databricksHost, token, warehouseId: settingsWarehouseId, inspireDatabase: settingsInspireDb } = settings;
 
   // Local editable copies for the source-picker
   const [inspireDb, setInspireDb] = useState(settingsInspireDb || '');
@@ -64,13 +64,13 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
 
   const apiFetch = useCallback(
     async (url) => {
-      const resp = await fetch(url, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const headers = { Authorization: `Bearer ${token}` };
+      if (databricksHost) headers['X-Databricks-Host'] = databricksHost;
+      const resp = await fetch(url, { headers });
       if (!resp.ok) throw new Error(`${resp.status}`);
       return resp.json();
     },
-    [token]
+    [token, databricksHost]
   );
 
   // ── Auto-load sessions on mount if settings exist ──

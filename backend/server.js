@@ -9,34 +9,74 @@ const AdmZip = require('adm-zip');
 dotenv.config();
 
 const app = express();
-app.use(cors());
 app.use(express.json({ limit: '50mb' }));
+
+// ═══════════════════════════════════════════════════
+//  Environment Configuration (generic — no defaults)
+// ═══════════════════════════════════════════════════
+
+// DATABRICKS_HOST: required — set by the Databricks App runtime or by the admin.
+// No hardcoded workspace URL — the app is customer-agnostic.
+const DATABRICKS_HOST = process.env.DATABRICKS_HOST || '';
+const DEFAULT_NOTEBOOK_PATH = process.env.NOTEBOOK_PATH || '';
+
+// Optional: when deployed as a Databricks App, the runtime may inject a
+// service-principal token automatically. Individual users can still
+// override this by passing their own PAT via the Authorization header.
+const SERVICE_TOKEN = process.env.DATABRICKS_TOKEN || '';
+
+// Path to the bundled DBC file — try several candidate locations
+const DBC_CANDIDATES = [
+  path.resolve(__dirname, '..', 'databricks_inspire_v41.dbc'),
+  path.resolve(__dirname, 'databricks_inspire_v41.dbc'),
+  path.resolve(__dirname, '..', 'notebooks', 'databricks_inspire_v41.dbc'),
+];
+const BUNDLED_DBC_PATH = DBC_CANDIDATES.find(p => fs.existsSync(p)) || DBC_CANDIDATES[0];
+
+// ═══════════════════════════════════════════════════
+//  Middleware
+// ═══════════════════════════════════════════════════
+
+// CORS — only needed in dev (separate Vite server);
+// in production the backend serves the static frontend.
+if (process.env.NODE_ENV !== 'production') {
+  app.use(cors());
+}
+
+// Serve frontend static build in production
+const STATIC_DIR = path.resolve(__dirname, '..', 'frontend', 'dist');
+if (fs.existsSync(STATIC_DIR)) {
+  app.use(express.static(STATIC_DIR));
+}
 
 // Request logger
 app.use((req, res, next) => {
-  const start = Date.now();
-  res.on('finish', () => {
-    const duration = Date.now() - start;
-    console.log(`${req.method} ${req.originalUrl} → ${res.statusCode} (${duration}ms)`);
-  });
+  if (req.path.startsWith('/api')) {
+    const start = Date.now();
+    res.on('finish', () => {
+      const duration = Date.now() - start;
+      console.log(`${req.method} ${req.originalUrl} → ${res.statusCode} (${duration}ms)`);
+    });
+  }
   next();
 });
 
 // Multer for file uploads (store in memory)
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
 
-const DATABRICKS_HOST = process.env.DATABRICKS_HOST || 'https://adb-3642885996758754.14.azuredatabricks.net';
-const DEFAULT_NOTEBOOK_PATH = process.env.NOTEBOOK_PATH || '';
-
-// Path to the bundled DBC file (one level up from backend/)
-const BUNDLED_DBC_PATH = path.resolve(__dirname, '..', 'databricks_inspire_v41.dbc');
-
 // ═══════════════════════════════════════════════════
 //  Helpers
 // ═══════════════════════════════════════════════════
 
-async function dbFetch(token, apiPath, options = {}) {
-  const url = `${DATABRICKS_HOST}${apiPath}`;
+function resolveHost(req) {
+  // Priority: 1) per-request header  2) env var
+  const headerHost = req.headers['x-databricks-host'];
+  return headerHost || DATABRICKS_HOST;
+}
+
+async function dbFetch(host, token, apiPath, options = {}) {
+  if (!host) throw new Error('Databricks host not configured. Set DATABRICKS_HOST or provide it in Settings.');
+  const url = `${host}${apiPath}`;
   try {
     const resp = await fetch(url, {
       ...options,
@@ -48,7 +88,7 @@ async function dbFetch(token, apiPath, options = {}) {
     });
     if (!resp.ok && resp.status === 401) {
       const tokenPreview = token ? `${token.slice(0, 4)}...${token.slice(-4)} (len=${token.length})` : 'MISSING';
-      console.error(`   🔑 Token debug: ${tokenPreview}, Host: ${DATABRICKS_HOST}, API: ${apiPath}`);
+      console.error(`   🔑 Token debug: ${tokenPreview}, Host: ${host}, API: ${apiPath}`);
     }
     return resp;
   } catch (err) {
@@ -59,22 +99,24 @@ async function dbFetch(token, apiPath, options = {}) {
 
 function getToken(req) {
   const auth = req.headers.authorization;
-  if (!auth || !auth.startsWith('Bearer ')) return null;
-  return auth.slice(7);
+  if (auth && auth.startsWith('Bearer ')) return auth.slice(7);
+  // Fall back to service-principal token from env (Databricks App)
+  return SERVICE_TOKEN || null;
 }
 
 function requireToken(req, res, next) {
   const token = getToken(req);
-  if (!token) return res.status(401).json({ error: 'Databricks token required. Set it in Settings.' });
+  if (!token) return res.status(401).json({ error: 'Databricks token required. Set it in Settings or configure DATABRICKS_TOKEN.' });
   req.dbToken = token;
+  req.dbHost = resolveHost(req);
   next();
 }
 
 // Execute SQL via Databricks SQL Statement Execution API
-async function executeSql(token, warehouseId, sql) {
+async function executeSql(host, token, warehouseId, sql) {
   console.log(`   🔶 SQL: ${sql.substring(0, 150)}...`);
 
-  const submitResp = await dbFetch(token, '/api/2.0/sql/statements', {
+  const submitResp = await dbFetch(host, token, '/api/2.0/sql/statements', {
     method: 'POST',
     body: JSON.stringify({
       warehouse_id: warehouseId,
@@ -98,7 +140,7 @@ async function executeSql(token, warehouseId, sql) {
   while (result.status?.state === 'PENDING' || result.status?.state === 'RUNNING') {
     pollCount++;
     await new Promise(r => setTimeout(r, 2000));
-    const pollResp = await dbFetch(token, `/api/2.0/sql/statements/${result.statement_id}`);
+    const pollResp = await dbFetch(host, token, `/api/2.0/sql/statements/${result.statement_id}`);
     if (!pollResp.ok) throw new Error(`SQL polling failed`);
     result = await pollResp.json();
     if (pollCount % 5 === 0) console.log(`   ⏳ Polling (${pollCount})...`);
@@ -114,7 +156,7 @@ async function executeSql(token, warehouseId, sql) {
     let allData = result.result?.data_array || [];
     for (const chunk of result.manifest.chunks) {
       if (chunk.chunk_index === 0) continue;
-      const chunkResp = await dbFetch(token, `/api/2.0/sql/statements/${result.statement_id}/result/chunks/${chunk.chunk_index}`);
+      const chunkResp = await dbFetch(host, token, `/api/2.0/sql/statements/${result.statement_id}/result/chunks/${chunk.chunk_index}`);
       if (chunkResp.ok) {
         const chunkData = await chunkResp.json();
         if (chunkData.data_array) allData = allData.concat(chunkData.data_array);
@@ -147,12 +189,19 @@ function sqlResultToObjects(result) {
 
 app.get('/api/health', (req, res) => {
   const hasBundledDbc = fs.existsSync(BUNDLED_DBC_PATH);
-  res.json({ status: 'ok', host: DATABRICKS_HOST, hasBundledDbc });
+  const host = resolveHost(req);
+  res.json({
+    status: 'ok',
+    host: host ? host.replace(/https?:\/\//, '').split('.')[0] + '...' : 'not configured',
+    hostConfigured: !!host,
+    hasBundledDbc,
+    hasServiceToken: !!SERVICE_TOKEN,
+  });
 });
 
 app.get('/api/me', requireToken, async (req, res) => {
   try {
-    const response = await dbFetch(req.dbToken, '/api/2.0/preview/scim/v2/Me');
+    const response = await dbFetch(req.dbHost, req.dbToken, '/api/2.0/preview/scim/v2/Me');
     if (!response.ok) {
       const err = await response.text();
       return res.status(response.status).json({ error: err });
@@ -171,7 +220,7 @@ app.get('/api/me', requireToken, async (req, res) => {
 
 app.get('/api/catalogs', requireToken, async (req, res) => {
   try {
-    const response = await dbFetch(req.dbToken, '/api/2.1/unity-catalog/catalogs');
+    const response = await dbFetch(req.dbHost, req.dbToken, '/api/2.1/unity-catalog/catalogs');
     if (!response.ok) {
       const err = await response.text();
       return res.status(response.status).json({ error: err });
@@ -191,7 +240,7 @@ app.get('/api/catalogs', requireToken, async (req, res) => {
 app.get('/api/catalogs/:catalog/schemas', requireToken, async (req, res) => {
   try {
     const { catalog } = req.params;
-    const response = await dbFetch(req.dbToken, `/api/2.1/unity-catalog/schemas?catalog_name=${encodeURIComponent(catalog)}`);
+    const response = await dbFetch(req.dbHost, req.dbToken, `/api/2.1/unity-catalog/schemas?catalog_name=${encodeURIComponent(catalog)}`);
     if (!response.ok) {
       const err = await response.text();
       return res.status(response.status).json({ error: err });
@@ -212,7 +261,7 @@ app.get('/api/tables/:catalog/:schema', requireToken, async (req, res) => {
   try {
     const { catalog, schema } = req.params;
     const response = await dbFetch(
-      req.dbToken,
+      req.dbHost, req.dbToken,
       `/api/2.1/unity-catalog/tables?catalog_name=${encodeURIComponent(catalog)}&schema_name=${encodeURIComponent(schema)}&max_results=500`
     );
     if (!response.ok) {
@@ -245,7 +294,7 @@ app.get('/api/tables/:catalog/:schema', requireToken, async (req, res) => {
 
 app.get('/api/warehouses', requireToken, async (req, res) => {
   try {
-    const response = await dbFetch(req.dbToken, '/api/2.0/sql/warehouses');
+    const response = await dbFetch(req.dbHost, req.dbToken, '/api/2.0/sql/warehouses');
     if (!response.ok) {
       const err = await response.text();
       return res.status(response.status).json({ error: err });
@@ -265,7 +314,7 @@ app.get('/api/warehouses', requireToken, async (req, res) => {
 
 app.get('/api/clusters', requireToken, async (req, res) => {
   try {
-    const response = await dbFetch(req.dbToken, '/api/2.0/clusters/list');
+    const response = await dbFetch(req.dbHost, req.dbToken, '/api/2.0/clusters/list');
     if (!response.ok) {
       const err = await response.text();
       return res.status(response.status).json({ error: err });
@@ -302,13 +351,13 @@ app.post('/api/publish', requireToken, async (req, res) => {
 
     // DBC format doesn't support overwrite — delete first
     try {
-      await dbFetch(req.dbToken, '/api/2.0/workspace/delete', {
+      await dbFetch(req.dbHost, req.dbToken, '/api/2.0/workspace/delete', {
         method: 'POST',
         body: JSON.stringify({ path: destination_path, recursive: true }),
       });
     } catch (_) {}
 
-    const response = await dbFetch(req.dbToken, '/api/2.0/workspace/import', {
+    const response = await dbFetch(req.dbHost, req.dbToken, '/api/2.0/workspace/import', {
       method: 'POST',
       body: JSON.stringify({
         path: destination_path,
@@ -325,7 +374,7 @@ app.post('/api/publish', requireToken, async (req, res) => {
     // DBC imports as a folder — find the actual notebook inside
     let notebookPath = destination_path;
     try {
-      const listResp = await dbFetch(req.dbToken, `/api/2.0/workspace/list?path=${encodeURIComponent(destination_path)}`);
+      const listResp = await dbFetch(req.dbHost, req.dbToken, `/api/2.0/workspace/list?path=${encodeURIComponent(destination_path)}`);
       if (listResp.ok) {
         const listData = await listResp.json();
         const notebook = (listData.objects || []).find(o => o.object_type === 'NOTEBOOK');
@@ -354,14 +403,14 @@ app.post('/api/publish/upload', requireToken, upload.single('file'), async (req,
 
     if (format === 'DBC') {
       try {
-        await dbFetch(req.dbToken, '/api/2.0/workspace/delete', {
+        await dbFetch(req.dbHost, req.dbToken, '/api/2.0/workspace/delete', {
           method: 'POST',
           body: JSON.stringify({ path: destination_path, recursive: true }),
         });
       } catch (_) {}
     }
 
-    const response = await dbFetch(req.dbToken, '/api/2.0/workspace/import', {
+    const response = await dbFetch(req.dbHost, req.dbToken, '/api/2.0/workspace/import', {
       method: 'POST',
       body: JSON.stringify({
         path: destination_path,
@@ -441,12 +490,12 @@ app.post('/api/run', requireToken, async (req, res) => {
 
     // Verify path points to a NOTEBOOK (DBC imports create folders)
     try {
-      const statusResp = await dbFetch(req.dbToken, `/api/2.0/workspace/get-status?path=${encodeURIComponent(resolvedPath)}`);
+      const statusResp = await dbFetch(req.dbHost, req.dbToken, `/api/2.0/workspace/get-status?path=${encodeURIComponent(resolvedPath)}`);
       if (statusResp.ok) {
         const statusData = await statusResp.json();
         if (statusData.object_type === 'DIRECTORY') {
           console.log(`📂 Path "${resolvedPath}" is a DIRECTORY — searching for notebook...`);
-          const listResp = await dbFetch(req.dbToken, `/api/2.0/workspace/list?path=${encodeURIComponent(resolvedPath)}`);
+          const listResp = await dbFetch(req.dbHost, req.dbToken, `/api/2.0/workspace/list?path=${encodeURIComponent(resolvedPath)}`);
           if (listResp.ok) {
             const listData = await listResp.json();
             const notebook = (listData.objects || []).find(o => o.object_type === 'NOTEBOOK');
@@ -477,7 +526,7 @@ app.post('/api/run', requireToken, async (req, res) => {
     };
 
     console.log(`📋 Submitting run: ${resolvedPath}`);
-    const response = await dbFetch(req.dbToken, '/api/2.1/jobs/runs/submit', {
+    const response = await dbFetch(req.dbHost, req.dbToken, '/api/2.1/jobs/runs/submit', {
       method: 'POST',
       body: JSON.stringify(payload),
     });
@@ -504,7 +553,7 @@ app.post('/api/run', requireToken, async (req, res) => {
 
 app.get('/api/run/:runId', requireToken, async (req, res) => {
   try {
-    const response = await dbFetch(req.dbToken, `/api/2.1/jobs/runs/get?run_id=${req.params.runId}`);
+    const response = await dbFetch(req.dbHost, req.dbToken, `/api/2.1/jobs/runs/get?run_id=${req.params.runId}`);
     if (!response.ok) {
       const err = await response.text();
       return res.status(response.status).json({ error: err });
@@ -531,7 +580,7 @@ app.get('/api/run/:runId', requireToken, async (req, res) => {
 
 app.get('/api/run/:runId/output', requireToken, async (req, res) => {
   try {
-    const response = await dbFetch(req.dbToken, `/api/2.1/jobs/runs/get-output?run_id=${req.params.runId}`);
+    const response = await dbFetch(req.dbHost, req.dbToken, `/api/2.1/jobs/runs/get-output?run_id=${req.params.runId}`);
     if (!response.ok) {
       const err = await response.text();
       return res.status(response.status).json({ error: err });
@@ -550,7 +599,7 @@ app.get('/api/run/:runId/output', requireToken, async (req, res) => {
 
 app.post('/api/run/:runId/cancel', requireToken, async (req, res) => {
   try {
-    const response = await dbFetch(req.dbToken, '/api/2.1/jobs/runs/cancel', {
+    const response = await dbFetch(req.dbHost, req.dbToken, '/api/2.1/jobs/runs/cancel', {
       method: 'POST',
       body: JSON.stringify({ run_id: parseInt(req.params.runId) }),
     });
@@ -587,7 +636,7 @@ app.get('/api/inspire/session', requireToken, async (req, res) => {
       sql = `SELECT session_id, processing_status, completed_percent, create_at, last_updated, completed_on, widget_values, inspire_json, results_json FROM ${table} ORDER BY create_at DESC LIMIT 1`;
     }
 
-    const result = await executeSql(req.dbToken, warehouse_id, sql);
+    const result = await executeSql(req.dbHost, req.dbToken, warehouse_id, sql);
     const rows = sqlResultToObjects(result);
 
     if (rows.length === 0) {
@@ -634,7 +683,7 @@ app.get('/api/inspire/steps', requireToken, async (req, res) => {
       sql = `SELECT step_id, session_id, last_updated, stage_name, step_name, sub_step_name, progress_increment, message, status, result_json FROM ${table} ORDER BY last_updated DESC, step_id DESC LIMIT 100`;
     }
 
-    const result = await executeSql(req.dbToken, warehouse_id, sql);
+    const result = await executeSql(req.dbHost, req.dbToken, warehouse_id, sql);
     const steps = sqlResultToObjects(result);
 
     // Parse result_json and progress_increment for each step
@@ -664,7 +713,7 @@ app.post('/api/inspire/ack', requireToken, async (req, res) => {
     const table = `\`${catalog}\`.\`${schema}\`.\`__inspire_session\``;
     const sql = `UPDATE ${table} SET processing_status = 'done' WHERE session_id = ${session_id} AND processing_status = 'ready'`;
 
-    await executeSql(req.dbToken, warehouse_id, sql);
+    await executeSql(req.dbHost, req.dbToken, warehouse_id, sql);
     console.log(`   ✅ ACK sent for session ${session_id}`);
     res.json({ success: true });
   } catch (err) {
@@ -691,7 +740,7 @@ app.get('/api/inspire/results', requireToken, async (req, res) => {
       sql = `SELECT results_json, completed_on, session_id FROM ${table} WHERE completed_on IS NOT NULL ORDER BY completed_on DESC LIMIT 1`;
     }
 
-    const result = await executeSql(req.dbToken, warehouse_id, sql);
+    const result = await executeSql(req.dbHost, req.dbToken, warehouse_id, sql);
     const rows = sqlResultToObjects(result);
 
     if (rows.length === 0) {
@@ -733,7 +782,7 @@ app.get('/api/inspire/sessions', requireToken, async (req, res) => {
     const table = `\`${catalog}\`.\`${schema}\`.\`__inspire_session\``;
     const sql = `SELECT session_id, processing_status, completed_percent, create_at, completed_on, widget_values FROM ${table} ORDER BY create_at DESC LIMIT 20`;
 
-    const result = await executeSql(req.dbToken, warehouse_id, sql);
+    const result = await executeSql(req.dbHost, req.dbToken, warehouse_id, sql);
     const sessions = sqlResultToObjects(result);
 
     for (const s of sessions) {
@@ -762,7 +811,7 @@ app.get('/api/results/tables', requireToken, async (req, res) => {
     }
     const [catalog, schema] = inspireDb.split('.');
     const response = await dbFetch(
-      req.dbToken,
+      req.dbHost, req.dbToken,
       `/api/2.1/unity-catalog/tables?catalog_name=${encodeURIComponent(catalog)}&schema_name=${encodeURIComponent(schema)}&max_results=500`
     );
     if (!response.ok) {
@@ -789,7 +838,7 @@ app.get('/api/workspace/status', requireToken, async (req, res) => {
   try {
     const notebookPath = req.query.path;
     if (!notebookPath) return res.status(400).json({ error: 'path query param required.' });
-    const response = await dbFetch(req.dbToken, `/api/2.0/workspace/get-status?path=${encodeURIComponent(notebookPath)}`);
+    const response = await dbFetch(req.dbHost, req.dbToken, `/api/2.0/workspace/get-status?path=${encodeURIComponent(notebookPath)}`);
     if (!response.ok) {
       if (response.status === 404) return res.json({ exists: false });
       const err = await response.text();
@@ -803,14 +852,27 @@ app.get('/api/workspace/status', requireToken, async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════
+//  SPA Fallback — serve index.html for non-API routes
+// ═══════════════════════════════════════════════════
+
+if (fs.existsSync(STATIC_DIR)) {
+  app.get('*', (req, res) => {
+    res.sendFile(path.join(STATIC_DIR, 'index.html'));
+  });
+}
+
+// ═══════════════════════════════════════════════════
 //  Start server
 // ═══════════════════════════════════════════════════
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   const hasDbc = fs.existsSync(BUNDLED_DBC_PATH);
-  console.log(`\n🚀 Inspire Backend running on http://localhost:${PORT}`);
-  console.log(`   Databricks Host: ${DATABRICKS_HOST}`);
+  const servingStatic = fs.existsSync(STATIC_DIR);
+  console.log(`\n🚀 Inspire AI running on http://localhost:${PORT}`);
+  console.log(`   Databricks Host: ${DATABRICKS_HOST || '⚠️  Not configured — set DATABRICKS_HOST'}`);
+  console.log(`   Service Token:   ${SERVICE_TOKEN ? '✅ Configured' : '—  (users must provide PAT)'}`);
   console.log(`   Bundled DBC:     ${hasDbc ? '✅ Found' : '❌ Not found'}`);
+  console.log(`   Static Frontend: ${servingStatic ? '✅ Serving from ' + STATIC_DIR : '—  (dev proxy mode)'}`);
   console.log(`   Default Notebook: ${DEFAULT_NOTEBOOK_PATH || '(publish via UI)'}\n`);
 });

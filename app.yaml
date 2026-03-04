@@ -1,0 +1,21 @@
+# ═══════════════════════════════════════════════════════════════
+#  Databricks App — Inspire AI
+#  Deploy this as a Databricks App in any customer workspace.
+#
+#  The Databricks runtime automatically injects:
+#    DATABRICKS_HOST  → workspace URL
+#    DATABRICKS_TOKEN → service-principal token (if configured)
+#
+#  The start.sh script auto-installs dependencies and builds
+#  the frontend if not already built.
+# ═══════════════════════════════════════════════════════════════
+
+command:
+  - "bash"
+  - "start.sh"
+
+env:
+  - name: "NODE_ENV"
+    value: "production"
+  - name: "PORT"
+    value: "8080"

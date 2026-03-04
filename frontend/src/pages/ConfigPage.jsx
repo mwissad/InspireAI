@@ -12,7 +12,7 @@ import {
 } from 'lucide-react';
 
 export default function ConfigPage({ settings, update, onConfigured }) {
-  const { token, notebookPath, warehouseId } = settings;
+  const { databricksHost, token, notebookPath, warehouseId } = settings;
 
   const [tokenStatus, setTokenStatus] = useState(null); // null | 'loading' | 'valid' | 'invalid'
   const [username, setUsername] = useState('');
@@ -24,18 +24,17 @@ export default function ConfigPage({ settings, update, onConfigured }) {
 
   const apiFetch = useCallback(
     async (url, opts = {}) => {
-      const resp = await fetch(url, {
-        ...opts,
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-          ...opts.headers,
-        },
-      });
+      const headers = {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        ...opts.headers,
+      };
+      if (databricksHost) headers['X-Databricks-Host'] = databricksHost;
+      const resp = await fetch(url, { ...opts, headers });
       if (!resp.ok) throw new Error(`${resp.status}: ${await resp.text()}`);
       return resp.json();
     },
-    [token]
+    [token, databricksHost]
   );
 
   // Test connection
@@ -76,9 +75,12 @@ export default function ConfigPage({ settings, update, onConfigured }) {
       .catch(() => {});
   }, [tokenStatus, apiFetch]);
 
+  // Publish path (editable)
+  const [publishPath, setPublishPath] = useState('');
+
   // Publish DBC
   const publish = async () => {
-    const destPath = `/Users/${username}/inspire_v41`;
+    const destPath = publishPath || `/Users/${username}/inspire_ai`;
     if (!destPath) return;
     setPublishStatus('loading');
     setPublishMessage('');
@@ -260,10 +262,10 @@ export default function ConfigPage({ settings, update, onConfigured }) {
                 <Upload size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-tertiary" />
                 <input
                   type="text"
-                  value={notebookPath ? notebookPath : username ? `/Users/${username}/inspire_v41` : ''}
-                  readOnly
-                  className="w-full pl-9 pr-3 py-2 text-sm border border-border rounded-md bg-bg text-text-secondary"
-                  placeholder="Destination path"
+                  value={publishPath || notebookPath || (username ? `/Users/${username}/inspire_ai` : '')}
+                  onChange={(e) => setPublishPath(e.target.value)}
+                  className="w-full pl-9 pr-3 py-2 text-sm border border-border rounded-md bg-surface text-text-primary placeholder:text-text-tertiary glow-focus transition-smooth"
+                  placeholder="/Users/you/inspire_ai"
                 />
       </div>
       <button

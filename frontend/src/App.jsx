@@ -53,6 +53,7 @@ export default function App() {
 
   // Persisted settings
   const [settings, setSettings] = useState(() => ({
+    databricksHost: localStorage.getItem('db_databricks_host') || '',
     token: localStorage.getItem('db_token') || '',
     notebookPath: localStorage.getItem('db_notebook_path') || '',
     warehouseId: localStorage.getItem('db_warehouse_id') || '',
@@ -76,6 +77,7 @@ export default function App() {
 
   // Persist all settings
   useEffect(() => {
+    localStorage.setItem('db_databricks_host', settings.databricksHost);
     localStorage.setItem('db_token', settings.token);
     localStorage.setItem('db_notebook_path', settings.notebookPath);
     localStorage.setItem('db_warehouse_id', settings.warehouseId);

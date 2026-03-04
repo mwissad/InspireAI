@@ -45,7 +45,7 @@ const BUSINESS_PRIORITIES = [
 const SQL_PER_DOMAIN = ['0', '1', '2', '3', '4', '5', 'All'];
 
 export default function LaunchPage({ settings, update, onLaunched }) {
-  const { token, notebookPath, warehouseId, inspireDatabase } = settings;
+  const { databricksHost, token, notebookPath, warehouseId, inspireDatabase } = settings;
 
   // ── Widget params (v41 exact widget names) ──
   const [params, setParams] = useState({
@@ -88,18 +88,17 @@ export default function LaunchPage({ settings, update, onLaunched }) {
 
   const apiFetch = useCallback(
     async (url, opts = {}) => {
-      const resp = await fetch(url, {
-        ...opts,
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-          ...opts.headers,
-        },
-      });
+      const headers = {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        ...opts.headers,
+      };
+      if (databricksHost) headers['X-Databricks-Host'] = databricksHost;
+      const resp = await fetch(url, { ...opts, headers });
       if (!resp.ok) throw new Error(`${resp.status}`);
       return resp.json();
     },
-    [token]
+    [token, databricksHost]
   );
 
   // Keep 09_generation_options synced

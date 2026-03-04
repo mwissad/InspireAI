@@ -1,11 +1,12 @@
-import { X, Key, FolderOpen, Server, Database } from 'lucide-react';
+import { X, Key, FolderOpen, Server, Database, Globe } from 'lucide-react';
 import DatabricksLogo from './DatabricksLogo';
 
 const FIELDS = [
-  { key: 'token', label: 'Access Token', icon: Key, type: 'password' },
-  { key: 'notebookPath', label: 'Notebook Path', icon: FolderOpen, type: 'text' },
-  { key: 'warehouseId', label: 'SQL Warehouse ID', icon: Server, type: 'text' },
-  { key: 'inspireDatabase', label: 'Inspire Database', icon: Database, type: 'text' },
+  { key: 'databricksHost', label: 'Databricks Host URL', icon: Globe, type: 'text', placeholder: 'https://adb-xxx.xx.azuredatabricks.net' },
+  { key: 'token', label: 'Access Token', icon: Key, type: 'password', placeholder: 'dapi...' },
+  { key: 'notebookPath', label: 'Notebook Path', icon: FolderOpen, type: 'text', placeholder: '/Users/you/inspire_ai' },
+  { key: 'warehouseId', label: 'SQL Warehouse ID', icon: Server, type: 'text', placeholder: '' },
+  { key: 'inspireDatabase', label: 'Inspire Database', icon: Database, type: 'text', placeholder: 'catalog._inspire' },
 ];
 
 export default function SettingsPanel({ settings, update, onClose }) {
@@ -35,7 +36,7 @@ export default function SettingsPanel({ settings, update, onClose }) {
 
         {/* Fields */}
         <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
-          {FIELDS.map(({ key, label, icon: Icon, type }) => (
+          {FIELDS.map(({ key, label, icon: Icon, type, placeholder }) => (
             <div key={key}>
               <label className="flex items-center gap-1.5 text-xs font-semibold text-text-secondary uppercase tracking-wider mb-1.5">
                 <Icon size={12} />
@@ -45,6 +46,7 @@ export default function SettingsPanel({ settings, update, onClose }) {
                 type={type}
                 value={settings[key] || ''}
                 onChange={(e) => update(key, e.target.value)}
+                placeholder={placeholder || ''}
                 autoComplete="off"
                 data-1p-ignore
                 data-lpignore="true"
@@ -59,6 +61,7 @@ export default function SettingsPanel({ settings, update, onClose }) {
               Debug Information
             </h4>
             <div className="space-y-1 text-xs text-text-tertiary font-mono">
+              <div>Host: {settings.databricksHost || 'Not set (using server default)'}</div>
               <div>
                 Token:{' '}
                 {settings.token
