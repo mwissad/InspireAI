@@ -266,7 +266,7 @@ function AnimatedStat({ value, label, suffix = '' }) {
 /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
    MAIN LANDING PAGE
    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
-export default function LandingPage({ onGetStarted }) {
+export default function LandingPage({ onStart }) {
   const [loaded, setLoaded] = useState(false);
   useEffect(() => {
     requestAnimationFrame(() => setLoaded(true));
@@ -304,7 +304,7 @@ export default function LandingPage({ onGetStarted }) {
           </div>
           <div className="flex items-center gap-2">
             <Globe2 className="w-3.5 h-3.5 text-slate-500" />
-            <span className="text-[11px] text-slate-500 font-mono">v3.8</span>
+            <span className="text-[11px] text-slate-500 font-mono">v4.1</span>
           </div>
         </header>
 
@@ -350,7 +350,7 @@ export default function LandingPage({ onGetStarted }) {
               className={`flex flex-col sm:flex-row items-center justify-center gap-4 mt-10 transition-all duration-1000 delay-500 ${loaded ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-6'}`}
             >
               <button
-                onClick={onGetStarted}
+                onClick={onStart}
                 className="group relative px-8 py-3.5 rounded-xl font-semibold text-white text-sm bg-gradient-to-r from-db-red to-db-orange hover:from-db-red-light hover:to-db-orange transition-all shadow-lg shadow-db-red/25 hover:shadow-db-red/40 hover:scale-[1.02] active:scale-[0.98]"
               >
                 <span className="flex items-center gap-2">
@@ -376,7 +376,7 @@ export default function LandingPage({ onGetStarted }) {
           className={`max-w-3xl mx-auto px-6 py-10 transition-all duration-1000 delay-700 ${loaded ? 'opacity-100' : 'opacity-0'}`}
         >
           <div className="grid grid-cols-4 gap-6 p-6 rounded-2xl border border-white/5 bg-db-navy/20 backdrop-blur-sm">
-            <AnimatedStat value={38} label="Notebook Version" suffix="" />
+            <AnimatedStat value={41} label="Notebook Version" suffix="" />
             <AnimatedStat value={9} label="Pipeline Steps" suffix="" />
             <AnimatedStat value={6} label="Output Formats" suffix="" />
             <AnimatedStat value={12} label="Languages" suffix="+" />
@@ -471,7 +471,7 @@ export default function LandingPage({ onGetStarted }) {
                 comprehensive data strategy.
               </p>
               <button
-                onClick={onGetStarted}
+                onClick={onStart}
                 className="group px-8 py-3.5 rounded-xl font-semibold text-white text-sm bg-gradient-to-r from-db-red to-db-orange hover:from-db-red-light hover:to-db-orange transition-all shadow-lg shadow-db-red/25 hover:shadow-db-red/40 hover:scale-[1.02] active:scale-[0.98]"
               >
                 <span className="flex items-center gap-2">
@@ -490,7 +490,7 @@ export default function LandingPage({ onGetStarted }) {
             <div className="flex items-center gap-2">
               <DatabricksLogo className="w-4 h-4 opacity-40" />
               <span className="text-[11px] text-slate-600">
-                Powered by Databricks Inspire AI · v3.8
+                Powered by Databricks Inspire AI · v4.1
               </span>
             </div>
             <div className="flex items-center gap-4">
