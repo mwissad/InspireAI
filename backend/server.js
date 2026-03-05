@@ -856,7 +856,7 @@ app.get('/api/workspace/status', requireToken, async (req, res) => {
 // ═══════════════════════════════════════════════════
 
 if (fs.existsSync(STATIC_DIR)) {
-  app.get('*', (req, res) => {
+  app.get('{*path}', (req, res) => {
     res.sendFile(path.join(STATIC_DIR, 'index.html'));
   });
 }

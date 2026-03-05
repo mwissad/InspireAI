@@ -9,6 +9,7 @@ import {
   ArrowRight,
   Package,
   XCircle,
+  Globe,
 } from 'lucide-react';
 
 export default function ConfigPage({ settings, update, onConfigured }) {
@@ -37,23 +38,37 @@ export default function ConfigPage({ settings, update, onConfigured }) {
     [token, databricksHost]
   );
 
+  const [authError, setAuthError] = useState('');
+
   // Test connection
   const testConnection = async () => {
-    if (!token) return;
+    if (!token || !databricksHost) return;
     setTokenStatus('loading');
+    setAuthError('');
     try {
       const data = await apiFetch('/api/me');
       setUsername(data.username || data.displayName || '');
       setTokenStatus('valid');
-    } catch {
+    } catch (e) {
       setTokenStatus('invalid');
       setUsername('');
+      // Extract meaningful error message
+      const msg = e.message || '';
+      if (msg.includes('not configured') || msg.includes('DATABRICKS_HOST')) {
+        setAuthError('Databricks Host URL is missing. Please set it above.');
+      } else if (msg.includes('401')) {
+        setAuthError('Invalid token. Please check your PAT.');
+      } else if (msg.includes('Network error') || msg.includes('fetch')) {
+        setAuthError('Cannot reach Databricks. Verify the Host URL.');
+      } else {
+        setAuthError(msg || 'Authentication failed.');
+      }
     }
   };
 
-  // Auto-test on mount if token exists
+  // Auto-test on mount if token + host exist
   useEffect(() => {
-    if (token && !tokenStatus) testConnection();
+    if (token && databricksHost && !tokenStatus) testConnection();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Load warehouses once validated
@@ -102,7 +117,8 @@ export default function ConfigPage({ settings, update, onConfigured }) {
   const isReady = tokenStatus === 'valid' && warehouseId && notebookPath;
 
   // Step status
-  const step1Done = tokenStatus === 'valid';
+  const step0Done = Boolean(databricksHost);
+  const step1Done = step0Done && tokenStatus === 'valid';
   const step2Done = step1Done && Boolean(warehouseId);
   const step3Done = step2Done && Boolean(notebookPath);
 
@@ -118,10 +134,43 @@ export default function ConfigPage({ settings, update, onConfigured }) {
 
       {/* Steps */}
       <div className="space-y-6">
-      {/* Step 1: Token */}
+      {/* Step 1: Databricks Host */}
         <section className="bg-surface border border-border rounded-lg overflow-hidden">
           <div className="flex items-center gap-3 px-5 py-3 border-b border-border bg-panel">
-            <StepBadge step={1} done={step1Done} />
+            <StepBadge step={1} done={step0Done} />
+            <div>
+              <h2 className="text-sm font-semibold text-text-primary">Databricks Workspace</h2>
+              <p className="text-xs text-text-secondary">Your workspace URL</p>
+            </div>
+          </div>
+          <div className="px-5 py-4">
+            <div className="relative">
+              <Globe size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-tertiary" />
+              <input
+                type="text"
+                value={databricksHost}
+                onChange={(e) => {
+                  update('databricksHost', e.target.value.replace(/\/+$/, ''));
+                  setTokenStatus(null);
+                }}
+                placeholder="https://adb-xxxxxxxxxxxx.xx.azuredatabricks.net"
+                autoComplete="off"
+                className="w-full pl-9 pr-3 py-2 text-sm border border-border rounded-md bg-surface text-text-primary placeholder:text-text-tertiary glow-focus transition-smooth font-mono"
+              />
+            </div>
+            {step0Done && (
+              <div className="flex items-center gap-2 mt-3 p-2.5 bg-success-bg rounded-md">
+                <CheckCircle2 size={14} className="text-success" />
+                <span className="text-sm text-success">Host configured</span>
+              </div>
+            )}
+          </div>
+        </section>
+
+      {/* Step 2: Token */}
+        <section className={`bg-surface border border-border rounded-lg overflow-hidden transition-smooth ${!step0Done ? 'opacity-50 pointer-events-none' : ''}`}>
+          <div className="flex items-center gap-3 px-5 py-3 border-b border-border bg-panel">
+            <StepBadge step={2} done={step1Done} />
             <div>
               <h2 className="text-sm font-semibold text-text-primary">Authentication</h2>
               <p className="text-xs text-text-secondary">Databricks Personal Access Token</p>
@@ -147,7 +196,7 @@ export default function ConfigPage({ settings, update, onConfigured }) {
         </div>
           <button
                 onClick={testConnection}
-                disabled={!token || tokenStatus === 'loading'}
+                disabled={!token || !databricksHost || tokenStatus === 'loading'}
                 className="px-4 py-2 text-sm font-medium rounded-md border border-border text-text-primary hover:bg-bg-subtle disabled:opacity-50 disabled:cursor-not-allowed transition-smooth flex items-center gap-2"
               >
                 {tokenStatus === 'loading' ? (
@@ -172,17 +221,17 @@ export default function ConfigPage({ settings, update, onConfigured }) {
               <div className="flex items-center gap-2 mt-3 p-2.5 bg-error-bg rounded-md">
                 <XCircle size={14} className="text-error" />
                 <span className="text-sm text-error">
-                  Authentication failed. Check your token.
+                  {authError || 'Authentication failed.'}
                 </span>
         </div>
       )}
     </div>
         </section>
 
-        {/* Step 2: SQL Warehouse */}
+        {/* Step 3: SQL Warehouse */}
         <section className={`bg-surface border border-border rounded-lg overflow-hidden transition-smooth ${!step1Done ? 'opacity-50 pointer-events-none' : ''}`}>
           <div className="flex items-center gap-3 px-5 py-3 border-b border-border bg-panel">
-            <StepBadge step={2} done={step2Done} />
+            <StepBadge step={3} done={step2Done} />
             <div>
               <h2 className="text-sm font-semibold text-text-primary">SQL Warehouse</h2>
               <p className="text-xs text-text-secondary">Select a warehouse for query execution</p>
@@ -236,10 +285,10 @@ export default function ConfigPage({ settings, update, onConfigured }) {
           </div>
         </section>
 
-        {/* Step 3: Publish */}
+        {/* Step 4: Publish */}
         <section className={`bg-surface border border-border rounded-lg overflow-hidden transition-smooth ${!step2Done ? 'opacity-50 pointer-events-none' : ''}`}>
           <div className="flex items-center gap-3 px-5 py-3 border-b border-border bg-panel">
-            <StepBadge step={3} done={step3Done} />
+            <StepBadge step={4} done={step3Done} />
             <div>
               <h2 className="text-sm font-semibold text-text-primary">Publish Notebook</h2>
               <p className="text-xs text-text-secondary">Deploy the Inspire AI notebook to your workspace</p>
