@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
   CheckCircle2,
   Clock,
@@ -8,31 +8,59 @@ import {
   XCircle,
   ArrowRight,
   Play,
+  Search,
+  Filter,
+  ChevronDown,
+  ChevronRight,
+  Activity,
+  BarChart3,
+  Eye,
+  EyeOff,
+  Layers,
 } from 'lucide-react';
 
 // Run lifecycle phases
-const PHASE_PENDING   = 'PENDING';
-const PHASE_RUNNING   = 'RUNNING';
+const PHASE_PENDING = 'PENDING';
+const PHASE_RUNNING = 'RUNNING';
 const PHASE_TERMINATED = 'TERMINATED';
+
+// Filter presets
+const STATUS_FILTERS = [
+  { key: 'all', label: 'All', color: 'text-text-secondary' },
+  { key: 'running', label: 'In Progress', color: 'text-info' },
+  { key: 'success', label: 'Success', color: 'text-success' },
+  { key: 'warning', label: 'Warning', color: 'text-warning' },
+  { key: 'error', label: 'Error', color: 'text-error' },
+];
 
 export default function MonitorPage({ settings, sessionId, runId, onComplete }) {
   const { databricksHost, token, warehouseId, inspireDatabase } = settings;
 
-  // Run-level state (primary source of truth)
+  // Run-level state
   const [runInfo, setRunInfo] = useState(null);
-  const [runPhase, setRunPhase] = useState(PHASE_PENDING); // PENDING | RUNNING | TERMINATED
+  const [runPhase, setRunPhase] = useState(PHASE_PENDING);
 
-  // Session/step state (secondary, from notebook tables)
+  // Session/step state
   const [session, setSession] = useState(null);
   const [steps, setSteps] = useState([]);
   const [polling, setPolling] = useState(true);
   const lastPollRef = useRef(null);
-  const trackedSessionRef = useRef(null); // track which session_id we're following
+  const trackedSessionRef = useRef(null);
+
+  // Filter state
+  const [searchQuery, setSearchQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState('all');
+  const [stageFilter, setStageFilter] = useState('all');
+  const [collapsedStages, setCollapsedStages] = useState({});
+  const [showFilters, setShowFilters] = useState(false);
+  const [autoScroll, setAutoScroll] = useState(true);
+  const stepsEndRef = useRef(null);
 
   const apiFetch = useCallback(
     async (url, opts = {}) => {
       const headers = {
         Authorization: `Bearer ${token}`,
+        'X-DB-PAT-Token': token,
         'Content-Type': 'application/json',
         ...opts.headers,
       };
@@ -49,66 +77,39 @@ export default function MonitorPage({ settings, sessionId, runId, onComplete }) 
     if (!polling) return;
 
     const poll = async () => {
-      // ── 1. Always poll the Databricks run status first ──
       let currentRunInfo = runInfo;
       if (runId) {
         try {
           const ri = await apiFetch(`/api/run/${runId}`);
           setRunInfo(ri);
           currentRunInfo = ri;
-
           const lcs = ri.life_cycle_state || '';
-
           if (lcs === 'PENDING' || lcs === 'QUEUED' || lcs === 'BLOCKED') {
             setRunPhase(PHASE_PENDING);
           } else if (lcs === 'RUNNING' || lcs === 'TERMINATING') {
             setRunPhase(PHASE_RUNNING);
           } else {
-            // TERMINATED, INTERNAL_ERROR, SKIPPED, CANCELED
             setRunPhase(PHASE_TERMINATED);
           }
-
-          // If the run failed outright, stop polling
-          if (lcs === 'INTERNAL_ERROR' || lcs === 'SKIPPED') {
-            setPolling(false);
-            return;
-          }
-
-          // If terminated with failure, stop
-          if (lcs === 'TERMINATED' && ri.result_state === 'FAILED') {
-            setPolling(false);
-            return;
-          }
-        } catch {
-          // Run info fetch failed, keep polling
-        }
+          if (lcs === 'INTERNAL_ERROR' || lcs === 'SKIPPED') { setPolling(false); return; }
+          if (lcs === 'TERMINATED' && ri.result_state === 'FAILED') { setPolling(false); return; }
+        } catch { /* keep polling */ }
       }
 
-      // ── 2. Poll session & steps only if we have a warehouse + database ──
-      // Always fetch the LATEST session (no session_id filter) so we
-      // automatically pick up new runs.
       if (warehouseId && inspireDatabase) {
         try {
-          const sessQ = new URLSearchParams({
-            inspire_database: inspireDatabase,
-            warehouse_id: warehouseId,
-          });
+          const sessQ = new URLSearchParams({ inspire_database: inspireDatabase, warehouse_id: warehouseId });
           const sessData = await apiFetch(`/api/inspire/session?${sessQ}`);
-
           if (sessData.session) {
             const sess = sessData.session;
             const sid = sess.session_id;
-
-            // Detect session change → reset steps and delta pointer
             if (trackedSessionRef.current && trackedSessionRef.current !== String(sid)) {
               setSteps([]);
               lastPollRef.current = null;
             }
             trackedSessionRef.current = String(sid);
-
             setSession(sess);
 
-            // Poll steps for the current session
             try {
               const stepQ = new URLSearchParams({
                 inspire_database: inspireDatabase,
@@ -120,55 +121,28 @@ export default function MonitorPage({ settings, sessionId, runId, onComplete }) 
               if (stepData.steps?.length > 0) {
                 setSteps((prev) => {
                   const map = new Map(prev.map((s) => [s.step_id, s]));
-                  for (const s of stepData.steps) {
-                    map.set(s.step_id, s);
-                  }
-                  return Array.from(map.values()).sort(
-                    (a, b) =>
-                      (a.last_updated || '').localeCompare(b.last_updated || '')
-                  );
+                  for (const s of stepData.steps) map.set(s.step_id, s);
+                  return Array.from(map.values()).sort((a, b) => (a.last_updated || '').localeCompare(b.last_updated || ''));
                 });
-                lastPollRef.current =
-                  stepData.steps[stepData.steps.length - 1].last_updated;
+                lastPollRef.current = stepData.steps[stepData.steps.length - 1].last_updated;
               }
-            } catch {
-              // Steps table might not exist yet
-            }
+            } catch { /* steps table might not exist */ }
 
-            // ACK if status === 'ready'
             if (sess.processing_status === 'ready') {
               try {
                 await apiFetch('/api/inspire/ack', {
                   method: 'POST',
-                  body: JSON.stringify({
-                    inspire_database: inspireDatabase,
-                    warehouse_id: warehouseId,
-                    session_id: sid,
-                  }),
+                  body: JSON.stringify({ inspire_database: inspireDatabase, warehouse_id: warehouseId, session_id: sid }),
                 });
-              } catch {
-                // silent
-              }
+              } catch { /* silent */ }
             }
 
-            // Only stop polling when the Databricks run has terminated
-            // AND the session confirms completion.
-            const runDone =
-              !runId ||
-              currentRunInfo?.life_cycle_state === 'TERMINATED' ||
-              currentRunInfo?.life_cycle_state === 'INTERNAL_ERROR';
-            const sessionDone =
-              sess.completed_on || sess.completed_percent >= 100;
-
-            if (runDone && sessionDone) {
-              setPolling(false);
-            }
+            const runDone = !runId || currentRunInfo?.life_cycle_state === 'TERMINATED' || currentRunInfo?.life_cycle_state === 'INTERNAL_ERROR';
+            const sessionDone = sess.completed_on || sess.completed_percent >= 100;
+            if (runDone && sessionDone) setPolling(false);
           }
-        } catch {
-          // Session table might not exist yet - keep polling
-        }
+        } catch { /* session table might not exist */ }
       } else if (!runId) {
-        // No run and no warehouse — nothing to poll
         setPolling(false);
       }
     };
@@ -178,83 +152,113 @@ export default function MonitorPage({ settings, sessionId, runId, onComplete }) 
     return () => clearInterval(interval);
   }, [polling, warehouseId, inspireDatabase, sessionId, runId, apiFetch]); // eslint-disable-line
 
+  // Auto-scroll to bottom when new steps arrive
+  useEffect(() => {
+    if (autoScroll && stepsEndRef.current) {
+      stepsEndRef.current.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+  }, [steps, autoScroll]);
+
   // ── Derived display state ──
-
-  // Detect stale session: if session shows completed but the run is still active,
-  // the session belongs to a previous run — ignore its progress.
-  const isStaleSession =
-    session?.completed_on && runPhase !== PHASE_TERMINATED;
-
+  const isStaleSession = session?.completed_on && runPhase !== PHASE_TERMINATED;
   const percent = isStaleSession ? 0 : (session?.completed_percent || 0);
-
-  const isFailed =
-    runInfo?.result_state === 'FAILED' ||
-    runInfo?.life_cycle_state === 'INTERNAL_ERROR';
-
-  const isComplete =
-    !isFailed &&
-    !isStaleSession &&
-    runPhase === PHASE_TERMINATED &&
-    runInfo?.result_state === 'SUCCESS' &&
-    (session?.completed_on || percent >= 100);
-
+  const isFailed = runInfo?.result_state === 'FAILED' || runInfo?.life_cycle_state === 'INTERNAL_ERROR';
+  const isComplete = !isFailed && !isStaleSession && runPhase === PHASE_TERMINATED && runInfo?.result_state === 'SUCCESS' && (session?.completed_on || percent >= 100);
   const isPending = runPhase === PHASE_PENDING;
   const isRunning = runPhase === PHASE_RUNNING && !isComplete && !isFailed;
 
-  // Compute display status label
   let statusLabel = 'Initializing';
   let statusDetail = '';
-  if (isPending) {
-    statusLabel = 'Starting';
-    statusDetail = 'Provisioning compute resources...';
-  } else if (isRunning) {
-    statusLabel = 'Running';
-    statusDetail = isStaleSession || !session
-      ? 'Notebook is initializing...'
-      : `${Math.round(percent)}% complete`;
-  } else if (isComplete) {
-    statusLabel = 'Completed';
-    statusDetail = 'Pipeline finished successfully.';
-  } else if (isFailed) {
-    statusLabel = 'Failed';
-    statusDetail = runInfo?.state_message || 'Pipeline execution failed.';
-  } else if (runPhase === PHASE_TERMINATED && runInfo?.result_state === 'SUCCESS' && !session?.completed_on) {
-    // Run terminated with success but session not yet complete
-    statusLabel = 'Finalizing';
-    statusDetail = 'Run completed, waiting for results...';
-  }
+  if (isPending) { statusLabel = 'Starting'; statusDetail = 'Provisioning compute resources...'; }
+  else if (isRunning) { statusLabel = 'Running'; statusDetail = isStaleSession || !session ? 'Notebook is initializing...' : `${Math.round(percent)}% complete`; }
+  else if (isComplete) { statusLabel = 'Completed'; statusDetail = 'Pipeline finished successfully.'; }
+  else if (isFailed) { statusLabel = 'Failed'; statusDetail = runInfo?.state_message || 'Pipeline execution failed.'; }
+  else if (runPhase === PHASE_TERMINATED && runInfo?.result_state === 'SUCCESS' && !session?.completed_on) { statusLabel = 'Finalizing'; statusDetail = 'Run completed, waiting for results...'; }
 
-  // Elapsed time
-  const elapsed = runInfo?.execution_duration
-    ? formatDuration(runInfo.execution_duration)
-    : null;
+  const elapsed = runInfo?.execution_duration ? formatDuration(runInfo.execution_duration) : null;
 
-  // Group steps by stage (hide stale steps from old sessions)
-  const stages = {};
-  if (!isStaleSession) {
-    for (const step of steps) {
+  // Group steps by stage, applying filters
+  const { stages, stageNames, filteredCount, totalCount, statusCounts } = useMemo(() => {
+    const stageMap = {};
+    const counts = { all: 0, running: 0, success: 0, warning: 0, error: 0 };
+    let filtered = 0;
+
+    const visibleSteps = isStaleSession ? [] : steps;
+
+    for (const step of visibleSteps) {
       const stage = step.stage_name || 'Pipeline';
-      if (!stages[stage]) stages[stage] = [];
-      stages[stage].push(step);
+      if (!stageMap[stage]) stageMap[stage] = [];
+
+      const cat = getStatusCategory(step.status);
+      counts.all++;
+      counts[cat]++;
+
+      // Apply filters
+      const matchesStatus = statusFilter === 'all' || cat === statusFilter;
+      const matchesStage = stageFilter === 'all' || stage === stageFilter;
+      const matchesSearch = !searchQuery ||
+        (step.step_name || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
+        (step.sub_step_name || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
+        (step.message || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
+        stage.toLowerCase().includes(searchQuery.toLowerCase());
+
+      if (matchesStatus && matchesStage && matchesSearch) {
+        stageMap[stage].push(step);
+        filtered++;
+      }
     }
-  }
+
+    // Remove empty stages after filtering
+    const nonEmptyStages = {};
+    const names = [];
+    for (const [name, stageSteps] of Object.entries(stageMap)) {
+      if (stageSteps.length > 0) {
+        nonEmptyStages[name] = stageSteps;
+        names.push(name);
+      } else if (stageFilter === 'all' && statusFilter === 'all' && !searchQuery) {
+        // Keep empty stages only when no filters are active (to show all stage headers)
+      }
+    }
+
+    // Also collect all unique stage names for the filter dropdown
+    const allStageNames = [...new Set(visibleSteps.map((s) => s.stage_name || 'Pipeline'))];
+
+    return {
+      stages: nonEmptyStages,
+      stageNames: allStageNames,
+      filteredCount: filtered,
+      totalCount: counts.all,
+      statusCounts: counts,
+    };
+  }, [steps, isStaleSession, statusFilter, stageFilter, searchQuery]);
+
+  const hasActiveFilters = statusFilter !== 'all' || stageFilter !== 'all' || searchQuery;
+
+  const toggleStage = (name) => {
+    setCollapsedStages((prev) => ({ ...prev, [name]: !prev[name] }));
+  };
 
   return (
-    <div>
-      {/* Page header */}
-      <div className="flex items-center justify-between mb-8">
-        <div>
-          <h1 className="text-2xl font-bold text-text-primary">Monitor</h1>
-          <p className="text-sm text-text-secondary mt-1">
-            Track the Inspire AI pipeline execution.
-          </p>
+    <div className="max-w-6xl mx-auto px-6 py-8">
+      {/* ═══ Page Header ═══ */}
+      <div className="flex items-center justify-between mb-6">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-db-red to-db-red-hover flex items-center justify-center shadow-sm">
+            <Activity size={20} className="text-white" />
+          </div>
+          <div>
+            <h1 className="text-2xl font-bold text-text-primary">Pipeline Monitor</h1>
+            <p className="text-sm text-text-secondary">
+              Real-time tracking of the Inspire AI pipeline.
+            </p>
+          </div>
         </div>
         {runInfo?.run_page_url && (
           <a
             href={runInfo.run_page_url}
             target="_blank"
             rel="noopener noreferrer"
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm text-text-secondary border border-border rounded-md hover:bg-bg-subtle transition-smooth"
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 text-sm text-text-secondary border border-border rounded-lg hover:bg-bg-subtle hover:shadow-sm transition-smooth"
           >
             View in Databricks
             <ExternalLink size={14} />
@@ -262,22 +266,21 @@ export default function MonitorPage({ settings, sessionId, runId, onComplete }) 
         )}
       </div>
 
-      {/* Run status card */}
-      <div className="bg-surface border border-border rounded-lg p-5 mb-6">
-        <div className="flex items-center justify-between mb-3">
-          <div className="flex items-center gap-2.5">
-            <StatusIcon
-              isPending={isPending}
-              isRunning={isRunning}
-              isComplete={isComplete}
-              isFailed={isFailed}
-            />
+      {/* ═══ Status Card ═══ */}
+      <div className={`border rounded-xl p-5 mb-6 shadow-sm ${
+        isComplete ? 'bg-success-bg/30 border-success/20' :
+        isFailed ? 'bg-error-bg/30 border-error/20' :
+        'bg-surface border-border'
+      }`}>
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center gap-3">
+            <StatusIcon isPending={isPending} isRunning={isRunning} isComplete={isComplete} isFailed={isFailed} />
             <div>
-              <span className={`text-sm font-semibold ${
+              <span className={`text-base font-bold ${
                 isComplete ? 'text-success' : isFailed ? 'text-error' : 'text-text-primary'
               }`}>
                 {statusLabel}
-                  </span>
+              </span>
               {statusDetail && (
                 <p className={`text-xs mt-0.5 ${
                   isComplete ? 'text-success' : isFailed ? 'text-error' : 'text-text-secondary'
@@ -288,25 +291,25 @@ export default function MonitorPage({ settings, sessionId, runId, onComplete }) 
             </div>
           </div>
           <div className="flex items-center gap-4 text-xs">
-            {elapsed && <span className="text-text-tertiary">{elapsed}</span>}
+            {elapsed && (
+              <div className="flex items-center gap-1.5 text-text-tertiary">
+                <Clock size={12} />
+                <span className="font-mono">{elapsed}</span>
+              </div>
+            )}
             {runInfo?.life_cycle_state && (
-              <span className={`font-mono px-2 py-0.5 rounded font-medium ${
-                isComplete
-                  ? 'bg-success-bg text-success'
-                  : isFailed
-                    ? 'bg-error-bg text-error'
-                    : isPending
-                      ? 'bg-info-bg text-info'
-                      : 'bg-db-red-50 text-db-red'
+              <span className={`font-mono px-2.5 py-1 rounded-lg font-medium text-[11px] ${
+                isComplete ? 'bg-success-bg text-success' :
+                isFailed ? 'bg-error-bg text-error' :
+                isPending ? 'bg-info-bg text-info' :
+                'bg-db-red-50 text-db-red'
               }`}>
-                {isComplete
-                  ? 'TERMINATED / SUCCESS'
-                  : runInfo.life_cycle_state}
+                {isComplete ? 'SUCCESS' : runInfo.life_cycle_state}
                 {!isComplete && runInfo.result_state ? ` / ${runInfo.result_state}` : ''}
               </span>
             )}
             {isRunning && (
-              <span className="font-mono text-sm text-text-secondary">
+              <span className="font-mono text-lg font-bold text-db-red">
                 {Math.round(percent)}%
               </span>
             )}
@@ -314,106 +317,336 @@ export default function MonitorPage({ settings, sessionId, runId, onComplete }) 
         </div>
 
         {/* Progress bar */}
-        <div className="h-2 bg-bg rounded-full overflow-hidden">
+        <div className="h-2.5 bg-bg rounded-full overflow-hidden">
           <div
             className={`h-full rounded-full transition-all duration-700 ease-out ${
-              isComplete
-                ? 'bg-success'
-                : isFailed
-                  ? 'bg-error'
-                  : isPending
-                    ? 'bg-text-tertiary animate-pulse'
-                    : isStaleSession
-                      ? 'bg-db-red/40 animate-pulse'
-                      : 'bg-db-red progress-glow'
+              isComplete ? 'bg-success' :
+              isFailed ? 'bg-error' :
+              isPending ? 'bg-text-tertiary animate-pulse' :
+              isStaleSession ? 'bg-db-red/40 animate-pulse' :
+              'bg-db-red progress-glow'
             }`}
-                style={{
-              width: isComplete
-                ? '100%'
-                : isPending
-                  ? '3%'
-                  : isStaleSession
-                    ? '15%'
-                    : `${Math.max(Math.min(percent, 100), 1)}%`,
-                }}
-              />
-            </div>
+            style={{
+              width: isComplete ? '100%' : isPending ? '3%' : isStaleSession ? '15%' : `${Math.max(Math.min(percent, 100), 1)}%`,
+            }}
+          />
+        </div>
 
-        {/* Run name */}
         {runInfo?.run_name && (
-          <p className="text-xs text-text-tertiary mt-3">{runInfo.run_name}</p>
+          <p className="text-[11px] text-text-tertiary mt-3 font-mono">{runInfo.run_name}</p>
         )}
       </div>
 
-      {/* Pending state detail */}
+      {/* Pending info */}
       {isPending && (
-        <div className="bg-info-bg border border-info/20 rounded-lg p-5 mb-6 flex items-start gap-3">
+        <div className="bg-info-bg border border-info/20 rounded-xl p-5 mb-6 flex items-start gap-3">
           <Clock size={16} className="text-info mt-0.5 shrink-0" />
           <div>
-            <p className="text-sm font-medium text-text-primary">
-              Job is queued
-            </p>
+            <p className="text-sm font-semibold text-text-primary">Job is queued</p>
             <p className="text-xs text-text-secondary mt-1">
-              The Databricks cluster is being provisioned. This may take 1-3 minutes
-              for serverless, or longer for standard clusters. The progress bar will
-              update once the notebook starts executing.
+              The Databricks cluster is being provisioned. This may take 1-3 minutes for serverless, or longer for standard clusters.
             </p>
           </div>
         </div>
       )}
 
-      {/* Steps timeline */}
-      {Object.keys(stages).length > 0 ? (
-        <div className="space-y-4">
-          {Object.entries(stages).map(([stageName, stageSteps]) => (
-            <div
-              key={stageName}
-              className="bg-surface border border-border rounded-lg overflow-hidden"
-            >
-              <div className="px-4 py-2.5 border-b border-border bg-panel flex items-center justify-between">
-                <h3 className="text-xs font-semibold text-text-secondary uppercase tracking-wider">
-                  {stageName}
-                </h3>
-                <span className="text-xs text-text-tertiary">
-                  {stageSteps.filter((s) => isStepDone(s.status)).length}/{stageSteps.length} completed
-              </span>
+      {/* ═══ Two-Column Layout: Stage Sidebar + Steps ═══ */}
+      {totalCount > 0 ? (
+        <div className="flex gap-4">
+          {/* ── Left Sidebar: Stages ── */}
+          <div className="w-56 shrink-0">
+            <div className="bg-surface border border-border rounded-xl shadow-sm overflow-hidden sticky top-6">
+              {/* Sidebar header */}
+              <div className="px-4 py-3 border-b border-border bg-gradient-to-b from-db-red-50 to-surface">
+                <div className="flex items-center gap-2">
+                  <Layers size={14} className="text-db-red" />
+                  <span className="text-xs font-bold text-text-primary">Stages</span>
+                </div>
+                <p className="text-[10px] text-text-tertiary mt-0.5">
+                  {stageNames.length} stage{stageNames.length !== 1 ? 's' : ''} &middot; {totalCount} steps
+                </p>
               </div>
-              <div className="divide-y divide-border-subtle">
-                {stageSteps.map((step) => (
-                  <StepRow key={step.step_id} step={step} />
-                ))}
+
+              {/* Stage list */}
+              <div className="p-1.5 space-y-0.5 max-h-[60vh] overflow-y-auto">
+                {/* All stages option */}
+                <button
+                  onClick={() => setStageFilter('all')}
+                  className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-left transition-smooth ${
+                    stageFilter === 'all'
+                      ? 'bg-db-red-50 border border-db-red/20'
+                      : 'hover:bg-bg-subtle border border-transparent'
+                  }`}
+                >
+                  <div className={`w-5 h-5 rounded-full flex items-center justify-center shrink-0 ${
+                    stageFilter === 'all' ? 'bg-db-red/10' : 'bg-bg-subtle'
+                  }`}>
+                    <Layers size={10} className={stageFilter === 'all' ? 'text-db-red' : 'text-text-tertiary'} />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <span className={`text-[11px] font-semibold block ${
+                      stageFilter === 'all' ? 'text-db-red' : 'text-text-primary'
+                    }`}>
+                      All Stages
+                    </span>
+                  </div>
+                  <span className={`text-[10px] font-mono ${stageFilter === 'all' ? 'text-db-red' : 'text-text-tertiary'}`}>
+                    {totalCount}
+                  </span>
+                </button>
+
+                {/* Individual stages */}
+                {stageNames.map((name) => {
+                  const allStageSteps = isStaleSession ? [] : steps.filter((s) => (s.stage_name || 'Pipeline') === name);
+                  const done = allStageSteps.filter((s) => isStepDone(s.status)).length;
+                  const errors = allStageSteps.filter((s) => getStatusCategory(s.status) === 'error').length;
+                  const running = allStageSteps.filter((s) => getStatusCategory(s.status) === 'running').length;
+                  const active = stageFilter === name;
+                  const total = allStageSteps.length;
+                  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+
+                  return (
+                    <button
+                      key={name}
+                      onClick={() => setStageFilter(active ? 'all' : name)}
+                      className={`w-full flex items-start gap-2.5 px-3 py-2.5 rounded-lg text-left transition-smooth ${
+                        active
+                          ? 'bg-db-red-50 border border-db-red/20'
+                          : 'hover:bg-bg-subtle border border-transparent'
+                      }`}
+                    >
+                      {/* Status indicator */}
+                      {errors > 0 ? (
+                        <div className="w-5 h-5 rounded-full bg-error-bg flex items-center justify-center shrink-0 mt-0.5">
+                          <XCircle size={10} className="text-error" />
+                        </div>
+                      ) : running > 0 ? (
+                        <div className="w-5 h-5 rounded-full bg-info-bg flex items-center justify-center shrink-0 mt-0.5">
+                          <Loader2 size={10} className="animate-spin text-info" />
+                        </div>
+                      ) : done === total && total > 0 ? (
+                        <div className="w-5 h-5 rounded-full bg-success-bg flex items-center justify-center shrink-0 mt-0.5">
+                          <CheckCircle2 size={10} className="text-success" />
+                        </div>
+                      ) : (
+                        <div className="w-5 h-5 rounded-full bg-bg-subtle flex items-center justify-center shrink-0 mt-0.5">
+                          <Clock size={10} className="text-text-tertiary" />
+                        </div>
+                      )}
+
+                      <div className="flex-1 min-w-0">
+                        <span className={`text-[11px] font-semibold block truncate ${
+                          active ? 'text-db-red' : 'text-text-primary'
+                        }`}>
+                          {name}
+                        </span>
+                        <div className="flex items-center gap-2 mt-1">
+                          <div className="flex-1 h-1 bg-bg rounded-full overflow-hidden">
+                            <div
+                              className={`h-full rounded-full transition-all duration-500 ${
+                                errors > 0 ? 'bg-error' : done === total && total > 0 ? 'bg-success' : 'bg-db-red'
+                              }`}
+                              style={{ width: `${pct}%` }}
+                            />
+                          </div>
+                          <span className="text-[9px] font-mono text-text-tertiary shrink-0">{done}/{total}</span>
+                        </div>
+                        {errors > 0 && (
+                          <span className="text-[9px] text-error font-medium mt-0.5 block">
+                            {errors} error{errors > 1 ? 's' : ''}
+                          </span>
+                        )}
+                      </div>
+                    </button>
+                  );
+                })}
               </div>
+            </div>
           </div>
-          ))}
+
+          {/* ── Right: Search/Filters + Steps Timeline ── */}
+          <div className="flex-1 min-w-0">
+            {/* Filter toolbar */}
+            <div className="bg-surface border border-border rounded-xl mb-4 shadow-sm overflow-hidden">
+              <div className="flex items-center gap-3 px-4 py-3">
+                {/* Search */}
+                <div className="relative flex-1">
+                  <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-tertiary" />
+                  <input
+                    type="text"
+                    placeholder="Search steps, messages..."
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    className="w-full pl-9 pr-3 py-1.5 text-xs border border-border rounded-lg bg-bg text-text-primary placeholder:text-text-tertiary focus:outline-none focus:border-db-red/30 focus:ring-1 focus:ring-db-red/20 transition-smooth"
+                  />
+                </div>
+
+                {/* Status pills */}
+                <div className="flex items-center gap-1">
+                  {STATUS_FILTERS.map((f) => {
+                    const count = statusCounts[f.key] || 0;
+                    const active = statusFilter === f.key;
+                    if (f.key !== 'all' && count === 0) return null;
+                    return (
+                      <button
+                        key={f.key}
+                        onClick={() => setStatusFilter(active ? 'all' : f.key)}
+                        className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-smooth border ${
+                          active
+                            ? 'border-db-red/30 bg-db-red-50 text-db-red'
+                            : 'border-transparent text-text-secondary hover:bg-bg-subtle'
+                        }`}
+                      >
+                        {f.label}
+                        <span className={`text-[10px] font-mono ${active ? 'text-db-red' : 'text-text-tertiary'}`}>{count}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Auto-scroll */}
+                <button
+                  onClick={() => setAutoScroll(!autoScroll)}
+                  className={`p-1.5 rounded-lg transition-smooth border ${
+                    autoScroll ? 'border-db-red/20 bg-db-red-50 text-db-red' : 'border-transparent text-text-tertiary hover:bg-bg-subtle'
+                  }`}
+                  title={autoScroll ? 'Auto-scroll on' : 'Auto-scroll off'}
+                >
+                  {autoScroll ? <Eye size={14} /> : <EyeOff size={14} />}
+                </button>
+
+                {hasActiveFilters && (
+                  <button
+                    onClick={() => { setSearchQuery(''); setStatusFilter('all'); setStageFilter('all'); }}
+                    className="text-[11px] text-db-red hover:underline font-medium shrink-0"
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
+
+              {/* Active filter chips */}
+              {hasActiveFilters && (
+                <div className="px-4 py-2 bg-db-red-50/50 border-t border-border flex items-center gap-2 flex-wrap">
+                  <Filter size={12} className="text-db-red shrink-0" />
+                  <span className="text-[11px] text-text-secondary">
+                    <span className="font-semibold text-text-primary">{filteredCount}</span> of{' '}
+                    <span className="font-semibold text-text-primary">{totalCount}</span> steps
+                  </span>
+                  {statusFilter !== 'all' && (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-db-red-50 text-db-red text-[10px] font-medium border border-db-red/20">
+                      {STATUS_FILTERS.find((f) => f.key === statusFilter)?.label}
+                      <button onClick={() => setStatusFilter('all')} className="hover:text-db-red-hover">&times;</button>
+                    </span>
+                  )}
+                  {stageFilter !== 'all' && (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-db-red-50 text-db-red text-[10px] font-medium border border-db-red/20">
+                      {stageFilter}
+                      <button onClick={() => setStageFilter('all')} className="hover:text-db-red-hover">&times;</button>
+                    </span>
+                  )}
+                  {searchQuery && (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-db-red-50 text-db-red text-[10px] font-medium border border-db-red/20">
+                      "{searchQuery}"
+                      <button onClick={() => setSearchQuery('')} className="hover:text-db-red-hover">&times;</button>
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Steps list */}
+            {Object.keys(stages).length > 0 ? (
+              <div className="space-y-3">
+                {Object.entries(stages).map(([stageName, stageSteps]) => {
+                  const collapsed = collapsedStages[stageName];
+                  const doneCount = stageSteps.filter((s) => isStepDone(s.status)).length;
+                  const errorCount = stageSteps.filter((s) => getStatusCategory(s.status) === 'error').length;
+                  const runningCount = stageSteps.filter((s) => getStatusCategory(s.status) === 'running').length;
+
+                  return (
+                    <div key={stageName} className="bg-surface border border-border rounded-xl overflow-hidden shadow-sm">
+                      <button
+                        onClick={() => toggleStage(stageName)}
+                        className="w-full px-4 py-3 border-b border-border bg-panel flex items-center gap-3 hover:bg-bg-subtle transition-smooth text-left"
+                      >
+                        <div className={`transition-transform duration-200 ${collapsed ? '' : 'rotate-90'}`}>
+                          <ChevronRight size={14} className="text-text-tertiary" />
+                        </div>
+                        {errorCount > 0 ? (
+                          <div className="w-5 h-5 rounded-full bg-error-bg flex items-center justify-center"><XCircle size={11} className="text-error" /></div>
+                        ) : runningCount > 0 ? (
+                          <div className="w-5 h-5 rounded-full bg-info-bg flex items-center justify-center"><Loader2 size={11} className="animate-spin text-info" /></div>
+                        ) : doneCount === stageSteps.length ? (
+                          <div className="w-5 h-5 rounded-full bg-success-bg flex items-center justify-center"><CheckCircle2 size={11} className="text-success" /></div>
+                        ) : (
+                          <div className="w-5 h-5 rounded-full bg-bg-subtle flex items-center justify-center"><Clock size={11} className="text-text-tertiary" /></div>
+                        )}
+                        <h3 className="text-xs font-bold text-text-primary flex-1">{stageName}</h3>
+                        <div className="flex items-center gap-2">
+                          {errorCount > 0 && (
+                            <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-error-bg text-error">
+                              {errorCount} error{errorCount > 1 ? 's' : ''}
+                            </span>
+                          )}
+                          <span className="text-[11px] text-text-tertiary font-mono">{doneCount}/{stageSteps.length}</span>
+                          <div className="w-16 h-1.5 bg-bg rounded-full overflow-hidden">
+                            <div
+                              className={`h-full rounded-full transition-all duration-500 ${
+                                errorCount > 0 ? 'bg-error' : doneCount === stageSteps.length ? 'bg-success' : 'bg-db-red'
+                              }`}
+                              style={{ width: `${stageSteps.length > 0 ? (doneCount / stageSteps.length) * 100 : 0}%` }}
+                            />
+                          </div>
+                        </div>
+                      </button>
+                      {!collapsed && (
+                        <div className="divide-y divide-border-subtle">
+                          {stageSteps.map((step) => (
+                            <StepRow key={step.step_id} step={step} searchQuery={searchQuery} />
+                          ))}
+                        </div>
+                      )}
                     </div>
+                  );
+                })}
+                <div ref={stepsEndRef} />
+              </div>
+            ) : (
+              <div className="bg-surface border border-border rounded-xl p-8 text-center shadow-sm">
+                <Search size={20} className="text-text-tertiary mx-auto mb-3" />
+                <p className="text-sm text-text-secondary">No steps match your filters</p>
+                <button
+                  onClick={() => { setSearchQuery(''); setStatusFilter('all'); setStageFilter('all'); }}
+                  className="text-xs text-db-red hover:underline mt-2 font-medium"
+                >
+                  Clear all filters
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
       ) : isRunning || isPending ? (
-        <div className="bg-surface border border-border rounded-lg p-8 text-center">
-          <Loader2
-            size={20}
-            className="animate-spin text-text-tertiary mx-auto mb-3"
-          />
-          <p className="text-sm text-text-secondary">
-            {isPending
-              ? 'Waiting for cluster to start...'
-              : 'Waiting for pipeline steps...'}
+        <div className="bg-surface border border-border rounded-xl p-10 text-center shadow-sm">
+          <Loader2 size={24} className="animate-spin text-db-red mx-auto mb-3" />
+          <p className="text-sm font-medium text-text-primary">
+            {isPending ? 'Waiting for cluster to start...' : 'Waiting for pipeline steps...'}
           </p>
           <p className="text-xs text-text-tertiary mt-1">
             Steps will appear here as the notebook executes.
-                      </p>
-                    </div>
+          </p>
+        </div>
       ) : null}
 
-      {/* Failed state */}
+      {/* ═══ Failed State ═══ */}
       {isFailed && (
-        <div className="mt-6 bg-error-bg border border-error/20 rounded-lg p-5">
+        <div className="mt-6 bg-error-bg border border-error/20 rounded-xl p-5">
           <div className="flex items-start gap-3">
             <XCircle size={18} className="text-error mt-0.5 shrink-0" />
-            <div>
-              <p className="text-sm font-semibold text-text-primary">
-                Pipeline failed
-              </p>
+            <div className="flex-1">
+              <p className="text-sm font-bold text-text-primary">Pipeline failed</p>
               {runInfo?.state_message && (
-                <p className="text-xs text-text-secondary mt-1 font-mono whitespace-pre-wrap">
+                <p className="text-xs text-text-secondary mt-1 font-mono whitespace-pre-wrap bg-error-bg/50 rounded-lg p-3 mt-2 border border-error/10">
                   {runInfo.state_message}
                 </p>
               )}
@@ -422,10 +655,9 @@ export default function MonitorPage({ settings, sessionId, runId, onComplete }) 
                   href={runInfo.run_page_url}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="inline-flex items-center gap-1 text-xs text-db-red mt-2 hover:underline"
+                  className="inline-flex items-center gap-1 text-xs text-db-red mt-3 hover:underline font-medium"
                 >
-                  View full error in Databricks
-                  <ExternalLink size={12} />
+                  View full error in Databricks <ExternalLink size={12} />
                 </a>
               )}
             </div>
@@ -433,24 +665,25 @@ export default function MonitorPage({ settings, sessionId, runId, onComplete }) 
         </div>
       )}
 
-      {/* Complete action */}
+      {/* ═══ Complete Action ═══ */}
       {isComplete && (
-        <div className="mt-6 bg-success-bg border border-success/20 rounded-lg p-5 flex items-center justify-between">
+        <div className="mt-6 bg-success-bg border border-success/20 rounded-xl p-5 flex items-center justify-between shadow-sm">
           <div className="flex items-center gap-3">
-            <CheckCircle2 size={20} className="text-success" />
-              <div>
-              <p className="text-sm font-semibold text-text-primary">
-                Pipeline completed successfully
-              </p>
+            <div className="w-10 h-10 rounded-xl bg-success/10 flex items-center justify-center">
+              <CheckCircle2 size={22} className="text-success" />
+            </div>
+            <div>
+              <p className="text-sm font-bold text-text-primary">Pipeline completed successfully</p>
               <p className="text-xs text-text-secondary mt-0.5">
                 Results are ready for review.
                 {elapsed && ` Total execution time: ${elapsed}.`}
+                {totalCount > 0 && ` ${totalCount} steps processed.`}
               </p>
-              </div>
+            </div>
           </div>
           <button
             onClick={onComplete}
-            className="inline-flex items-center gap-1.5 px-4 py-2 bg-db-red text-white text-sm font-medium rounded-lg hover:bg-db-red-hover transition-smooth"
+            className="inline-flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-db-red to-db-red-hover text-white text-sm font-bold rounded-xl hover:shadow-md transition-smooth"
           >
             View Results
             <ArrowRight size={14} />
@@ -461,107 +694,121 @@ export default function MonitorPage({ settings, sessionId, runId, onComplete }) 
   );
 }
 
-// ── Sub-components ──
+/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   Sub-components
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
 
 function StatusIcon({ isPending, isRunning, isComplete, isFailed }) {
-  if (isComplete)
-    return <CheckCircle2 size={18} className="text-success" />;
-  if (isFailed)
-    return <XCircle size={18} className="text-error" />;
-  if (isPending)
-    return <Clock size={18} className="text-info" />;
-  if (isRunning)
-    return <Loader2 size={18} className="animate-spin text-db-red" />;
-  return <Play size={18} className="text-text-tertiary" />;
+  const base = 'w-10 h-10 rounded-xl flex items-center justify-center';
+  if (isComplete) return <div className={`${base} bg-success/10`}><CheckCircle2 size={22} className="text-success" /></div>;
+  if (isFailed) return <div className={`${base} bg-error/10`}><XCircle size={22} className="text-error" /></div>;
+  if (isPending) return <div className={`${base} bg-info/10`}><Clock size={22} className="text-info" /></div>;
+  if (isRunning) return <div className={`${base} bg-db-red/10`}><Loader2 size={22} className="animate-spin text-db-red" /></div>;
+  return <div className={`${base} bg-bg-subtle`}><Play size={22} className="text-text-tertiary" /></div>;
 }
 
-// Map notebook status values to display config
-function getStepStyle(status) {
+function getStatusCategory(status) {
   switch (status) {
-    case 'ended_success':
-      return {
-        icon: <CheckCircle2 size={14} className="text-success" />,
-        badge: 'bg-success-bg text-success',
-        label: 'Success',
-      };
-    case 'started':
-      return {
-        icon: <Loader2 size={14} className="animate-spin text-info" />,
-        badge: 'bg-info-bg text-info',
-        label: 'In Progress',
-      };
-    case 'ended_warning':
-      return {
-        icon: <AlertCircle size={14} className="text-warning" />,
-        badge: 'bg-warning-bg text-warning',
-        label: 'Warning',
-      };
-    case 'ended_error':
-      return {
-        icon: <XCircle size={14} className="text-error" />,
-        badge: 'bg-error-bg text-error',
-        label: 'Error',
-      };
-    // Fallbacks for any other status values
-    case 'completed':
-      return {
-        icon: <CheckCircle2 size={14} className="text-success" />,
-        badge: 'bg-success-bg text-success',
-        label: 'Success',
-      };
-    case 'running':
-      return {
-        icon: <Loader2 size={14} className="animate-spin text-info" />,
-        badge: 'bg-info-bg text-info',
-        label: 'Running',
-      };
-    case 'failed':
-    case 'error':
-      return {
-        icon: <XCircle size={14} className="text-error" />,
-        badge: 'bg-error-bg text-error',
-        label: 'Failed',
-      };
-    default:
-      return {
-        icon: <Clock size={14} className="text-text-tertiary" />,
-        badge: 'bg-bg text-text-tertiary',
-        label: status || 'Pending',
-      };
+    case 'ended_success': case 'completed': return 'success';
+    case 'started': case 'running': return 'running';
+    case 'ended_warning': return 'warning';
+    case 'ended_error': case 'failed': case 'error': return 'error';
+    default: return 'running';
   }
 }
 
-// Check if a step is "done" (for counter)
+function getStepStyle(status) {
+  switch (status) {
+    case 'ended_success': case 'completed':
+      return { icon: <CheckCircle2 size={14} className="text-success" />, badge: 'bg-success-bg text-success', label: 'Success' };
+    case 'started': case 'running':
+      return { icon: <Loader2 size={14} className="animate-spin text-info" />, badge: 'bg-info-bg text-info', label: 'In Progress' };
+    case 'ended_warning':
+      return { icon: <AlertCircle size={14} className="text-warning" />, badge: 'bg-warning-bg text-warning', label: 'Warning' };
+    case 'ended_error': case 'failed': case 'error':
+      return { icon: <XCircle size={14} className="text-error" />, badge: 'bg-error-bg text-error', label: 'Error' };
+    default:
+      return { icon: <Clock size={14} className="text-text-tertiary" />, badge: 'bg-bg text-text-tertiary', label: status || 'Pending' };
+  }
+}
+
 function isStepDone(status) {
   return status === 'ended_success' || status === 'ended_warning' || status === 'completed';
 }
 
-function StepRow({ step }) {
+function highlightMatch(text, query) {
+  if (!query || !text) return text;
+  const idx = text.toLowerCase().indexOf(query.toLowerCase());
+  if (idx === -1) return text;
+  return (
+    <>
+      {text.slice(0, idx)}
+      <mark className="bg-db-red-100 text-db-red rounded px-0.5">{text.slice(idx, idx + query.length)}</mark>
+      {text.slice(idx + query.length)}
+    </>
+  );
+}
+
+function StepRow({ step, searchQuery }) {
   const style = getStepStyle(step.status);
+  const [expanded, setExpanded] = useState(false);
+  const hasDetails = step.message || step.sub_step_name || (step.result_json && Object.keys(step.result_json).length > 0);
 
   return (
-    <div className="flex items-center gap-3 px-4 py-2.5 hover:bg-bg-subtle transition-smooth">
-      {style.icon}
-      <div className="flex-1 min-w-0">
-        <div className="text-sm text-text-primary font-medium truncate">
-          {step.step_name || step.sub_step_name || 'Step'}
+    <div className="hover:bg-bg-subtle/50 transition-smooth">
+      <div
+        className="flex items-center gap-3 px-4 py-2.5 cursor-pointer"
+        onClick={() => hasDetails && setExpanded(!expanded)}
+      >
+        {style.icon}
+        <div className="flex-1 min-w-0">
+          <div className="text-sm text-text-primary font-medium truncate">
+            {highlightMatch(step.step_name || step.sub_step_name || 'Step', searchQuery)}
+          </div>
+          {step.message && !expanded && (
+            <p className="text-[11px] text-text-tertiary mt-0.5 truncate">
+              {highlightMatch(step.message, searchQuery)}
+            </p>
+          )}
         </div>
-        {step.message && (
-          <p className="text-xs text-text-tertiary mt-0.5 truncate">
-            {step.message}
-          </p>
-        )}
-      </div>
-      <div className="flex items-center gap-3 shrink-0">
-        {step.progress_increment > 0 && (
-          <span className="text-xs font-mono text-text-tertiary">
-            +{step.progress_increment}%
+        <div className="flex items-center gap-2.5 shrink-0">
+          {step.progress_increment > 0 && (
+            <span className="text-[11px] font-mono text-text-tertiary bg-bg-subtle px-1.5 py-0.5 rounded">
+              +{step.progress_increment}%
+            </span>
+          )}
+          <span className={`text-[11px] font-medium px-2 py-0.5 rounded-full ${style.badge}`}>
+            {style.label}
           </span>
-        )}
-        <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${style.badge}`}>
-          {style.label}
-        </span>
+          {hasDetails && (
+            <ChevronDown size={12} className={`text-text-tertiary transition-transform duration-200 ${expanded ? 'rotate-180' : ''}`} />
+          )}
+        </div>
       </div>
+
+      {/* Expanded details */}
+      {expanded && hasDetails && (
+        <div className="px-4 pb-3 pl-11 space-y-1.5">
+          {step.sub_step_name && (
+            <p className="text-xs text-text-secondary">
+              <span className="text-text-tertiary">Sub-step:</span> {step.sub_step_name}
+            </p>
+          )}
+          {step.message && (
+            <p className="text-xs text-text-secondary bg-bg-subtle rounded-lg p-2.5 font-mono leading-relaxed">
+              {step.message}
+            </p>
+          )}
+          {step.result_json && Object.keys(step.result_json).length > 0 && (
+            <details className="text-xs">
+              <summary className="text-text-tertiary cursor-pointer hover:text-text-secondary">Result JSON</summary>
+              <pre className="text-[10px] text-text-secondary bg-bg-subtle rounded-lg p-2.5 mt-1 overflow-x-auto max-h-32 font-mono">
+                {JSON.stringify(step.result_json, null, 2)}
+              </pre>
+            </details>
+          )}
+        </div>
+      )}
     </div>
   );
 }

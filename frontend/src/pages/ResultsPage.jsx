@@ -15,6 +15,9 @@ import {
   RefreshCw,
   Calendar,
   Building2,
+  Layers,
+  Sparkles,
+  CheckCircle2,
 } from 'lucide-react';
 
 /* ── Priority sort order ── */
@@ -64,7 +67,7 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
 
   const apiFetch = useCallback(
     async (url) => {
-      const headers = { Authorization: `Bearer ${token}` };
+      const headers = { Authorization: `Bearer ${token}`, 'X-DB-PAT-Token': token };
       if (databricksHost) headers['X-Databricks-Host'] = databricksHost;
       const resp = await fetch(url, { headers });
       if (!resp.ok) throw new Error(`${resp.status}`);
@@ -225,25 +228,56 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
     URL.revokeObjectURL(url);
   };
 
+  // Compute domain counts for sidebar
+  const domainCounts = {};
+  for (const uc of allUseCases) {
+    const d = uc?._domain || 'Unknown';
+    domainCounts[d] = (domainCounts[d] || 0) + 1;
+  }
+
+  const hasActiveFilters = searchQuery || filterDomain !== 'all' || filterPriority !== 'all' || filterType !== 'all';
+
   return (
-    <div>
+    <div className="max-w-7xl mx-auto px-6 py-8">
       {/* Page header */}
       <div className="flex items-center justify-between mb-6">
-        <div>
-          <h1 className="text-2xl font-bold text-text-primary">Results</h1>
-          <p className="text-sm text-text-secondary mt-1">
-            Explore your AI-generated data strategy.
-          </p>
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-db-red to-db-red-hover flex items-center justify-center shadow-sm">
+            <Sparkles size={20} className="text-white" />
+          </div>
+          <div>
+            <h1 className="text-2xl font-bold text-text-primary">Results</h1>
+            <p className="text-sm text-text-secondary">
+              Explore your AI-generated data strategy.
+            </p>
+          </div>
         </div>
-        {filteredUseCases.length > 0 && (
-          <button
-            onClick={handleExport}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm text-text-secondary border border-border rounded-md hover:bg-bg-subtle transition-smooth"
-          >
-            <Download size={14} />
-            Export JSON
-          </button>
-        )}
+        <div className="flex items-center gap-2">
+          {results && (
+            <button
+              onClick={() => {
+                setResults(null);
+                setError('');
+                setExpandedUseCase(null);
+                setSelectedSessionId(null);
+                setSessionsLoaded(false);
+              }}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm text-text-tertiary border border-border rounded-lg hover:bg-bg-subtle transition-smooth"
+            >
+              <RefreshCw size={12} />
+              Change Session
+            </button>
+          )}
+          {filteredUseCases.length > 0 && (
+            <button
+              onClick={handleExport}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm text-text-secondary border border-border rounded-lg hover:bg-bg-subtle hover:shadow-sm transition-smooth"
+            >
+              <Download size={14} />
+              Export JSON
+            </button>
+          )}
+        </div>
       </div>
 
       {/* ═══ Source Picker — shown when no results loaded ═══ */}
@@ -433,24 +467,24 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
       {results && (
         <>
           {/* Executive summary */}
-          <div className="bg-surface border border-border rounded-lg overflow-hidden mb-6">
-            <div className="flex items-center gap-3 px-5 py-3 border-b border-border bg-panel">
-              <div className="w-7 h-7 rounded-full bg-warning flex items-center justify-center">
+          <div className="bg-surface border border-border rounded-xl overflow-hidden mb-6 shadow-sm">
+            <div className="flex items-center gap-3 px-5 py-3 border-b border-border bg-gradient-to-r from-db-red-50 to-surface">
+              <div className="w-7 h-7 rounded-lg bg-db-red flex items-center justify-center">
                 <Target size={14} className="text-white" />
               </div>
-              <h2 className="text-sm font-semibold text-text-primary">
-                {typeof results.title === 'string' ? results.title : 'Use Cases Catalog'}
+              <h2 className="text-sm font-bold text-text-primary">
+                {typeof results.title === 'string' ? results.title.replace(/<[^>]*>/g, '') : 'Use Cases Catalog'}
               </h2>
             </div>
             <div className="px-5 py-4">
               {typeof results.executive_summary === 'string' && results.executive_summary && (
                 <p className="text-sm text-text-secondary leading-relaxed whitespace-pre-wrap">
-                  {results.executive_summary}
+                  {results.executive_summary.replace(/<[^>]*>/g, ' ').replace(/\s{2,}/g, ' ').trim()}
                 </p>
               )}
               {typeof results.domains_summary === 'string' && results.domains_summary && (
                 <p className="text-xs text-text-tertiary mt-3 border-t border-border pt-3">
-                  {results.domains_summary}
+                  {results.domains_summary.replace(/<[^>]*>/g, ' ').replace(/\s{2,}/g, ' ').trim()}
                 </p>
               )}
             </div>
@@ -458,143 +492,246 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
 
           {/* Stats */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
-            <StatCard
-              label="Domains"
-              value={results.domains?.length || domains.length}
-              icon={Building2}
-            />
-            <StatCard
-              label="Use Cases"
-              value={allUseCases.length}
-              icon={FileText}
-            />
+            <StatCard label="Domains" value={results.domains?.length || domains.length} icon={Building2} />
+            <StatCard label="Use Cases" value={allUseCases.length} icon={FileText} />
             <StatCard
               label="High Priority"
-              value={
-                allUseCases.filter((uc) =>
-                  ['Ultra High', 'Very High', 'High'].includes(String(uc?.Priority || ''))
-                ).length
-              }
+              value={allUseCases.filter((uc) => ['Ultra High', 'Very High', 'High'].includes(String(uc?.Priority || ''))).length}
               icon={Target}
             />
             <StatCard
               label="With SQL"
-              value={
-                allUseCases.filter(
-                  (uc) => uc.SQL && typeof uc.SQL === 'string' && !uc.SQL.startsWith('--')
-                ).length
-              }
+              value={allUseCases.filter((uc) => uc.SQL && typeof uc.SQL === 'string' && !uc.SQL.startsWith('--')).length}
               icon={Code}
             />
           </div>
 
-          {/* Filters & sort */}
-          <div className="bg-surface border border-border rounded-lg p-4 mb-6">
-            <div className="flex items-center gap-3 flex-wrap">
-              {/* Search */}
-              <div className="relative flex-1 min-w-[200px]">
-                <Search
-                  size={14}
-                  className="absolute left-3 top-1/2 -translate-y-1/2 text-text-tertiary"
-                />
-                <input
-                  type="text"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Search use cases..."
-                  className="w-full pl-9 pr-3 py-2 text-sm border border-border rounded-md bg-surface text-text-primary placeholder:text-text-tertiary glow-focus transition-smooth"
-                />
+          {/* ═══ Two-Column: Domain Sidebar + Use Cases ═══ */}
+          <div className="flex gap-4">
+            {/* ── Left Sidebar: Domains ── */}
+            <div className="w-56 shrink-0">
+              <div className="bg-surface border border-border rounded-xl shadow-sm overflow-hidden sticky top-6">
+                {/* Sidebar header */}
+                <div className="px-4 py-3 border-b border-border bg-gradient-to-b from-db-red-50 to-surface">
+                  <div className="flex items-center gap-2">
+                    <Layers size={14} className="text-db-red" />
+                    <span className="text-xs font-bold text-text-primary">Domains</span>
+                  </div>
+                  <p className="text-[10px] text-text-tertiary mt-0.5">
+                    {domains.length} domain{domains.length !== 1 ? 's' : ''} &middot; {allUseCases.length} use cases
+                  </p>
+                </div>
+
+                {/* Domain list */}
+                <div className="p-1.5 space-y-0.5 max-h-[65vh] overflow-y-auto">
+                  {/* All domains */}
+                  <button
+                    onClick={() => setFilterDomain('all')}
+                    className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-left transition-smooth ${
+                      filterDomain === 'all'
+                        ? 'bg-db-red-50 border border-db-red/20'
+                        : 'hover:bg-bg-subtle border border-transparent'
+                    }`}
+                  >
+                    <div className={`w-5 h-5 rounded-full flex items-center justify-center shrink-0 ${
+                      filterDomain === 'all' ? 'bg-db-red/10' : 'bg-bg-subtle'
+                    }`}>
+                      <Layers size={10} className={filterDomain === 'all' ? 'text-db-red' : 'text-text-tertiary'} />
+                    </div>
+                    <span className={`text-[11px] font-semibold flex-1 ${
+                      filterDomain === 'all' ? 'text-db-red' : 'text-text-primary'
+                    }`}>
+                      All Domains
+                    </span>
+                    <span className={`text-[10px] font-mono ${filterDomain === 'all' ? 'text-db-red' : 'text-text-tertiary'}`}>
+                      {allUseCases.length}
+                    </span>
+                  </button>
+
+                  {/* Individual domains */}
+                  {domains.map((d) => {
+                    const count = domainCounts[d] || 0;
+                    const active = filterDomain === d;
+                    const highPriCount = allUseCases.filter(
+                      (uc) => uc._domain === d && ['Ultra High', 'Very High', 'High'].includes(String(uc?.Priority || ''))
+                    ).length;
+
+                    return (
+                      <button
+                        key={d}
+                        onClick={() => setFilterDomain(active ? 'all' : d)}
+                        className={`w-full flex items-start gap-2.5 px-3 py-2.5 rounded-lg text-left transition-smooth ${
+                          active
+                            ? 'bg-db-red-50 border border-db-red/20'
+                            : 'hover:bg-bg-subtle border border-transparent'
+                        }`}
+                      >
+                        <div className={`w-5 h-5 rounded-full flex items-center justify-center shrink-0 mt-0.5 ${
+                          active ? 'bg-db-red/10' : 'bg-bg-subtle'
+                        }`}>
+                          <Building2 size={10} className={active ? 'text-db-red' : 'text-text-tertiary'} />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <span className={`text-[11px] font-semibold block truncate ${
+                            active ? 'text-db-red' : 'text-text-primary'
+                          }`}>
+                            {d}
+                          </span>
+                          <div className="flex items-center gap-2 mt-1">
+                            <span className="text-[9px] text-text-tertiary font-mono">{count} use case{count !== 1 ? 's' : ''}</span>
+                            {highPriCount > 0 && (
+                              <span className="text-[9px] text-db-red font-medium">{highPriCount} high pri</span>
+                            )}
+                          </div>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+
+            {/* ── Right Panel: Filters + Use Case Cards ── */}
+            <div className="flex-1 min-w-0">
+              {/* Filter toolbar */}
+              <div className="bg-surface border border-border rounded-xl mb-4 shadow-sm overflow-hidden">
+                <div className="flex items-center gap-3 px-4 py-3">
+                  {/* Search */}
+                  <div className="relative flex-1">
+                    <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-tertiary" />
+                    <input
+                      type="text"
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      placeholder="Search use cases..."
+                      className="w-full pl-9 pr-3 py-1.5 text-xs border border-border rounded-lg bg-bg text-text-primary placeholder:text-text-tertiary focus:outline-none focus:border-db-red/30 focus:ring-1 focus:ring-db-red/20 transition-smooth"
+                    />
+                  </div>
+
+                  {/* Priority pills */}
+                  {priorities.length > 0 && (
+                    <div className="flex items-center gap-1">
+                      {PRIORITY_ORDER.filter((p) => priorities.includes(p)).map((p) => {
+                        const active = filterPriority === p;
+                        const cnt = allUseCases.filter((uc) => uc.Priority === p).length;
+                        return (
+                          <button
+                            key={p}
+                            onClick={() => setFilterPriority(active ? 'all' : p)}
+                            className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-medium transition-smooth border ${
+                              active
+                                ? 'border-db-red/30 bg-db-red-50 text-db-red'
+                                : 'border-transparent text-text-secondary hover:bg-bg-subtle'
+                            }`}
+                          >
+                            {p.replace('Ultra ', 'U-').replace('Very ', 'V-')}
+                            <span className={`font-mono ${active ? 'text-db-red' : 'text-text-tertiary'}`}>{cnt}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {/* Type filter */}
+                  {types.length > 0 && (
+                    <select
+                      value={filterType}
+                      onChange={(e) => setFilterType(e.target.value)}
+                      className="px-2 py-1.5 text-[11px] border border-border rounded-lg bg-bg text-text-primary focus:outline-none focus:border-db-red/30 transition-smooth"
+                    >
+                      <option value="all">All Types</option>
+                      {types.map((t) => (
+                        <option key={t} value={t}>{TYPE_ICONS[t] || ''} {t}</option>
+                      ))}
+                    </select>
+                  )}
+
+                  {/* Sort */}
+                  <select
+                    value={sortBy}
+                    onChange={(e) => setSortBy(e.target.value)}
+                    className="px-2 py-1.5 text-[11px] border border-border rounded-lg bg-bg text-text-primary focus:outline-none focus:border-db-red/30 transition-smooth"
+                  >
+                    <option value="priority">Sort: Priority</option>
+                    <option value="domain">Sort: Domain</option>
+                    <option value="name">Sort: Name</option>
+                  </select>
+
+                  {hasActiveFilters && (
+                    <button
+                      onClick={() => { setSearchQuery(''); setFilterDomain('all'); setFilterPriority('all'); setFilterType('all'); }}
+                      className="text-[11px] text-db-red hover:underline font-medium shrink-0"
+                    >
+                      Clear
+                    </button>
+                  )}
+                </div>
+
+                {/* Active filter chips */}
+                {hasActiveFilters && (
+                  <div className="px-4 py-2 bg-db-red-50/50 border-t border-border flex items-center gap-2 flex-wrap">
+                    <Filter size={12} className="text-db-red shrink-0" />
+                    <span className="text-[11px] text-text-secondary">
+                      <span className="font-semibold text-text-primary">{filteredUseCases.length}</span> of{' '}
+                      <span className="font-semibold text-text-primary">{allUseCases.length}</span> use cases
+                    </span>
+                    {filterDomain !== 'all' && (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-db-red-50 text-db-red text-[10px] font-medium border border-db-red/20">
+                        {filterDomain}
+                        <button onClick={() => setFilterDomain('all')} className="hover:text-db-red-hover">&times;</button>
+                      </span>
+                    )}
+                    {filterPriority !== 'all' && (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-db-red-50 text-db-red text-[10px] font-medium border border-db-red/20">
+                        {filterPriority}
+                        <button onClick={() => setFilterPriority('all')} className="hover:text-db-red-hover">&times;</button>
+                      </span>
+                    )}
+                    {filterType !== 'all' && (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-db-red-50 text-db-red text-[10px] font-medium border border-db-red/20">
+                        {filterType}
+                        <button onClick={() => setFilterType('all')} className="hover:text-db-red-hover">&times;</button>
+                      </span>
+                    )}
+                    {searchQuery && (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-db-red-50 text-db-red text-[10px] font-medium border border-db-red/20">
+                        "{searchQuery}"
+                        <button onClick={() => setSearchQuery('')} className="hover:text-db-red-hover">&times;</button>
+                      </span>
+                    )}
+                  </div>
+                )}
               </div>
 
-              {/* Domain filter */}
-              {domains.length > 0 && (
-                <GlowFilterSelect
-                  value={filterDomain}
-                  onChange={setFilterDomain}
-                  options={domains}
-                  label="All Domains"
-                />
-              )}
-
-              {/* Priority filter */}
-              {priorities.length > 0 && (
-                <GlowFilterSelect
-                  value={filterPriority}
-                  onChange={setFilterPriority}
-                  options={priorities}
-                  label="All Priorities"
-                />
-              )}
-
-              {/* Type filter */}
-              {types.length > 0 && (
-                <GlowFilterSelect
-                  value={filterType}
-                  onChange={setFilterType}
-                  options={types}
-                  label="All Types"
-                />
-              )}
-
-              {/* Sort */}
-              <GlowFilterSelect
-                value={sortBy}
-                onChange={setSortBy}
-                options={['priority', 'domain', 'name']}
-                label="Sort by"
-                isSort
-              />
+              {/* Use case cards */}
+              {filteredUseCases.length > 0 ? (
+                <div className="space-y-3">
+                  {filteredUseCases.map((uc, idx) => (
+                    <UseCaseCard
+                      key={uc.No || idx}
+                      uc={uc}
+                      index={idx}
+                      expanded={expandedUseCase === (uc.No || idx)}
+                      onToggle={() =>
+                        setExpandedUseCase(expandedUseCase === (uc.No || idx) ? null : uc.No || idx)
+                      }
+                      resolveTable={resolveTable}
+                    />
+                  ))}
+                </div>
+              ) : allUseCases.length > 0 ? (
+                <div className="bg-surface border border-border rounded-xl p-10 text-center shadow-sm">
+                  <Search size={20} className="text-text-tertiary mx-auto mb-3" />
+                  <p className="text-sm text-text-secondary">No use cases match your filters.</p>
+                  <button
+                    onClick={() => { setSearchQuery(''); setFilterDomain('all'); setFilterPriority('all'); setFilterType('all'); }}
+                    className="text-xs text-db-red hover:underline mt-2 font-medium"
+                  >
+                    Clear all filters
+                  </button>
+                </div>
+              ) : null}
             </div>
-            <p className="text-[10px] text-text-tertiary mt-2">
-              {filteredUseCases.length} of {allUseCases.length} use cases
-            </p>
-          </div>
-
-          {/* Use case cards */}
-          {filteredUseCases.length > 0 ? (
-            <div className="space-y-3">
-              {filteredUseCases.map((uc, idx) => (
-                <UseCaseCard
-                  key={uc.No || idx}
-                  uc={uc}
-                  index={idx}
-                  expanded={expandedUseCase === (uc.No || idx)}
-                  onToggle={() =>
-                    setExpandedUseCase(
-                      expandedUseCase === (uc.No || idx) ? null : uc.No || idx
-                    )
-                  }
-                  resolveTable={resolveTable}
-                />
-              ))}
-            </div>
-          ) : allUseCases.length > 0 ? (
-            <div className="bg-surface border border-border rounded-lg p-12 text-center">
-              <Search
-                size={24}
-                className="text-text-tertiary mx-auto mb-3"
-              />
-              <p className="text-sm text-text-secondary">
-                No use cases match your filters.
-              </p>
-            </div>
-          ) : null}
-
-          {/* Load different session */}
-          <div className="flex justify-center mt-6">
-            <button
-              onClick={() => {
-                setResults(null);
-                setError('');
-                setExpandedUseCase(null);
-                setSelectedSessionId(null);
-                setSessionsLoaded(false);
-              }}
-              className="text-xs text-text-tertiary hover:text-db-red flex items-center gap-1 transition-smooth"
-            >
-              <RefreshCw size={11} />
-              Load Different Session
-            </button>
           </div>
         </>
       )}
@@ -649,25 +786,26 @@ function UseCaseCard({ uc, index, expanded, onToggle, resolveTable }) {
   if (!uc || typeof uc !== 'object') return null;
 
   const s = (v) => (v == null ? '' : String(v));      // safe-string helper
+  const stripHtml = (v) => (v == null ? '' : String(v).replace(/<[^>]*>/g, ' ').replace(/\s{2,}/g, ' ').trim());
 
   const title =
     s(uc.Name) || s(uc.use_case_name) || s(uc.name) || s(uc.title) || `Use Case ${index + 1}`;
-  const statement = s(uc.Statement || uc.description || uc.problem_statement);
+  const statement = stripHtml(uc.Statement || uc.description || uc.problem_statement);
   const domain = s(uc._domain || uc['Business Domain'] || uc.domain);
   const subdomain = s(uc.Subdomain);
   const ucType = s(uc.type);
   const technique = s(uc['Analytics Technique']);
   const priority = s(uc.Priority || uc.priority);
   const quality = s(uc.Quality);
-  const solution = s(uc.Solution || uc.solution);
-  const businessValue = s(uc['Business Value'] || uc.business_impact);
+  const solution = stripHtml(uc.Solution || uc.solution);
+  const businessValue = stripHtml(uc['Business Value'] || uc.business_impact);
   const beneficiary = s(uc.Beneficiary);
   const sponsor = s(uc.Sponsor);
   const alignment = s(uc['Business Priority Alignment']);
   const rawSql = uc.SQL || uc.sql || uc.sql_query || '';
   const sql = typeof rawSql === 'string' ? rawSql : String(rawSql);
   const resultTable = s(uc.result_table);
-  const technicalDesign = s(uc['Technical Design']);
+  const technicalDesign = stripHtml(uc['Technical Design']);
   const tablesInvolved = s(uc['Tables Involved']);
   const typeIcon = TYPE_ICONS[ucType] || '📋';
 

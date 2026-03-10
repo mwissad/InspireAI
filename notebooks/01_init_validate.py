@@ -1,7 +1,7 @@
 # Databricks notebook source
 # MAGIC %md
 # # Step 1: Initialize & Validate
-# Reads widget values, validates all inputs, persists config, and launches the pipeline.
+# Reads widget values, validates all inputs, and persists configuration for downstream tasks.
 
 # COMMAND ----------
 
@@ -27,8 +27,7 @@ def create_widgets():
     10- SQL Generation Per Domain
     11- Generation Path
     12- Documents Languages
-    13- AI Model
-    14- Inspire Session ID
+    13- Inspire Session ID
     """
     
     log_print("Creating widgets (retaining existing values)...")
@@ -122,8 +121,6 @@ def create_widgets():
             "Sample Results",
             "PDF Catalog",
             "Presentation",
-            "dashboards",
-            "Unstructured Data Usecases"
         ]
         dbutils.widgets.multiselect(
             "09_generation_options", 
@@ -165,15 +162,9 @@ def create_widgets():
     except Exception as e:
         widget_errors.append(f"Documents Languages: {e}")
     
-    # --- 13. AI Model (model endpoint for ai_query in generated SQL) ---
+    # --- 13. Inspire Session ID (optional - auto-generated if empty) ---
     try:
-        dbutils.widgets.text("13_ai_model", "databricks-gpt-oss-120b", "14. AI Model")
-    except Exception as e:
-        widget_errors.append(f"AI Model: {e}")
-    
-    # --- 14. Inspire Session ID (optional - auto-generated if empty) ---
-    try:
-        dbutils.widgets.text("14_session_id", "", "15. Inspire Session ID")
+        dbutils.widgets.text("14_session_id", "", "14. Inspire Session ID")
     except Exception as e:
         widget_errors.append(f"Inspire Session ID: {e}")
     
@@ -244,21 +235,14 @@ TOKEN_TO_CHAR_RATIO_NON_ENGLISH = 2
 
 # COMMAND ----------
 
-# ─── Run main ───
+# ─── Read & validate widget values, then save config ───
 create_widgets()
 
 def main():
-    """
-    Main function to read widget values, validate inputs,
-    and run the DatabricksInspire class.
-    
-    *** IMPORTANT ***
-    Run the `create_widgets()` cell first and fill in the UI values
-    BEFORE running this main() function.
-    """
-    
+
     print_ascii_banner()
 
+    # --- Read all widget values ---
     # --- 1. Get Widget Values ---
     
     # --- Business Name ---
@@ -343,11 +327,7 @@ def main():
     generate_options_list = [opt.strip() for opt in generate_str.split(',') if opt.strip()]
     
     # Extract special options from generation options
-    use_unstructured_data = "Unstructured Data Usecases" in generate_options_list
     technical_exclusion_strategy = "Aggressive"
-    
-    # Set use_unstructured_data_str based on Unstructured Data Usecases selection
-    use_unstructured_data_str = "yes" if use_unstructured_data else "no"
 
     # --- SQL Generation Per Domain ---
     try:
@@ -363,11 +343,6 @@ def main():
     # --- Documents Languages (multiselect) ---
     output_language_str = dbutils.widgets.get("12_documents_languages") 
     
-    # --- AI Model (model endpoint for ai_query in generated SQL) ---
-    sql_model_serving = dbutils.widgets.get("13_ai_model")
-    if not sql_model_serving or not sql_model_serving.strip():
-        sql_model_serving = "databricks-gpt-oss-120b"
-
     # --- Inspire Session ID (optional - auto-generated if empty) ---
     user_session_id = dbutils.widgets.get("14_session_id").strip()
 
@@ -501,41 +476,13 @@ def main():
         log_print(f"✅ SQL Generation Per Domain: {sql_generation_per_domain}")
     log_print(f"ℹ️ SQL Code Generation: {'Enabled' if generate_sql_code else 'DISABLED (notebooks will have placeholder SQL)'}")
     log_print(f"ℹ️ Sample Results: {'Enabled (SQL will be executed and samples generated)' if generate_sample_result else 'Disabled'}")
-    log_print(f"ℹ️ Unstructured Data Usecases: {'Enabled' if use_unstructured_data else 'Disabled'}")
     log_print("ℹ️ Technical table filtering: Aggressive (mandatory)")
-    if generate_sql_code:
-        log_print(f"✅ AI Model: '{sql_model_serving}' (for ai_query in generated SQL)")
     
     if user_session_id:
         log_print(f"✅ Inspire Session ID: '{user_session_id}' (user-provided)")
     else:
-        log_print(f"ℹ️ Inspire Session ID: Not provided (will be auto-generated)")
-    
-    if validation_errors:
-        import sys as _sys
-        error_count = len(validation_errors)
-        error_summary = "\n".join(validation_errors)
-        
-        log_print("=" * 80, level="ERROR")
-        log_print(f"❌ VALIDATION FAILED - {error_count} ERROR(S) FOUND:", level="ERROR")
-        log_print("=" * 80, level="ERROR")
-        for error in validation_errors:
-            log_print(error, level="ERROR")
-        log_print("=" * 80, level="ERROR")
-        
-        print(f"\n{'='*80}\n❌ VALIDATION ERRORS ({error_count}):\n{error_summary}\n{'='*80}\n", file=_sys.stderr, flush=True)
-        _sys.stdout.flush()
-        _sys.stderr.flush()
-        
-        exit_msg = f"Validation failed with {error_count} error(s):\n{error_summary}"
-        dbutils.notebook.exit(exit_msg)
-    
-    log_print("=" * 80)
-    log_print("✅ ALL VALIDATIONS PASSED - Starting generation...")
-    log_print("=" * 80)
 
-    # --- 3. Pack values and Run ---
-    
+    # --- Build config dict from validated widget values ---
     widget_values = {
         "business": business_name,
         "inspire_database": inspire_database,
@@ -551,35 +498,19 @@ def main():
         "generate": generate_str,
         "generation_path": generation_path,
         "output_language": output_language_str,
-        "use_unstructured_data": use_unstructured_data_str,
         "sql_generation_per_domain": sql_generation_per_domain,
         "technical_exclusion_strategy": technical_exclusion_strategy,
-        "sql_model_serving": sql_model_serving,
         "json_file_path": json_file_path,
-        "session_id": user_session_id
+        "session_id": user_session_id,
     }
 
-    inspirer = None
-    try:
-        inspirer = DatabricksInspire(**widget_values)
-        inspirer.run()
-        inspirer.finalize_atomic_writer(success=True)
-    except NameError as ne:
-        if inspirer:
-            inspirer.finalize_atomic_writer(success=False, error_message=str(ne))
-        if ('DataLoader' in str(ne) or 'AIAgent' in str(ne) or 
-            'PROMPT_TEMPLATES' in str(ne) or 'DatabricksInspire' in str(ne) or 
-            'setup_logging' in str(ne) or 'TranslationService' in str(ne)):
-            
-            print(f"ERROR: A required class, function, or variable is missing: {ne}", file=sys.stderr)
-            print("Please ensure `setup_logging`, `DataLoader`, `AIAgent`, `PROMPT_TEMPLATES`, `TranslationService`, and `DatabricksInspire` are defined in preceding cells.", file=sys.stderr)
-        else:
-            raise
-    except Exception as e:
-        if inspirer:
-            inspirer.finalize_atomic_writer(success=False, error_message=str(e))
-        print(f"An unexpected error occurred: {e}", file=sys.stderr)
-        logging.getLogger("main").critical("Main execution failed")
+    # --- Save validated config to pipeline state ---
+    pipeline_state = PipelineState(spark, inspire_database)
+    pipeline_state.ensure_table()
+    pipeline_state.save("config", widget_values)
+    
+    log_print("✅ Configuration validated and saved. Ready for next phase.")
+    dbutils.notebook.exit(json.dumps({"status": "success", "inspire_database": inspire_database}))
 
 main()
 

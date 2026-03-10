@@ -6,6 +6,22 @@ Inspire AI scans your Unity Catalog tables, understands their structure and rela
 
 ---
 
+## App Preview
+
+### Landing Page — 3D animated hero with Databricks branding
+![Landing Page](docs/screenshots/01_landing.png)
+
+### Configure — Connect to any Databricks workspace
+![Configure](docs/screenshots/02_configure.png)
+
+### Launch — Set up pipeline parameters and run
+![Launch](docs/screenshots/03_launch.png)
+
+### Results — Explore generated use cases with domain filtering
+![Results](docs/screenshots/04_results.png)
+
+---
+
 ## Architecture
 
 ```
@@ -32,72 +48,44 @@ Inspire AI scans your Unity Catalog tables, understands their structure and rela
 
 ## Deploy as a Databricks App
 
-### 1. Prerequisites
+> For the full step-by-step deployment guide with troubleshooting, see **[DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md)**.
 
-| Requirement | Version |
-|-------------|---------|
-| Node.js | 18+ |
-| npm | 9+ |
-| Databricks workspace | with Unity Catalog enabled |
-| Databricks CLI (optional) | v0.200+ |
-
-### 2. Clone & Install
+### Quick Start
 
 ```bash
-git clone <this-repo-url>
+# 1. Clone & checkout
+git clone https://github.com/mwissad/InspireApp.git
 cd InspireApp
-npm run install:all
+git checkout v43_final
+
+# 2. Build frontend
+cd frontend && npm install && npx vite build && cd ..
+
+# 3. Configure Databricks CLI
+export DATABRICKS_HOST="https://<your-workspace>.azuredatabricks.net"
+export DATABRICKS_TOKEN="dapi..."
+
+# 4. Create app
+databricks apps create inspire-ai --description "Inspire AI - Data Strategy Copilot"
+
+# 5. Prepare deployment
+mkdir -p /tmp/inspire-deploy/backend /tmp/inspire-deploy/frontend/dist
+cp backend/server.js backend/package.json backend/package-lock.json backend/dbc_bundle.js /tmp/inspire-deploy/backend/
+cp -r frontend/dist/* /tmp/inspire-deploy/frontend/dist/
+cp app.yaml start.sh /tmp/inspire-deploy/
+
+# 6. Upload & deploy
+databricks workspace import-dir /tmp/inspire-deploy "/Workspace/Users/<your-email>/inspire-ai" --overwrite
+databricks apps deploy inspire-ai --source-code-path "/Workspace/Users/<your-email>/inspire-ai"
 ```
 
-### 3. Build the frontend
+Your app will be available at: `https://inspire-ai-<workspace-id>.<region>.databricksapps.com`
+
+### Run Locally (Development)
 
 ```bash
-npm run build
-```
-
-This outputs static assets to `frontend/dist/`, which the backend serves automatically.
-
-### 4. Configure
-
-Copy the example environment file and fill in your workspace URL:
-
-```bash
-cp .env.example backend/.env
-```
-
-Edit `backend/.env`:
-
-```env
-DATABRICKS_HOST=https://adb-xxxxxxxxxxxx.xx.azuredatabricks.net
-```
-
-> **Note:** When deployed as a Databricks App, `DATABRICKS_HOST` and `DATABRICKS_TOKEN` are injected automatically by the runtime — no `.env` file needed.
-
-### 5. Deploy as Databricks App
-
-Using Databricks CLI:
-
-```bash
-databricks apps deploy inspire-ai --source-code-path .
-```
-
-Or deploy via the Databricks workspace UI:
-1. Navigate to **Compute → Apps**
-2. Click **Create App**
-3. Point to this repo (or upload the code)
-4. The `app.yaml` configures everything automatically
-
-The app will:
-- Install dependencies (if needed)
-- Build the frontend (if not already built)
-- Start the Express server on port `8080`
-
-### 6. Run locally (development)
-
-```bash
-# Copy and configure env
-cp .env.example backend/.env
-# Edit backend/.env with your DATABRICKS_HOST
+# Install dependencies
+cd frontend && npm install && cd ../backend && npm install && cd ..
 
 # Start both servers
 npm run dev
@@ -108,47 +96,65 @@ npm run dev
 
 ---
 
+## How to Use
+
+### Step 1: Configure
+1. Enter the **customer workspace URL** and **PAT token**
+2. Click **Test Connection** to verify
+3. Select a **SQL Warehouse**
+4. Click **Publish** to deploy the Inspire notebook to the workspace
+
+### Step 2: Launch
+1. Enter the **Business Name** (e.g. "Acme Corp")
+2. Select **catalogs and schemas** to analyze from Unity Catalog
+3. Set the **Inspire Database** (e.g. `main._inspire`) — where sessions and results are stored
+4. Choose **Generation Options** (SQL Code, Sample Results, PDF, Presentation)
+5. Click **Launch Inspire AI**
+
+### Step 3: Monitor
+- Track real-time pipeline progress with stage filtering
+- View step details, search, and filter by status
+- Auto-scrolls to the latest step
+
+### Step 4: Results
+- Browse generated use cases by **domain**, **priority**, and **type**
+- Expand cards for problem statements, solutions, SQL, and business value
+- **Export JSON** for downstream use
+
+> **First run note**: If upgrading from v41, drop existing tables first:
+> ```sql
+> DROP TABLE IF EXISTS <catalog>.<schema>.__inspire_session;
+> DROP TABLE IF EXISTS <catalog>.<schema>.__inspire_step;
+> ```
+
+---
+
+## Features
+
+| Feature | Description |
+|---------|-------------|
+| **3D Landing Page** | Three.js animated hero with Databricks red cubes and particles |
+| **Multi-workspace** | Connect to any customer workspace via PAT — no redeployment needed |
+| **Embedded Notebook** | DBC file bundled in the app — one-click publish to any workspace |
+| **Real-time Monitoring** | Live step tracking with stage sidebar, status pills, and search |
+| **Domain Filtering** | Left sidebar for domain-based filtering on Monitor and Results pages |
+| **Priority Sorting** | Filter and sort use cases by Ultra High, Very High, High, Medium, Low |
+| **SQL Implementation** | Generated SQL queries with syntax highlighting and table resolution |
+| **JSON Export** | Download filtered results for reporting or integration |
+
+---
+
 ## Configuration
 
 All configuration is done through the UI (Settings panel) or environment variables:
 
 | Setting | Where | Description |
 |---------|-------|-------------|
-| Databricks Host | UI + env `DATABRICKS_HOST` | Your workspace URL |
-| Access Token | UI (or env `DATABRICKS_TOKEN`) | PAT or service-principal token |
+| Databricks Host | UI + env `DATABRICKS_HOST` | Customer workspace URL |
+| Access Token | UI (passed via `X-DB-PAT-Token` header) | Customer PAT token |
 | SQL Warehouse | UI (auto-discovered) | For query execution |
 | Notebook Path | UI (publish step) | Where Inspire notebook lives |
-| Inspire Database | UI (launch step) | `catalog.schema` for tracking tables |
-
-**Priority:** The UI settings override environment defaults, allowing each user to configure their own workspace independently.
-
----
-
-## Features
-
-### 01 — Configure
-- **Personal Access Token** authentication with live validation
-- **SQL Warehouse** auto-discovery and selection
-- **One-click publish** of the Inspire AI notebook (customizable destination path)
-
-### 02 — Launch
-- **Catalog & Schema browser** with multi-select and search
-- **Business context** — name, priorities, strategic goals, industry focus
-- **Generation options** — use-case discovery, SQL generation, quality assessment
-- **Advanced settings** — AI model endpoint, session ID, generation paths
-
-### 03 — Monitor
-- **Real-time polling** of Databricks run status and notebook steps
-- **Progress bar** with glow animation tracking `completed_percent`
-- **Step-by-step timeline** with stage grouping and status icons
-- **Auto-transition** to Results when the pipeline completes
-
-### 04 — Results
-- **Session picker** — browse and select from historical runs
-- **Executive summary** and domain-level insights
-- **Filterable use-case catalog** — search, filter by domain/priority/type, sort
-- **Expandable cards** — problem statement, solution, business value, SQL, tables
-- **Export to JSON** — download filtered results for downstream use
+| Inspire Database | UI (launch step) | `catalog.schema` for session tracking |
 
 ---
 
@@ -158,79 +164,32 @@ All configuration is done through the UI (Settings panel) or environment variabl
 InspireApp/
 ├── app.yaml                     # Databricks App manifest
 ├── start.sh                     # Production startup script
-├── .env.example                 # Environment template
+├── DEPLOYMENT_GUIDE.md          # Full deployment & usage guide
 ├── package.json                 # Root scripts (dev, build, start)
 ├── backend/
 │   ├── server.js                # Express API — Databricks proxy & SQL bridge
+│   ├── dbc_bundle.js            # Embedded DBC notebook (base64)
 │   └── package.json             # Backend dependencies
 ├── frontend/
 │   ├── src/
 │   │   ├── App.jsx              # Root component, routing, ErrorBoundary
 │   │   ├── index.css            # Tailwind v4 theme (Glow design system)
-│   │   ├── main.jsx             # React entry point
 │   │   ├── components/
 │   │   │   ├── Header.jsx       # Navigation bar with step indicators
-│   │   │   ├── SettingsPanel.jsx # Side panel for all settings
+│   │   │   ├── HeroScene3D.jsx  # Three.js 3D animated landing scene
+│   │   │   ├── SettingsPanel.jsx # Side panel for settings
 │   │   │   └── DatabricksLogo.jsx
 │   │   └── pages/
-│   │       ├── LandingPage.jsx  # Welcome & onboarding
+│   │       ├── LandingPage.jsx  # 3D hero + onboarding
 │   │       ├── ConfigPage.jsx   # PAT auth + warehouse + publish
 │   │       ├── LaunchPage.jsx   # Pipeline parameters & launch
 │   │       ├── MonitorPage.jsx  # Real-time execution tracker
 │   │       └── ResultsPage.jsx  # Use-case catalog browser
-│   ├── vite.config.js           # Vite + React + Tailwind v4
-│   └── package.json             # Frontend dependencies
-└── databricks_inspire_v41.dbc   # Packaged notebook for workspace import
+│   └── vite.config.js           # Vite + React + Tailwind v4
+├── docs/screenshots/            # App screenshots for documentation
+├── notebooks/                   # Extracted notebook source files
+└── databricks_inspire_v43.dbc   # Original DBC notebook file
 ```
-
----
-
-## API Endpoints
-
-All endpoints require `Authorization: Bearer <PAT>` header.
-The `X-Databricks-Host` header can override the server's configured host.
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/api/health` | Health check + configuration status |
-| `GET` | `/api/me` | Current user info |
-| `GET` | `/api/warehouses` | List SQL warehouses |
-| `GET` | `/api/clusters` | List compute clusters |
-| `GET` | `/api/catalogs` | List Unity Catalog catalogs |
-| `GET` | `/api/catalogs/:c/schemas` | List schemas in a catalog |
-| `GET` | `/api/tables/:c/:s` | List tables with metadata |
-| `GET` | `/api/dbc/info` | Bundled notebook info |
-| `POST` | `/api/publish` | Publish Inspire notebook (.dbc) |
-| `POST` | `/api/publish/upload` | Upload custom notebook |
-| `POST` | `/api/run` | Submit a notebook run |
-| `GET` | `/api/run/:id` | Get run status |
-| `GET` | `/api/run/:id/output` | Get run output |
-| `POST` | `/api/run/:id/cancel` | Cancel a run |
-| `GET` | `/api/inspire/session` | Poll session status |
-| `GET` | `/api/inspire/sessions` | List all sessions |
-| `GET` | `/api/inspire/steps` | Get step progress |
-| `POST` | `/api/inspire/ack` | Acknowledge session |
-| `GET` | `/api/inspire/results` | Get results JSON |
-
----
-
-## Glow Design System
-
-The UI is built on a custom **Glow** design system using Tailwind CSS v4's `@theme` directive:
-
-| Token | Value | Usage |
-|-------|-------|-------|
-| `--color-db-red` | `#FF3621` | Primary actions, brand accent |
-| `--color-surface` | `#FFFFFF` | Card backgrounds |
-| `--color-bg` | `#F7F8FA` | Page background |
-| `--color-panel` | `#FAFBFC` | Section headers |
-| `--color-border` | `#E5E7EB` | Default borders |
-| `--color-text-primary` | `#1B2332` | Headings, body text |
-| `--color-success` | `#16A34A` | Completed states |
-| `--color-warning` | `#D97706` | In-progress states |
-| `--color-error` | `#DC2626` | Error states |
-
-Custom effects: `.glow-focus`, `.glow-active`, `.glow-hover`, `.progress-glow`
 
 ---
 
@@ -238,25 +197,35 @@ Custom effects: `.glow-focus`, `.glow-active`, `.glow-hover`, `.progress-glow`
 
 | Layer | Technology |
 |-------|-----------|
-| Frontend | React 19, Vite 7, Tailwind CSS v4 |
+| Frontend | React 19, Vite 7, Tailwind CSS v4, Three.js |
 | Icons | Lucide React |
 | Backend | Express 5, Node.js 18+ |
 | Deployment | Databricks App (`app.yaml`) |
-| Notebook | Databricks .dbc (Python) |
+| Notebook | Databricks .dbc v4.3 (Python) |
 | API | Databricks REST API, SQL Statement API |
-| State | React hooks + localStorage persistence |
 
 ---
 
-## Troubleshooting
+## API Endpoints
 
-| Issue | Solution |
-|-------|---------|
-| White screen on Results page | Check browser console — the ErrorBoundary will display the crash details |
-| "Databricks host not configured" | Set `DATABRICKS_HOST` in `.env` or enter it in Settings |
-| Token authentication fails | Verify your PAT has `clusters`, `sql`, and `workspace` permissions |
-| Notebook publish fails | Ensure the PAT user has workspace write permissions |
-| SQL queries timeout | The SQL warehouse may need to be started first |
+All endpoints accept `X-DB-PAT-Token` header for authentication (proxy-safe).
+The `X-Databricks-Host` header specifies the target workspace.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/health` | Health check + configuration status |
+| `GET` | `/api/me` | Current user info |
+| `GET` | `/api/warehouses` | List SQL warehouses |
+| `GET` | `/api/catalogs` | List Unity Catalog catalogs |
+| `GET` | `/api/catalogs/:c/schemas` | List schemas in a catalog |
+| `GET` | `/api/tables/:c/:s` | List tables with metadata |
+| `POST` | `/api/publish` | Publish Inspire notebook (.dbc) |
+| `POST` | `/api/run` | Submit a notebook run |
+| `GET` | `/api/run/:id` | Get run status |
+| `GET` | `/api/inspire/session` | Poll session status |
+| `GET` | `/api/inspire/sessions` | List all sessions |
+| `GET` | `/api/inspire/steps` | Get step progress |
+| `GET` | `/api/inspire/results` | Get results JSON |
 
 ---
 

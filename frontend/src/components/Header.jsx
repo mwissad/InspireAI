@@ -38,7 +38,7 @@ export default function Header({
               Inspire AI
             </span>
             <span className="text-[10px] font-medium text-text-tertiary border border-border rounded px-1.5 py-0.5 ml-0.5">
-              v4.1
+              v4.3
             </span>
           </button>
 

@@ -27,6 +27,7 @@ export default function ConfigPage({ settings, update, onConfigured }) {
     async (url, opts = {}) => {
       const headers = {
         Authorization: `Bearer ${token}`,
+        'X-DB-PAT-Token': token,
         'Content-Type': 'application/json',
         ...opts.headers,
       };

@@ -20,12 +20,17 @@ import logging
 # ==============================================================================
 # TECHNICAL CONTEXT - Prompt to Model Type Cascade Configuration
 # ==============================================================================
-# Each prompt is mapped to a model_type (thinker/worker). At runtime, the system
-# resolves model_type to an ordered list of models (sorted by "order" field).
-# The lowest-order model is tried first; on failure, the next one is used.
-# To change which type of model a prompt uses, modify "model_type" below.
+# Each prompt is mapped to a model_type + model_size. At runtime, the system
+# resolves (type, size) to an ordered list of enabled models (sorted by "order").
+# The lowest-order enabled model is tried first; on failure, the next one is used.
+# To change which model bucket a prompt uses, modify "model_type"/"model_size" below.
 # To add/remove/reorder models, modify the "models" section.
 # ==============================================================================
+DEFAULT_MODEL_SIZE_BY_TYPE = {
+    "worker": "large",
+    "thinker": "large",
+}
+
 TECHNICAL_CONTEXT = {
     "runtime": {
         "llm_timeout_seconds": 300,
@@ -49,101 +54,113 @@ TECHNICAL_CONTEXT = {
         "use_combined_scoring": True,
         "table_election_threshold": 5,
         "table_election_transactional_tables_min": 3,
+        "min_use_cases_for_selection": 10,
+        "sql_model_serving": "databricks-gpt-oss-120b",
     },
     "prompts_models": [
         # === PHASE 1: INITIALIZATION & CONTEXT EXTRACTION ===
         # Temperature: 0.3-0.4 for accurate extraction of business context
-        {"prompt_name": "BUSINESS_CONTEXT_WORKER_PROMPT", "model_type": "worker", "temperature": 0.3, "stage_name": "Business Context", "step_name": "Business Context Worker", "progress_increment": 2.0},      # Step 1: Extract business context, goals, priorities
-        {"prompt_name": "UNSTRUCTURED_DATA_DOCUMENTS_PROMPT", "model_type": "worker", "temperature": 0.4, "stage_name": "Unstructured Context", "step_name": "Document Discovery", "progress_increment": 1.0},  # Step 2: Generate unstructured doc list (if enabled)
-        {"prompt_name": "FILTER_BUSINESS_TABLES_PROMPT", "model_type": "worker", "temperature": 0.2, "stage_name": "Table Filtering", "step_name": "Business Table Filter", "progress_increment": 2.0},       # Step 3: Filter business vs technical tables (precision needed)
+        {"prompt_name": "BUSINESS_CONTEXT_WORKER_PROMPT", "model_type": "thinker", "model_size": "large", "temperature": 0.3, "stage_name": "Business Context", "step_name": "Business Context Worker", "progress_increment": 2.0},      # Step 1: Extract business context, goals, priorities
+        {"prompt_name": "FILTER_BUSINESS_TABLES_PROMPT", "model_type": "worker", "model_size": "large", "temperature": 0.2, "stage_name": "Table Filtering", "step_name": "Business Table Filter", "progress_increment": 2.0},       # Step 3: Filter business vs technical tables (precision needed)
         
         # === PHASE 2: USE CASE GENERATION (PARALLEL) ===
         # Temperature: 0.4-0.5 — lowered for Extreme Quality (reduces hallucination, keeps creativity)
-        {"prompt_name": "BASE_USE_CASE_GEN_PROMPT", "model_type": "worker", "temperature": 0.4, "stage_name": "Use Cases Generation", "step_name": "Base Use Cases", "progress_increment": 4.0},            # Step 4: Main structured data use case generation
-        {"prompt_name": "AI_USE_CASE_GEN_PROMPT", "model_type": "worker", "temperature": 0.5, "stage_name": "AI Use Cases Generation", "step_name": "AI Use Cases", "progress_increment": 4.0},              # Step 4: AI/ML focused use case generation
-        {"prompt_name": "STATS_USE_CASE_GEN_PROMPT", "model_type": "worker", "temperature": 0.4, "stage_name": "Statistical Use Cases Generation", "step_name": "Statistical Use Cases", "progress_increment": 4.0},           # Step 4: Statistical use case generation
-        {"prompt_name": "UNSTRUCTURED_DATA_USE_CASE_GEN_PROMPT", "model_type": "worker", "temperature": 0.5, "stage_name": "Use Cases Generation", "step_name": "Unstructured Use Cases", "progress_increment": 2.0}, # Step 4: Unstructured data use cases
+        {"prompt_name": "BASE_USE_CASE_GEN_PROMPT", "model_type": "worker", "model_size": "large", "temperature": 0.5, "stage_name": "Use Cases Generation", "step_name": "Base Use Cases", "progress_increment": 4.0},            # Step 4: Main structured data use case generation
+        {"prompt_name": "AI_USE_CASE_GEN_PROMPT", "model_type": "worker", "model_size": "large", "temperature": 0.5, "stage_name": "AI Use Cases Generation", "step_name": "AI Use Cases", "progress_increment": 4.0},              # Step 4: AI/ML focused use case generation
+        {"prompt_name": "STATS_USE_CASE_GEN_PROMPT", "model_type": "worker", "model_size": "large", "temperature": 0.5, "stage_name": "Statistical Use Cases Generation", "step_name": "Statistical Use Cases", "progress_increment": 4.0},           # Step 4: Statistical use case generation
         
         # === PHASE 3: DOMAIN CLUSTERING ===
         # Temperature: 0.4-0.5 for balanced clustering decisions
-        {"prompt_name": "DOMAIN_FINDER_PROMPT", "model_type": "worker", "temperature": 0.5, "stage_name": "Business Domains Clustering", "step_name": "Domain Finder", "progress_increment": 2.0},                # Step 5: Cluster use cases into business domains
-        {"prompt_name": "SUBDOMAIN_DETECTOR_PROMPT", "model_type": "worker", "temperature": 0.4, "stage_name": "Business Domain Clustering", "step_name": "Subdomain Detector", "progress_increment": 2.0},           # Step 6: Detect subdomains within each domain
-        {"prompt_name": "DOMAINS_MERGER_PROMPT", "model_type": "worker", "temperature": 0.4, "stage_name": "Business Domains Clustering", "step_name": "Domain Merger", "progress_increment": 1.0},               # Step 7: Merge similar domains (optional)
+        {"prompt_name": "DOMAIN_FINDER_PROMPT", "model_type": "worker", "model_size": "large", "temperature": 0.5, "stage_name": "Business Domains Clustering", "step_name": "Domain Finder", "progress_increment": 2.0},                # Step 5: Cluster use cases into business domains
+        {"prompt_name": "SUBDOMAIN_DETECTOR_PROMPT", "model_type": "worker", "model_size": "large", "temperature": 0.4, "stage_name": "Business Domain Clustering", "step_name": "Subdomain Detector", "progress_increment": 2.0},           # Step 6: Detect subdomains within each domain
+        {"prompt_name": "DOMAINS_MERGER_PROMPT", "model_type": "thinker", "model_size": "large", "temperature": 0.4, "stage_name": "Business Domains Clustering", "step_name": "Domain Merger", "progress_increment": 1.0},               # Step 7: Merge similar domains (optional)
         
         # === PHASE 4: SCORING & DEDUPLICATION (PARALLEL SCORING) ===
         # Temperature: 0.2 for consistent, accurate scoring
         # VALUE SCORE: Focuses on business value, ROI, strategic alignment
         # QUALITY SCORE: Focuses on data sufficiency, cause-effect, technical design validity
-        {"prompt_name": "USE_CASE_VALUE_SCORE_PROMPT", "model_type": "worker", "temperature": 0.2, "stage_name": "Use Cases Scoring", "step_name": "Value Scoring", "progress_increment": 2.0},        # Step 8a: Score use cases (ROI, Strategic Alignment) - VALUE focus
-        {"prompt_name": "USE_CASE_QUALITY_SCORE_PROMPT", "model_type": "worker", "temperature": 0.1, "stage_name": "Use Cases Scoring", "step_name": "Quality Scoring", "progress_increment": 2.0},      # Step 8b: Score use cases (Data Sufficiency, Cause-Effect) - QUALITY focus
-        {"prompt_name": "COMBINED_VALUE_QUALITY_SCORE_PROMPT", "model_type": "worker", "temperature": 0.15, "stage_name": "Use Cases Scoring", "step_name": "Combined Value Quality Scoring", "progress_increment": 3.0}, # Step 8c: Combined value+quality scoring in one pass
-        {"prompt_name": "REVIEW_USE_CASES_PROMPT", "model_type": "worker", "temperature": 0.3, "stage_name": "Review", "step_name": "Use Cases Review", "progress_increment": 2.0},            # Step 9: Deduplication (global via thinker override, per-domain fallback via worker cascade)
+        {"prompt_name": "USE_CASE_VALUE_SCORE_PROMPT", "model_type": "worker", "model_size": "large", "temperature": 0.2, "stage_name": "Use Cases Scoring", "step_name": "Value Scoring", "progress_increment": 2.0},        # Step 8a: Score use cases (ROI, Strategic Alignment) - VALUE focus
+        {"prompt_name": "USE_CASE_QUALITY_SCORE_PROMPT", "model_type": "worker", "model_size": "large", "temperature": 0.1, "stage_name": "Use Cases Scoring", "step_name": "Quality Scoring", "progress_increment": 2.0},      # Step 8b: Score use cases (Data Sufficiency, Cause-Effect) - QUALITY focus
+        {"prompt_name": "COMBINED_VALUE_QUALITY_SCORE_PROMPT", "model_type": "worker", "model_size": "large", "temperature": 0.15, "stage_name": "Use Cases Scoring", "step_name": "Combined Value Quality Scoring", "progress_increment": 3.0}, # Step 8c: Combined value+quality scoring in one pass
+        {"prompt_name": "REVIEW_USE_CASES_PROMPT", "model_type": "worker", "model_size": "large", "temperature": 0.3, "stage_name": "Review", "step_name": "Use Cases Review", "progress_increment": 2.0},            # Step 9: Deduplication (global via thinker override, per-domain fallback via worker cascade)
         
         # === PHASE 5: SQL GENERATION ===
         # Temperature: 0.1-0.2 for accurate, syntactically correct SQL
-        {"prompt_name": "USE_CASE_SQL_GEN_PROMPT", "model_type": "worker", "temperature": 0.1, "stage_name": "SQL Generation", "step_name": "SQL Generator", "progress_increment": 4.0},             # Step 10: Generate SQL (accuracy critical)
-        {"prompt_name": "USE_CASE_SQL_FIX_PROMPT", "model_type": "worker", "temperature": 0.1, "stage_name": "SQL Generation", "step_name": "SQL Fixer", "progress_increment": 2.0},             # Step 11: Fix SQL errors (precision critical)
-        {"prompt_name": "INTERPRET_USER_SQL_REGENERATION_PROMPT", "model_type": "worker", "temperature": 0.2, "stage_name": "SQL Regeneration", "step_name": "User Intent Interpreter", "progress_increment": 1.0}, # SQL Regeneration mode (special)
+        {"prompt_name": "USE_CASE_SQL_GEN_PROMPT", "model_type": "worker", "model_size": "large", "temperature": 0.1, "stage_name": "SQL Generation", "step_name": "SQL Generator", "progress_increment": 4.0},             # Step 10: Generate SQL (accuracy critical)
+        {"prompt_name": "USE_CASE_SQL_FIX_PROMPT", "model_type": "worker", "model_size": "large", "temperature": 0.1, "stage_name": "SQL Generation", "step_name": "SQL Fixer", "progress_increment": 2.0},             # Step 11: Fix SQL errors (precision critical)
+        {"prompt_name": "INTERPRET_USER_SQL_REGENERATION_PROMPT", "model_type": "thinker", "model_size": "large", "temperature": 0.2, "stage_name": "SQL Regeneration", "step_name": "User Intent Interpreter", "progress_increment": 1.0}, # SQL Regeneration mode (special)
         
         # === PHASE 6: SUMMARY & ARTIFACTS ===
         # Temperature: 0.5-0.6 for engaging summaries and dashboards
-        {"prompt_name": "SUMMARY_GEN_PROMPT", "model_type": "worker", "temperature": 0.5, "stage_name": "Summary", "step_name": "Executive Summary", "progress_increment": 1.0},                  # Step 12: Generate executive summary
-        {"prompt_name": "DASHBOARDS_GEN_PROMPT", "model_type": "worker", "temperature": 0.6, "stage_name": "Dashboard", "step_name": "Dashboard Generation", "progress_increment": 2.0},               # Step 13: Generate dashboards (if enabled)
+        {"prompt_name": "SUMMARY_GEN_PROMPT", "model_type": "worker", "model_size": "large", "temperature": 0.5, "stage_name": "Summary", "step_name": "Executive Summary", "progress_increment": 1.0},                  # Step 12: Generate executive summary
+        {"prompt_name": "DASHBOARDS_GEN_PROMPT", "model_type": "thinker", "model_size": "large", "temperature": 0.6, "stage_name": "Dashboard", "step_name": "Dashboard Generation", "progress_increment": 2.0},               # Step 13: Generate dashboards (if enabled)
         
         # === PHASE 7: TRANSLATION (MULTI-LANGUAGE) ===
         # Temperature: 0.2-0.3 for accurate translation
-        {"prompt_name": "KEYWORDS_TRANSLATE_PROMPT", "model_type": "worker", "temperature": 0.2, "stage_name": "Translation", "step_name": "Keywords Translation", "progress_increment": 1.0},           # Step 14: Translate keywords (accuracy)
-        {"prompt_name": "USE_CASE_TRANSLATE_PROMPT", "model_type": "worker", "temperature": 0.3, "stage_name": "Translation", "step_name": "Use Cases Translation", "progress_increment": 1.0},           # Step 15: Translate use cases
+        {"prompt_name": "KEYWORDS_TRANSLATE_PROMPT", "model_type": "worker", "model_size": "tiny", "temperature": 0.2, "stage_name": "Translation", "step_name": "Keywords Translation", "progress_increment": 1.0},           # Step 14: Translate keywords (accuracy)
+        {"prompt_name": "USE_CASE_TRANSLATE_PROMPT", "model_type": "worker", "model_size": "tiny", "temperature": 0.3, "stage_name": "Translation", "step_name": "Use Cases Translation", "progress_increment": 1.0},           # Step 15: Translate use cases
     ],
-    "models": [                                                                                                                                                                                                                                     
-      {                                                                                                                                                                                                                                             
-        "name": "claude-opus-4-6",                                                                                                                                                                                                                  
-        "order": 1,                                         
-        "type": "thinker",                                                                                                                                                                                                                          
-        "llm_endpoint_name": "databricks-claude-opus-4-6",                                                                                                                                                                                          
-        "llm_input_context_tokens_count": 200000,
-        "llm_output_context_tokens_count": 128000
-      },
-      {
-        "name": "claude-sonnet-4-6",
-        "order": 2,
-        "type": "worker",
-        "llm_endpoint_name": "databricks-claude-sonnet-4-6",
-        "llm_input_context_tokens_count": 200000,
-        "llm_output_context_tokens_count": 64000
-      },
-      {
-        "name": "claude-opus-4-5",
-        "order": 3,
-        "type": "thinker",
-        "llm_endpoint_name": "databricks-claude-opus-4-5",
-        "llm_input_context_tokens_count": 200000,
-        "llm_output_context_tokens_count": 64000
-      },
-      {
-        "name": "claude-sonnet-4-5",
-        "order": 4,
-        "type": "worker",
-        "llm_endpoint_name": "databricks-claude-sonnet-4-5",
-        "llm_input_context_tokens_count": 200000,
-        "llm_output_context_tokens_count": 64000
-      },
-      {
-        "name": "gpt-oss-120b",
-        "order": 5,
-        "type": "worker",
-        "llm_endpoint_name": "databricks-gpt-oss-120b",
-        "llm_input_context_tokens_count": 131072,
-        "llm_output_context_tokens_count": 25000
-      },
-      {
-        "name": "gpt-oss-20b",
-        "order": 6,
-        "type": "worker",
-        "llm_endpoint_name": "databricks-gpt-oss-20b",
-        "llm_input_context_tokens_count": 131072,
-        "llm_output_context_tokens_count": 25000
-      }
+    "models": [
+        {
+            "name": "claude-opus-4-6",
+            "order": 1,
+            "type": "thinker",
+            "size": "large",
+            "enabled": False,
+            "llm_endpoint_name": "databricks-claude-opus-4-6",
+            "llm_input_context_tokens_count": 200000,
+            "llm_output_context_tokens_count": 128000
+        },
+        {
+            "name": "claude-sonnet-4-6",
+            "order": 2,
+            "type": "worker",
+            "size": "large",
+            "enabled": False,
+            "llm_endpoint_name": "databricks-claude-sonnet-4-6",
+            "llm_input_context_tokens_count": 200000,
+            "llm_output_context_tokens_count": 64000
+        },
+        {
+            "name": "claude-opus-4-5",
+            "order": 3,
+            "type": "thinker",
+            "size": "large",
+            "enabled": True,
+            "llm_endpoint_name": "databricks-claude-opus-4-5",
+            "llm_input_context_tokens_count": 200000,
+            "llm_output_context_tokens_count": 64000
+        },
+        {
+            "name": "claude-sonnet-4-5",
+            "order": 4,
+            "type": "worker",
+            "size": "large",
+            "enabled": True,
+            "llm_endpoint_name": "databricks-claude-sonnet-4-5",
+            "llm_input_context_tokens_count": 200000,
+            "llm_output_context_tokens_count": 64000
+        },
+        {
+            "name": "gpt-oss-120b",
+            "order": 5,
+            "type": "worker",
+            "size": "small",
+            "enabled": True,
+            "llm_endpoint_name": "databricks-gpt-oss-120b",
+            "llm_input_context_tokens_count": 131072,
+            "llm_output_context_tokens_count": 25000
+        },
+        {
+            "name": "gpt-oss-20b",
+            "order": 6,
+            "type": "worker",
+            "size": "tiny",
+            "enabled": True,
+            "llm_endpoint_name": "databricks-gpt-oss-20b",
+            "llm_input_context_tokens_count": 131072,
+            "llm_output_context_tokens_count": 25000
+        }
     ]
 }
 
@@ -160,12 +177,10 @@ MULTI_ENTITY_PROGRESS_PROMPTS = {
 
 PROMPT_STORY_TITLES = {
     "BUSINESS_CONTEXT_WORKER_PROMPT": ("Business Understanding", "Understanding Business Priorities"),
-    "UNSTRUCTURED_DATA_DOCUMENTS_PROMPT": ("Document Discovery", "Discovering Business Documents"),
     "FILTER_BUSINESS_TABLES_PROMPT": ("Data Preparation", "Selecting Business Tables"),
     "BASE_USE_CASE_GEN_PROMPT": ("Use Case Design", "Generating Core Use Cases"),
     "AI_USE_CASE_GEN_PROMPT": ("Use Case Design", "Generating AI Use Cases"),
     "STATS_USE_CASE_GEN_PROMPT": ("Use Case Design", "Generating Statistical Use Cases"),
-    "UNSTRUCTURED_DATA_USE_CASE_GEN_PROMPT": ("Use Case Design", "Generating Document-Based Use Cases"),
     "DOMAIN_FINDER_PROMPT": ("Domain Mapping", "Mapping Business Domains"),
     "SUBDOMAIN_DETECTOR_PROMPT": ("Domain Mapping", "Refining Business Subdomains"),
     "DOMAINS_MERGER_PROMPT": ("Domain Mapping", "Consolidating Overlapping Domains"),
@@ -184,12 +199,10 @@ PROMPT_STORY_TITLES = {
 
 PROMPT_STORY_STARTED_MESSAGES = {
     "BUSINESS_CONTEXT_WORKER_PROMPT": "Inspire has started understanding business priorities and strategic goals",
-    "UNSTRUCTURED_DATA_DOCUMENTS_PROMPT": "Inspire has started discovering business-relevant documents",
     "FILTER_BUSINESS_TABLES_PROMPT": "Inspire has started inspecting business tables for relevance",
     "BASE_USE_CASE_GEN_PROMPT": "Inspire has started generating core business use cases",
     "AI_USE_CASE_GEN_PROMPT": "Inspire has started inspecting business tables to generate AI-focused use cases",
     "STATS_USE_CASE_GEN_PROMPT": "Inspire has started generating statistically driven use cases",
-    "UNSTRUCTURED_DATA_USE_CASE_GEN_PROMPT": "Inspire has started generating document-based use cases",
     "DOMAIN_FINDER_PROMPT": "Inspire has started organizing use cases into business domains",
     "SUBDOMAIN_DETECTOR_PROMPT": "Inspire has started refining domains into subdomains",
     "DOMAINS_MERGER_PROMPT": "Inspire has started consolidating overlapping domains",
@@ -241,6 +254,41 @@ def _validate_runtime_config():
 
 _validate_runtime_config()
 
+def _validate_model_config():
+    valid_types = {"worker", "thinker"}
+    valid_sizes = {"tiny", "small", "large"}
+    models = TECHNICAL_CONTEXT.get("models", [])
+    prompt_models = TECHNICAL_CONTEXT.get("prompts_models", [])
+
+    if not isinstance(models, list) or not models:
+        raise ValueError("TECHNICAL_CONTEXT.models must be a non-empty list")
+
+    for idx, model in enumerate(models):
+        model_type = model.get("type")
+        model_size = model.get("size")
+        enabled = model.get("enabled")
+        if model_type not in valid_types:
+            raise ValueError(f"TECHNICAL_CONTEXT.models[{idx}].type must be one of {sorted(valid_types)}")
+        if model_size not in valid_sizes:
+            raise ValueError(f"TECHNICAL_CONTEXT.models[{idx}].size must be one of {sorted(valid_sizes)}")
+        if not isinstance(enabled, bool):
+            raise TypeError(f"TECHNICAL_CONTEXT.models[{idx}].enabled must be boolean")
+
+    enabled_pairs = {(m.get("type"), m.get("size")) for m in models if m.get("enabled") is True}
+    for idx, pm in enumerate(prompt_models):
+        model_type = pm.get("model_type", "worker")
+        model_size = pm.get("model_size", DEFAULT_MODEL_SIZE_BY_TYPE.get(model_type, "small"))
+        if model_type not in valid_types:
+            raise ValueError(f"TECHNICAL_CONTEXT.prompts_models[{idx}].model_type must be one of {sorted(valid_types)}")
+        if model_size not in valid_sizes:
+            raise ValueError(f"TECHNICAL_CONTEXT.prompts_models[{idx}].model_size must be one of {sorted(valid_sizes)}")
+        if (model_type, model_size) not in enabled_pairs:
+            raise ValueError(
+                f"No enabled model found for prompts_models[{idx}] bucket ({model_type}, {model_size})"
+            )
+
+_validate_model_config()
+
 
 def get_models_by_type(model_type: str) -> list:
     """
@@ -248,23 +296,36 @@ def get_models_by_type(model_type: str) -> list:
     The lowest-order model is tried first; on failure, the next one is used.
     """
     return sorted(
-        [m for m in TECHNICAL_CONTEXT["models"] if m.get("type") == model_type],
+        [m for m in TECHNICAL_CONTEXT["models"] if m.get("type") == model_type and bool(m.get("enabled", True))],
+        key=lambda m: m.get("order", 999)
+    )
+
+def get_models_by_type_and_size(model_type: str, model_size: str) -> list:
+    """
+    Get enabled models matching (type, size), sorted by order (ascending).
+    """
+    return sorted(
+        [
+            m for m in TECHNICAL_CONTEXT["models"]
+            if m.get("type") == model_type and m.get("size") == model_size and bool(m.get("enabled", True))
+        ],
         key=lambda m: m.get("order", 999)
     )
 
 def get_model_cascade_for_prompt(prompt_name: str) -> list:
     """
-    Get the ordered list of model configs for a prompt's model_type.
+    Get the ordered list of model configs for a prompt's (model_type, model_size).
     Used for cascade fallback: try model[0], on failure try model[1], etc.
-    
-    Falls back to all worker models if prompt_name is not in prompts_models
+
+    Falls back to worker models with default worker size if prompt_name is not in prompts_models
     (e.g., dynamic prompt names like 'Assign_User_Domains_English').
     """
     for pm in TECHNICAL_CONTEXT["prompts_models"]:
         if pm["prompt_name"] == prompt_name:
             model_type = pm.get("model_type", "worker")
-            return get_models_by_type(model_type)
-    return get_models_by_type("worker")
+            model_size = pm.get("model_size", DEFAULT_MODEL_SIZE_BY_TYPE.get(model_type, "small"))
+            return get_models_by_type_and_size(model_type, model_size)
+    return get_models_by_type_and_size("worker", DEFAULT_MODEL_SIZE_BY_TYPE.get("worker", "small"))
 
 def get_model_endpoint_for_prompt(prompt_name: str) -> str:
     """
@@ -274,7 +335,10 @@ def get_model_endpoint_for_prompt(prompt_name: str) -> str:
     cascade = get_model_cascade_for_prompt(prompt_name)
     if cascade:
         return cascade[0]["llm_endpoint_name"]
-    all_models = sorted(TECHNICAL_CONTEXT["models"], key=lambda m: m.get("order", 999))
+    all_models = sorted(
+        [m for m in TECHNICAL_CONTEXT["models"] if bool(m.get("enabled", True))],
+        key=lambda m: m.get("order", 999)
+    )
     return all_models[0]["llm_endpoint_name"] if all_models else "databricks-gpt-oss-20b"
 
 def get_model_config_for_prompt(prompt_name: str) -> dict:
@@ -285,7 +349,10 @@ def get_model_config_for_prompt(prompt_name: str) -> dict:
     cascade = get_model_cascade_for_prompt(prompt_name)
     if cascade:
         return cascade[0]
-    all_models = sorted(TECHNICAL_CONTEXT["models"], key=lambda m: m.get("order", 999))
+    all_models = sorted(
+        [m for m in TECHNICAL_CONTEXT["models"] if bool(m.get("enabled", True))],
+        key=lambda m: m.get("order", 999)
+    )
     return all_models[0] if all_models else {}
 
 PROMPT_TRACKING_CONFIG = {}
@@ -840,9 +907,9 @@ def build_fqn(catalog: str, schema: str, table: str = None) -> str:
     return f"{cat_quoted}.{schema_quoted}"
 
 # --- LLM Model Resolution ---
-# Model resolution is now handled dynamically via model_type cascade.
-# Each prompt's model_type (thinker/worker) is resolved at runtime to an ordered
-# list of models. On failure, the next model in the cascade is tried automatically.
+# Model resolution is now handled dynamically via model_type + model_size cascade.
+# Each prompt bucket is resolved at runtime to an ordered list of enabled models.
+# On failure, the next enabled model in the same bucket is tried automatically.
 # See: get_model_cascade_for_prompt(), _call_ai_query()
 
 # DBTITLE 1,Prompts
@@ -1170,7 +1237,7 @@ AI_FUNCTIONS = {
     },
     "ai_extract": {
         "function": "ai_extract(content, labels)",
-        "business_value": "Extracts specified entities from unstructured text to structure data for analysis and automation. Array MUST have max 20 items, each <50 characters.",
+        "business_value": "Extracts specified entities from document text to structure data for analysis and automation. Array MUST have max 20 items, each <50 characters.",
         "example_use_cases": "Invoice detail extraction • Email parsing for CRM • Contract data extraction • Medical record entity extraction • Product specification parsing • Customer information extraction from notes. **Note: These are examples only - innovate with use cases specific to your business context and data.**"
     },
     "ai_fix_grammar": {
@@ -1185,7 +1252,7 @@ AI_FUNCTIONS = {
     },
     "ai_parse_document": {
         "function": "ai_parse_document(content, [options_map])",
-        "business_value": "Extracts structured text, layout, tables, and figures from unstructured document files (PDF, images, Word, PowerPoint). MUST ONLY be used with binary files from Unity Catalog volumes via READ_FILES().",
+        "business_value": "Extracts structured text, layout, tables, and figures from document document files (PDF, images, Word, PowerPoint). MUST ONLY be used with binary files from Unity Catalog volumes via READ_FILES().",
         "example_use_cases": "Invoice processing from PDFs • Scanned contract digitization • Medical record extraction from images • Form data extraction • Receipt processing • Document archive digitization. **Note: These are examples only - innovate with use cases specific to your business context and data.**"
     },
     "ai_similarity": {
@@ -1547,13 +1614,14 @@ You are a highly experienced **Principal Enterprise Data Architect** and an indu
 ### 1. CORE TASK
 
 Your single, primary task is to produce a **single CSV** response.
-The CSV MUST have EXACTLY the following 11 columns (no more, no less):
-`"No","Name","type","Analytics Technique","Statement","Solution","Business Value","Beneficiary","Sponsor","Tables Involved","Technical Design"`
+The CSV MUST have EXACTLY the following 12 columns (no more, no less):
+`"No","Name","usecase","type","Analytics Technique","Statement","Solution","Business Value","Beneficiary","Sponsor","Tables Involved","Technical Design"`
 
 🚨 **COLUMN NAME RULES** 🚨:
-- Column 5 MUST be called `"Statement"` — do NOT rename it to "Opportunity", "Problem Statement", or anything else.
+- Column 6 MUST be called `"Statement"` — do NOT rename it to "Opportunity", "Problem Statement", or anything else.
 - `"Analytics Technique"` is a SINGLE column. Values like "Forecasting", "Classification", "Anomaly Detection" are ROW VALUES inside this column — do NOT add them as separate column headers.
-- Do NOT add any extra columns beyond these 11 (plus optional honesty columns 12-13).
+- `"usecase"` MUST be present in the header exactly as written.
+- Do NOT add any extra columns beyond these 12 (plus optional honesty columns 13-14).
 
 ---
 
@@ -1633,6 +1701,15 @@ You MUST ONLY generate use cases that meet at least one of these criteria:
         - "Correlation Analysis Between Payment Terms and Overdue Risk" → REJECTED (no "with" at all)
     *   **ACTIVATION QUALITY TEST**: The "with [...]" phrase must answer: "What actionable DELIVERABLE does the business user receive from this use case?" If the suffix describes HOW the analysis works rather than WHAT the user gets to DO, it is TECHNICAL and REJECTED.
     *   **YOUR RESPONSE WILL BE REJECTED if ANY use case name has a technical method as the activation suffix, or if the action part contains domain-specific jargon or statistical terminology.**
+    *   **READABILITY TEST**: Keep `Name` easy to comprehend for non-technical business users. Use plain business language, avoid overloaded wording, and cap the full `Name` at 14 words.
+
+  - **`usecase`**: Short, benefit-led phrase (4–8 words) that answers "what's in it for me". Use action verbs, no trailing "Identification/Detection/Classification".
+    *   START with an action verb: Reduce, Recover, Improve, Stabilize, Minimize, Protect, Cut, Fix
+    *   Include the benefit or outcome inline (e.g., "to Lower Cost", "without Risking Compliance")
+    *   BANNED at end: "Identification", "Detection", "Classification", "Simulation" as filler
+    *   Pattern: [Verb] [issue/area] [optional: to/with/without] [outcome/approach]
+    *   GOOD: "Delay Reduction through Better Block Time Planning", "Fuel Waste Reduction to Lower Cost", "Reduce Slot Waste on Congested Routes", "Recover Lost Cargo Revenue", "Improve Route Margin Mix", "Stabilize Revenue in Volatile Demand", "Minimize Capacity Shortfalls with Smarter Forecasting", "Improve Crew Deployment without Risking Compliance"
+    *   BAD: "Fuel Burn Inefficiency Detection", "Slot Utilisation Waste Identification", "Block Time Planning Gap Identification" (trailing filler, no benefit)
 
   - **`type`**: One of "Problem", "Risk", "Opportunity", "Improvement".
 
@@ -1647,7 +1724,7 @@ You MUST ONLY generate use cases that meet at least one of these criteria:
     * `Correlation Analysis` - Finding relationships between variables
     * `Pareto Analysis` - 80/20 rule, identifying top contributors
     * `Funnel Analysis` - Conversion tracking through stages
-    * `Document Processing` - Extracting data from unstructured documents
+    * `Document Processing` - Extracting data from document documents
     * `Extraction` - Extracting specific entities from text
     * `AI Analysis` - General AI-powered business analysis using ai_query
 
@@ -1763,18 +1840,18 @@ Before generating, verify: (1) DIRECT, PROVABLE cause-and-effect between variabl
 
 SQL will be generated separately. Replace all [PLACEHOLDERS] with actual values.
 
-`"1","Forecast Monthly [METRIC] with Economic Context","Risk","Forecasting","[Statement]","[Solution using Databricks Agent Bricks]","[Business Value]","[Role]","[Executive]","[catalog.schema.table]","CTE1: SELECT DISTINCT + LIMIT 10 to deduplicate. CTE2: simulated_external_data_for_economic_context (ai_query with persona). CTE3: Parse JSON + join. CTE4: Aggregate by period. CTE5: ai_forecast. CTE6: ai_query recommendations."`
+`"1","Forecast Monthly [METRIC] with Economic Context","Forecast [METRIC] Trends","Risk","Forecasting","[Statement]","[Solution using Databricks Agent Bricks]","[Business Value]","[Role]","[Executive]","[catalog.schema.table]","CTE1: SELECT DISTINCT + LIMIT 10 to deduplicate. CTE2: simulated_external_data_for_economic_context (ai_query with persona). CTE3: Parse JSON + join. CTE4: Aggregate by period. CTE5: ai_forecast. CTE6: ai_query recommendations."`
 
-`"2","Classify [ENTITY] by [CATEGORY] with Market Benchmarks","Improvement","Classification","[Statement]","[Solution using Databricks Agent Bricks]","[Business Value]","[Role]","[Executive]","[catalog.schema.table]","CTE1: SELECT DISTINCT + LIMIT 10. CTE2: simulated_external_data_for_benchmarks (ai_query with persona). CTE3: Parse JSON. CTE4: ai_classify. CTE5: ai_query strategies."`
+`"2","Classify [ENTITY] by [CATEGORY] with Market Benchmarks","Classify [ENTITY] Risk","Improvement","Classification","[Statement]","[Solution using Databricks Agent Bricks]","[Business Value]","[Role]","[Executive]","[catalog.schema.table]","CTE1: SELECT DISTINCT + LIMIT 10. CTE2: simulated_external_data_for_benchmarks (ai_query with persona). CTE3: Parse JSON. CTE4: ai_classify. CTE5: ai_query strategies."`
 
 ---
 
 ### 5. FORMATTING RULES
-- **HEADER** (EXACT — do NOT rename/reorder/add): `"No","Name","type","Analytics Technique","Statement","Solution","Business Value","Beneficiary","Sponsor","Tables Involved","Technical Design"`
-- **EXACTLY 11 COLUMNS** per row (matching the 11 header columns above). Do NOT insert extra columns between them.
-- ❌ WRONG: `"No","Name","type","Analytics Technique","Forecasting","Statement",...` (extra column "Forecasting" inserted — REJECTED)
-- ✅ CORRECT: `"No","Name","type","Analytics Technique","Statement",...` (the value "Forecasting" goes inside the "Analytics Technique" cell of each data row)
-- ALL values double-quoted. English. ONLY CSV output. You may append honesty columns 12-13.
+- **HEADER** (EXACT — do NOT rename/reorder/add): `"No","Name","usecase","type","Analytics Technique","Statement","Solution","Business Value","Beneficiary","Sponsor","Tables Involved","Technical Design"`
+- **EXACTLY 12 COLUMNS** per row (matching the 12 header columns above). Do NOT insert extra columns between them.
+- ❌ WRONG: `"No","Name","usecase","type","Analytics Technique","Forecasting","Statement",...` (extra column "Forecasting" inserted — REJECTED)
+- ✅ CORRECT: `"No","Name","usecase","type","Analytics Technique","Statement",...` (the value "Forecasting" goes inside the "Analytics Technique" cell of each data row)
+- ALL values double-quoted. English. ONLY CSV output. You may append honesty columns 13-14.
 
 ### 6. PREVIOUS RUN FEEDBACK (ENSEMBLE PASS)
 
@@ -1899,122 +1976,6 @@ Refer to the **AVAILABLE STATISTICAL FUNCTIONS** section below. You MUST use fun
 ) + HONESTY_CHECK_CSV
 
 
-PROMPT_TEMPLATES["UNSTRUCTURED_DATA_USE_CASE_GEN_PROMPT"] = """### 0. PERSONA ACTIVATION
-
-You are a highly experienced **Principal Enterprise Data Architect**. Your task is to generate business use cases for **UNSTRUCTURED DATA** (Documents).
-
-### BUSINESS CONTEXT
-**Business Context:** {business_context}
-**Strategic Goals:** {strategic_goals}
-**Business Priorities:** {business_priorities}
-**Strategic Initiative:** {strategic_initiative}
-**Value Chain:** {value_chain}
-**Revenue Model:** {revenue_model}
-
----
-
-### 🚨🚨🚨 CRITICAL: UNSTRUCTURED DATA FOCUS 🚨🚨🚨
-
-**YOUR MISSION**: Generate use cases that leverage `ai_parse_document` and `ai_extract` on the provided document files.
-
-**REQUIREMENTS**:
-1. **Source**: MUST use the Unity Catalog volume paths provided.
-2. **Function**: MUST use `ai_parse_document`.
-3. **Extraction**: Use `ai_extract` to get structured entities.
-4. **Action**: Use `ai_query` or `ai_classify` on the extracted data.
-
-""" + PROMPT_TEMPLATES["BASE_USE_CASE_GEN_PROMPT"].split("### 1. CORE TASK")[1].replace(
-    "### 2. USE CASE GENERATION RULES",
-    """### 2. UNSTRUCTURED DATA USE CASE RULES
-
-**🔥 DOCUMENT PROCESSING PRIORITY 🔥**:
-- **MANDATORY**: Use `ai_parse_document` for every use case here.
-- **Volume Paths**: Use strict Volume paths (not tables) for input.
-- **Entities**: Extract the specific entities listed in the document metadata.
-"""
-).replace(
-    "##### 1. Structured Data Schema",
-    """##### 1. Unstructured Data Documents
-{unstructured_documents_markdown}
-
-##### 2. Structured Data Schema (Reference Only)"""
-) + HONESTY_CHECK_CSV
-
-
-PROMPT_TEMPLATES["UNSTRUCTURED_DATA_DOCUMENTS_PROMPT"] = """You are a senior business analyst and data architect. Your task is to generate a comprehensive list of the TOP 20 most common unstructured documents that businesses in the specified industries would possess and store in a data lake or volume.
-
-**INDUSTRIES PROVIDED**:
-{industries_list}
-
-**CRITICAL REQUIREMENT**: You MUST generate EXACTLY 20 different document types across ALL industries provided. Ensure diversity across document formats.
-
-For each document, provide:
-1. **Document Name** - A clear, descriptive name for the document type
-2. **Description** - What the document contains and its business purpose
-3. **File Path** - A realistic Databricks Volumes path (format: `/Volumes/catalog/schema/volume_name/document_type/`)
-4. **Extracted Entities** - A comma-separated list of 4-8 key data fields that could be extracted from this document using ai_extract
-
-**Document Categories to Cover** (distribute the 20 documents across these categories):
-- **Financial Documents**: Invoices, receipts, statements, purchase orders (PDF, JPG)
-- **Customer Documents**: Feedback forms, surveys, support tickets, reviews (PDF, DOCX, JPG)
-- **Operational Documents**: Work orders, inspection reports, maintenance logs (PDF, PPTX, JPG)
-- **Legal/Compliance**: Regulatory filings, certificates, permits (PDF, DOCX)
-- **HR Documents**: Resumes, contracts, performance reviews (PDF, DOCX)
-- **Marketing/Media**: Campaign materials, testimonials, brochures (PPTX, PDF, JPG)
-- **Multimedia**: Training videos, customer calls, product demos (MP4 for videos, MP3/WAV for audio - represented as file paths)
-- **Spreadsheets**: Financial models, inventory sheets, reports (XLS, XLSX)
-
-**Important**:
-- Generate EXACTLY 20 documents total
-- Include diversity: ~8-10 PDFs, ~3-4 images (JPG/PNG), ~2-3 presentations (PPTX), ~2-3 documents (DOCX), ~1-2 spreadsheets (XLS/XLSX), ~1-2 videos, ~1-2 audio files
-- Video files should use format "Video (MP4)" and audio files "Audio (MP3)" or "Audio (WAV)"
-- Make File Paths realistic with proper catalog/schema/volume structure
-- Extracted Entities should be specific and useful for each document type
-- Cover ALL industries provided in the industries list
-
-**Output Format** (Markdown table):
-| Document Name | Description | Type | Extracted Entities | File Path |
-|---|---|---|---|---|
-| Vendor Invoices | PDF/image invoices from vendors containing itemized charges | PDF | vendor name, invoice number, date, total amount, items purchased, payment terms, tax amount, due date | /Volumes/finance/accounting/invoices/ |
-| Customer Training Videos | MP4 video recordings of customer onboarding and product training sessions | Video (MP4) | training_topic, duration, instructor, participant_count | /Volumes/training/videos/customer_onboarding/ |
-| Support Call Recordings | Audio recordings of customer support interactions for quality assurance | Audio (MP3) | call_id, customer_id, agent_id, call_duration, issue_category, resolution_status | /Volumes/support/audio/call_recordings/ |
-| Financial Planning Spreadsheets | Excel workbooks containing budget forecasts and financial models | XLS | budget_category, fiscal_year, projected_revenue, actual_spend, variance | /Volumes/finance/planning/budget_models/ |
-
-Your output **MUST** be a single markdown table with EXACTLY 20 document types.
-Ensure you include documents in these formats: PDF, JPG, PNG, DOCX, PPTX, XLS/XLSX, Video (MP4), Audio (MP3/WAV).
-Do not include *any* other text, preamble, or explanation.
-### Rules
-1.  Use the provided industries list to determine appropriate document types.
-2.  Generate EXACTLY 20 realistic unstructured documents, distributed across the industries.
-3.  For each document, provide a name, a **detailed description** of its content, a file type, a list of **key entities to extract**, and a directory path.
-4.  The file type **MUST** be one of: `PDF`, `JPG`, `PNG`, `DOCX`, `PPTX`, `XLS`, `XLSX`, `Video (MP4)`, `Audio (MP3)`, `Audio (WAV)`.
-5.  The `"File Path"` column **MUST** be a plausible Databricks Volume directory path where these files would be stored (e.g., `/Volumes/finance/invoices/unprocessed/`). It must end with a trailing slash.
-6. All table headers **MUST** be enclosed in double quotes.
----
-### Example (for a "sales" schema)
-| "Document Name" | "Description" | "Type" | "Extracted Entities" | "File Path" |
-|---|---|---|---|---|
-| "Customer Invoices" | "Scanned PDF copies of vendor invoices. Contains line items, PO number, vendor name, invoice date, and total amount due." | "PDF" | "invoice_number, vendor_name, total_amount, due_date, line_items" | "/Volumes/finance/invoices/unprocessed/" |
-| "Product Spec Sheets" | "Multi-page technical datasheets for products, including specifications, performance metrics, and compliance information." | "PDF" | "product_sku, technical_specs, compliance_standards" | "/Volumes/products/specifications/" |
-| "Marketing Brochures" | "Quarterly slide decks for product promotions, outlining key features, target audience, and pricing tiers." | "PPTX" | "product_name, key_features, pricing" | "/Volumes/marketing/assets/brochures/" |
-| "Signed Contracts" | "Scanned copies of signed master service agreements (MSAs) with customers, detailing terms, conditions, and service levels." | "PDF" | "customer_name, effective_date, contract_term, sla_details" | "/Volumes/legal/contracts/signed/" |
-| "Support Call Transcripts" | "Word documents containing full-text transcripts from customer support calls, auto-generated from an audio-to-text service." | "DOCX" | "customer_id, support_agent, issue_type, resolution_steps, sentiment" | "/Volumes/support/transcripts/audio_to_text/" |
-| "Damaged Product Photos" | "Customer-submitted JPEG images showing defective or damaged products for warranty claims and RMA processing." | "JPG" | "damage_type, product_area, serial_number (if visible)" | "/Volumes/claims/images/damaged_products/" |
----
-Begin generation now. Your response must start directly with the markdown table header.
-| "Document Name" | "Description" | "Type" | "Extracted Entities" | "File Path" |
-|---|---|---|---|---|
-
-🚨 ABSOLUTE RULE - OUTPUT FORMAT 🚨:
-
-❌ DO NOT INCLUDE:
-- Any conversational or explanatory text ("Here are...", "I've generated...", "Based on...")
-- Any thoughts or analysis descriptions
-
-✅ OUTPUT REQUIREMENTS:
-- Your response must START with: | "Document Name" | ... | "honesty_score" | "honesty_justification" |
-- Include honesty_score and honesty_justification as the last 2 columns in header and all rows
-""" + HONESTY_CHECK_TABLE
 
 # --- 1c. PDF Summary Prompt (MODIFIED FOR REQUEST #1) ---
 PROMPT_TEMPLATES["SUMMARY_GEN_PROMPT"] = """
@@ -2061,7 +2022,7 @@ The CSV must contain:
 "Type","Summary","TransliteratedBusinessName"
 "Executive","<p>Global Enterprises stands at the forefront of its industry, and with {total_cases} identified use cases, the organization is poised to revolutionize its operations through the strategic implementation of Databricks Agent Bricks.</p><p>This catalog outlines a clear path to leveraging data and AI to drive innovation, enhance efficiency, and create significant business value across all key domains.</p>","Global Enterprises"
 "Customer Management","<p>The Customer Management domain is central to Global Enterprises's success, as it governs all direct interactions and the entire customer lifecycle. Its primary responsibility is to ensure high rates of acquisition, satisfaction, and retention.</p><p>By leveraging Databricks Agent Bricks, Global Enterprises can transform this domain, moving from reactive support to proactive engagement. Opportunities include developing sophisticated churn prediction models and deploying generative AI agents to provide instant, personalized customer service, dramatically improving loyalty and reducing operational costs.</p>",""
-"Finance & Billing","<p>Managing the financial health of the organization, the Finance & Billing domain is critical for ensuring revenue integrity, compliance, and accurate forecasting. This domain oversees everything from invoicing and payments to financial reporting and risk analysis.</p><p>Databricks Agent Bricks presents a significant opportunity to automate and intelligentize these processes. For instance, AI can be used to parse unstructured invoices, detect payment anomalies in real-time, and generate highly accurate revenue forecasts, thereby strengthening the organization's financial posture and decision-making capabilities.</p>",""
+"Finance & Billing","<p>Managing the financial health of the organization, the Finance & Billing domain is critical for ensuring revenue integrity, compliance, and accurate forecasting. This domain oversees everything from invoicing and payments to financial reporting and risk analysis.</p><p>Databricks Agent Bricks presents a significant opportunity to automate and intelligentize these processes. For instance, AI can be used to parse document invoices, detect payment anomalies in real-time, and generate highly accurate revenue forecasts, thereby strengthening the organization's financial posture and decision-making capabilities.</p>",""
 
 ### FINAL INSTRUCTION
 Begin generation now. Produce ONLY the CSV text, starting with the header `"Type","Summary","TransliteratedBusinessName"`.
@@ -2377,7 +2338,7 @@ Your response MUST be PURE CSV DATA ONLY.
 **FIELDS TO TRANSLATE** (translate these 10 fields ONLY):
 "Name", "Business Domain", "Subdomain", "type", "Statement", "Solution", "Business Value", "Beneficiary", "Sponsor", "Business Priority Alignment"
 
-Do NOT translate: "No", "Tables Involved", "Analytics Technique", "Priority"
+Do NOT translate: "No", "Tables Involved", "Analytics Technique", "Quality"
 
 **SPECIAL RULES FOR STRATEGIC GOAL ALIGNMENT FIELD**:
 - This field contains strategic goal values like: "Reduce Cost", "Increase Revenue", "Boost Productivity", "Mitigate Risk", "Protect Revenue", "Align to Regulations", "Improve Customer Experience", "Enable Data-Driven Decisions", "General Improvement"
@@ -2414,18 +2375,18 @@ Your response MUST be in CSV format with the following structure:
 - Subsequent lines: One row per use case with 14 fields
 
 **CSV HEADER (MUST BE EXACTLY THIS)**:
-"No","Name","Business Domain","Subdomain","type","Analytics Technique","Statement","Solution","Business Value","Beneficiary","Sponsor","Business Priority Alignment","Tables Involved","Priority"
+"No","Name","Business Domain","Subdomain","type","Analytics Technique","Statement","Solution","Business Value","Beneficiary","Sponsor","Business Priority Alignment","Tables Involved","Quality"
 
 **CRITICAL CSV FORMATTING RULES**:
 1. ALL fields MUST be enclosed in double quotes (")
 2. Use comma (,) as the field separator
 3. For fields containing commas or quotes, keep them inside the double quotes
 4. Each row must have exactly 14 fields (SQL is NOT included)
-5. Keep untranslated fields (No, Tables Involved, Analytics Technique, Priority) EXACTLY as they appear in the input
+5. Keep untranslated fields (No, Tables Involved, Analytics Technique, Quality) EXACTLY as they appear in the input
 6. The Analytics Technique field should be copied EXACTLY as-is in English (do not translate)
-7. The Priority field should be copied EXACTLY as-is in English (do not translate "Very High", "High", "Medium", "Low", "Very Low")
+7. The Quality field should be copied EXACTLY as-is in English (do not translate "Very High", "High", "Medium", "Low", "Very Low")
 
-**IMPORTANT**: Analytics Technique and Priority values remain in English in the CSV. The UI will handle translation separately.
+**IMPORTANT**: Analytics Technique and Quality values remain in English in the CSV. The UI will handle translation separately.
 
 **TRANSLATION REQUIREMENTS**:
 1. Translate ALL 10 designated fields for EVERY use case
@@ -2438,7 +2399,7 @@ Your response MUST be in CSV format with the following structure:
 - "Databricks Agent Bricks" → Keep as-is for all languages EXCEPT Arabic: "الذكاء الصناعي الخاص بداتا بريكس"
 - Preserve all technical terms in SQL exactly as they appear
 - Keep numeric IDs (like "AI-001") unchanged
-- Keep Analytics Technique and Priority values in English (not translated in CSV)
+- Keep Analytics Technique and Quality values in English (not translated in CSV)
 - For Arabic: Ensure complete and proper Arabic text encoding. Double-check all Arabic characters are properly formed.
 
 **🛑 ABSOLUTELY FORBIDDEN - DO NOT INCLUDE 🛑**:
@@ -2457,7 +2418,7 @@ Your response MUST be in CSV format with the following structure:
 ✓ Each row has exactly 14 comma-separated fields (SQL is NOT included)
 ✓ No markdown fences (```) around the CSV
 ✓ Analytics Technique field is copied exactly as received (do not translate it)
-✓ Priority field is copied exactly as received (do not translate it)
+✓ Quality field is copied exactly as received (do not translate it)
 ✓ Business Priority Alignment field is translated to target language
 ✓ All 10 translatable fields are translated for every row
 
@@ -2627,11 +2588,13 @@ PROMPT_TEMPLATES["REVIEW_USE_CASES_PROMPT"] = """You are the **Chief Quality Off
 
 **🚨🚨🚨 TARGET: 40-60% REMOVAL — be EXTREME. It is better to deliver 50 exceptional use cases than 150 mediocre ones. 🚨🚨🚨**
 
+**INPUT**: You receive ONLY the use case ID, Name, and Business Domain. This is intentional — judge duplicates purely on BUSINESS INTENT, not on technical implementation details.
+
 **REMOVAL CRITERIA (apply ALL of these — a use case failing ANY criterion is REMOVED):**
 
-**1. SEMANTIC DUPLICATES — 5-LAYER DETECTION (keep BEST occurrence only, remove ALL others):**
+**1. SEMANTIC DUPLICATES — 6-LAYER DETECTION (keep BEST occurrence only, remove ALL others):**
 
-Apply ALL 5 layers. A match on ANY single layer = DUPLICATE = REMOVE.
+Apply ALL 6 layers. A match on ANY single layer = DUPLICATE = REMOVE.
 
 **LAYER 1 — VERB + SUFFIX NORMALIZATION:**
 a. Normalize leading verb: Forecast/Predict/Anticipate/Envision → PREDICT; Detect/Identify/Reveal/Find/Discover/Uncover/Expose → DETECT; Classify/Segment/Categorize/Tier/Rank → CLASSIFY; Simulate/Model/Project → SIMULATE; Optimize/Maximize/Minimize → OPTIMIZE; Assess/Evaluate/Measure/Gauge/Quantify → ASSESS
@@ -2647,27 +2610,33 @@ Extract the business ENTITY (what's being analyzed) and METRIC (what's being mea
 Examples: "Forecast Customer Churn Rate" and "Predict Client Attrition Probability" → entity=Customer, metric=Churn → DUPLICATE
 
 **LAYER 4 — TECHNIQUE SWAP:**
-"Forecast X", "Detect X Anomalies", "Classify X Risk Tiers", "Segment X by Behavior" on the SAME X → ALL are duplicates. Keep ONLY the one with the deepest, most complex analysis.
+"Forecast X", "Detect X Anomalies", "Classify X Risk Tiers", "Segment X by Behavior" on the SAME X → ALL are duplicates. Keep ONLY the one with the deepest, most complex analysis (judged by specificity of the name).
 
-**LAYER 5 — TABLE + INTENT OVERLAP:**
-Two use cases using the SAME primary tables with a SIMILAR business question → DUPLICATE. Different tables accessing different data dimensions = potentially unique. Same tables + similar intent = REMOVE one.
+**LAYER 5 — STRATEGIC OVERLAP (CRITICAL — catches what other layers miss):**
+Two use cases that serve the SAME strategic business objective, even if they use different analytical techniques, are DUPLICATES. Ask: "If a business executive received the output of BOTH, would they say these solve the same problem?" If yes → DUPLICATE → keep the more comprehensive one.
+Examples:
+  - "Classify Competitive Threat Level by Route with Service Strategy" vs "Simulate Route Network Expansion with Investment Scenarios" → BOTH answer "which routes need competitive action?" → DUPLICATE
+  - "Detect Revenue Leakage with Recovery Actions" vs "Forecast Revenue Trends with Growth Strategy" → Different objectives (fix leaks vs predict future) → NOT duplicates
 
-**DUPLICATE RESOLUTION — TABLE-BASED VIABILITY (MANDATORY when choosing which duplicate to KEEP):**
-When two or more use cases are identified as duplicates on ANY layer above, you MUST keep the one whose involved tables are most likely to contain the actual data that supports the claimed business value. Apply this reasoning:
-a. **Data Richness**: Which use case's tables have columns (evidenced by table name and context) that would realistically store the metrics, dimensions, and history needed for the analysis?
-b. **Transactional vs Reference**: Prefer use cases anchored on TRANSACTIONAL tables (orders, transactions, events, logs) over those relying solely on REFERENCE/MASTER tables (lookups, configs) — transactional data enables time-series, trend, and anomaly analysis.
-c. **Multi-Table Joins**: Prefer use cases that JOIN multiple complementary tables over single-table use cases — cross-table analysis yields richer, harder-to-replicate insights.
-d. **Specificity of Claim**: If a use case claims high business value but its tables are unlikely to contain the supporting data (e.g., "Predict Customer Churn" using only a product catalog table), REMOVE it in favor of the duplicate whose tables actually contain customer behavior data.
+**LAYER 6 — SUBSUMPTION (one use case contains another):**
+If use case A's analytical scope FULLY CONTAINS use case B's scope, then B is redundant. Remove B, keep A.
+Examples:
+  - "Simulate Route Network Expansion with Strategic Investment Scenarios" SUBSUMES "Classify Competitive Threat Level by Route" because expansion simulation already includes competitive threat assessment.
+  - "Predict Customer Lifetime Value with Retention Strategy" SUBSUMES "Forecast Customer Churn Risk" because LTV modeling inherently includes churn as a component.
+
+**DUPLICATE RESOLUTION — when choosing which duplicate to KEEP:**
+a. **Breadth**: Keep the use case with broader analytical scope (subsumes the other).
+b. **Specificity of Deliverable**: Keep the one whose "with [activation]" suffix describes a more specific, actionable business deliverable.
+c. **Tie-break**: Keep the earliest ID.
 
 **NOT DUPLICATES**: Genuinely different business ENTITIES ("Revenue by Route" vs "Revenue by Customer" — different analytical dimensions), or genuinely different METRICS on the same entity ("Customer Churn" vs "Customer Lifetime Value").
 
 **2. TRIVIAL AI WRAPPERS (REMOVE entirely):**
-Use cases where the analytical core is a simple SQL operation disguised as AI/ML:
-  - Date expiry/deadline checks ("Detect Expiry Risk", "Forecast Compliance Deadline Breach") = just `WHERE date < threshold`
-  - Simple threshold violations ("Detect Overdue X", "Identify Overrun Risk") = just `WHERE value > limit`
-  - One-dimensional anomaly detection = just Z-score on a single metric with no multi-dimensional analysis
+Use cases where the name implies a simple SQL operation disguised as AI/ML:
+  - Date expiry/deadline checks ("Detect Expiry Risk", "Forecast Compliance Deadline Breach")
+  - Simple threshold violations ("Detect Overdue X", "Identify Overrun Risk")
   - Basic count/sum aggregation presented as "AI Analysis"
-  **TEST**: Would a junior SQL developer implement this in under 10 lines without ANY AI functions? If yes → REMOVE.
+  **TEST**: Does the name describe something a junior analyst could answer with a simple SQL WHERE clause? If yes → REMOVE.
 
 **3. TECHNICAL METHOD OR HOLLOW ACTIVATION (REMOVE entirely):**
 Use cases where the "with [activation]" suffix describes a technical method instead of a business deliverable, OR is meaningless filler:
@@ -2680,20 +2649,10 @@ Use cases where the "with [activation]" suffix describes a technical method inst
 
 **4. DOMAIN OVERCONCENTRATION (REMOVE excess aggressively):**
 If any single domain exceeds 20% of the portfolio, remove the WEAKEST use cases from that domain until it's at or below 20%.
-If any single analytics technique exceeds 25%, remove the weakest use cases using that technique until it's at or below 25%.
-Count each domain and technique. If the top 2 domains hold >50% combined, the portfolio lacks diversity — remove more from over-represented areas.
+Count each domain. If the top 2 domains hold >50% combined, the portfolio lacks diversity — remove more from over-represented areas.
 
-**5. SUBDOMAIN ISSUES (REMOVE or FLAG):**
-a. If the same subdomain appears under multiple parent domains, keep only the assignment under the most natural parent domain. Remove the others.
-b. Flag any use case whose subdomain is a PLACEHOLDER (e.g., "Sub Domain1", "Domain 1", "Category 1", "N/A", "Other", "General", "Miscellaneous", "Uncategorized") — these indicate generation failures and should be removed unless the use case itself is high-value, in which case note "NEEDS_SUBDOMAIN_REASSIGNMENT" in the justification.
-
-**6. IDENTICAL NAMES (REMOVE all but first):**
+**5. IDENTICAL NAMES (REMOVE all but first):**
 If two or more use cases have the EXACT same name, keep only the first by ID. This is an obvious generation defect.
-
-**7. IRRELEVANT CORRELATIONS (REMOVE):**
-Variables with no provable cause-and-effect. If a CFO would question the logic, REMOVE.
-
-**NON-DUPLICATES (KEEP both):** Genuinely different business objects, different analytical questions, or different data dimensions.
 
 **RULES**: Keep earliest ID on duplicates. Reviewing ALL {total_count} use cases in one pass.
 
@@ -3697,6 +3656,7 @@ Refer to the **AVAILABLE STATISTICAL FUNCTIONS** section below for the complete 
 **🌐🌐🌐 REQUIRED FOR ACCURACY: EXTERNAL PUBLIC DATA ENRICHMENT CTE 🌐🌐🌐**
 
 **The `simulated_external_data_for_<scenario>` CTE is REQUIRED for generating accurate ai_txt_business_outcome calculations. This CTE provides market rates, benchmarks, and external factors that transform internal data into actionable business intelligence with measurable ROI.**
+**USER NOTE (MANDATORY IN SQL COMMENT): This simulated external data is required to produce high-quality output. It is acceptable for prototyping, but in production the user MUST connect this step to verified external data sources.**
 
 **⚠️ WITHOUT simulated_external_data: Your analysis will lack market context, making ai_txt_business_outcome calculations less accurate and less credible.**
 **✅ WITH simulated_external_data: Your analysis includes verified market rates (commodity prices, labor costs, industry benchmarks) enabling precise ROI calculations.**
@@ -3754,6 +3714,8 @@ See Anti-Pattern #21 for full examples.
 **PERSONA TEMPLATE:**
 ```sql
 -- Step X: Fetch external public data for contextual enrichment
+-- NOTE TO USER: This simulated external data is required to produce high-quality output.
+-- NOTE TO USER: For prototyping this step is simulated; in production you MUST connect to verified external data sources.
 -- NOTE: For production, connect to verified data sources (weather APIs, market data feeds, etc.). 
 -- LLM estimates are suitable for prototyping but require verification before business decisions.
 simulated_external_data_for_<scenario> AS (
@@ -4207,8 +4169,8 @@ The tables listed above include:
 - DO NOT hallucinate or invent table/column names
 - Use ONLY what is explicitly provided above
 
-**UNSTRUCTURED DOCUMENTS** (if applicable):
-{unstructured_docs}
+**DOCUMENT DOCUMENTS** (if applicable):
+{document_context}
 
 {previous_feedback}
 
@@ -5890,7 +5852,7 @@ SELECT * FROM messy_cte;  -- ❌ This messy pattern is wrong - don't copy it!
 
 **Pre-flight check before ANY AI extraction:**
 1. Does this value already exist as a column? -> YES = use column directly, NO = proceed
-2. Am I extracting from unstructured data (text fields, documents)? -> YES = AI is appropriate
+2. Am I extracting from document data (text fields, documents)? -> YES = AI is appropriate
 3. Am I embedding column values into a prompt then extracting them back? -> YES = STOP, use columns directly
 
 | Data Source | Column Exists? | Use AI? |
@@ -5901,7 +5863,7 @@ SELECT * FROM messy_cte;  -- ❌ This messy pattern is wrong - don't copy it!
 
 **VALID AI extraction use cases:**
 ```sql
--- USE CASE 1: Extract from unstructured text
+-- USE CASE 1: Extract from document text
 SELECT order_id, ai_extract(notes_text, ARRAY('delivery_date', 'contact_person')) AS info
 FROM orders WHERE notes_text IS NOT NULL LIMIT 10;
 
@@ -6098,7 +6060,7 @@ SELECT path, ai_extract(
   ai_query('endpoint', prompt, system_prompt => 'You are...')  -- ❌ system_prompt does NOT exist!
   ```
 
-- **AI_PARSE_DOCUMENT SYNTAX** (🚨 CRITICAL - ONLY FOR UNSTRUCTURED FILES):
+- **AI_PARSE_DOCUMENT SYNTAX** (🚨 CRITICAL - ONLY FOR DOCUMENT FILES):
   ```sql
   -- CORRECT ✅ - Processing document files from Unity Catalog volumes
   WITH docs AS (
@@ -6124,7 +6086,7 @@ SELECT path, ai_extract(
   ```
   
   **🚨 CRITICAL REQUIREMENTS FOR ai_parse_document:**
-  - MUST ONLY be used with unstructured document files (PDF, JPG/JPEG, PNG, DOC/DOCX, PPT/PPTX)
+  - MUST ONLY be used with document document files (PDF, JPG/JPEG, PNG, DOC/DOCX, PPT/PPTX)
   - Input MUST come from READ_FILES('/Volumes/...', format => 'binaryFile') 
   - NEVER use with structured table columns or Delta table data
   - Output is VARIANT type with version 2.0 schema
@@ -7137,7 +7099,7 @@ statistical_analysis AS (
 **CRITICAL: When the use case requires multiple functions (AI functions, statistical functions), you MUST use ALL of them creatively.**
 
 Create SOPHISTICATED multi-stage queries using CTEs:
-- **Example**: `ai_parse_document, ai_extract, ai_classify` (for unstructured document files)
+- **Example**: `ai_parse_document, ai_extract, ai_classify` (for document document files)
   ```sql
   WITH parsed AS (
     SELECT 
@@ -7176,7 +7138,7 @@ Create SOPHISTICATED multi-stage queries using CTEs:
 
   --END OF GENERATED SQL
   ```
-  **NOTE:** ai_parse_document ONLY works with unstructured document files via READ_FILES, NOT with table columns.
+  **NOTE:** ai_parse_document ONLY works with document document files via READ_FILES, NOT with table columns.
 
 - **Example**: `ai_extract` from text, then `ai_classify` for categorization (valid combination)
   ```sql
@@ -7207,7 +7169,7 @@ Create SOPHISTICATED multi-stage queries using CTEs:
 **CRITICAL - MAXIMIZE VALUE WITH MULTIPLE AI FUNCTIONS**: 
 - **ALWAYS try to use 2-3 AI functions in the same SQL query to maximize business value**
 
-#### 5. **STRUCTURED + UNSTRUCTURED OUTPUT PATTERN (NEW - MANDATORY)**
+#### 5. **STRUCTURED + DOCUMENT OUTPUT PATTERN (NEW - MANDATORY)**
 
 **🔥 CRITICAL: DO NOT use ai_extract or ai_classify after ai_query**
 
@@ -7613,7 +7575,7 @@ FROM `main`.`feedback`.`customer_reviews` AS f
 - **Why?** ai_query can directly output structured JSON - no need for post-processing with ai_extract/ai_classify
 
 **WHY THIS MATTERS:**
-- **Unstructured output**: Full context and explanations for human review
+- **Document output**: Full context and explanations for human review
 - **Structured output**: Machine-readable fields for downstream automation, dashboards, and analytics
 - **Best of both worlds**: Human-readable insights + programmatic access
 - You can call multiple ai_functions in the same CTE or SELECT statement
@@ -8742,7 +8704,7 @@ select * from {inspire_database}._inspire_n05_ai01_customer_segmentation_retenti
 ```sql
 CREATE OR REPLACE TABLE {inspire_database}._inspire_n06_ai01_order_details_extracted AS
 -- Use Case: Extract Order Details from Notes
--- Extracts structured data from unstructured order notes
+-- Extracts structured data from document order notes
 
 WITH base AS (
   SELECT 
@@ -9069,7 +9031,7 @@ FROM forecast_results;  -- ✅ NO LIMIT
 ```sql
 -- Use Case: Intelligent Document Processing Pipeline
 -- Parses invoice document files, extracts data, and classifies by urgency
--- CRITICAL: ai_parse_document is used ONLY with unstructured document files from Unity Catalog volumes
+-- CRITICAL: ai_parse_document is used ONLY with document document files from Unity Catalog volumes
 
 WITH document_files AS (
   SELECT 
@@ -9116,7 +9078,7 @@ FROM extracted_data;  -- ✅ NO LIMIT in final SELECT
 ```
 
 **CRITICAL NOTE FOR ai_parse_document:**
-- ai_parse_document MUST ONLY be used with unstructured document files (PDFs, images, Word docs, PowerPoints)
+- ai_parse_document MUST ONLY be used with document document files (PDFs, images, Word docs, PowerPoints)
 - Use READ_FILES('/Volumes/path/to/files/*.{{pdf,jpg,png,doc,docx,ppt,pptx}}', format => 'binaryFile') to load binary content
 - NEVER use ai_parse_document with table columns or structured data already in Delta tables
 - The output is VARIANT type with schema version 2.0 containing document elements (text, tables, figures)
@@ -9587,7 +9549,7 @@ WITH ...
 ☐ **ai_query**: 3-5 categorical columns + 2-4 narrative columns in JSON
 ☐ **ai_classify**: ARRAY has ≤20 items, each <50 chars
 ☐ **ai_extract**: ARRAY has ≤20 items, each <50 chars
-☐ **ai_parse_document**: ONLY used with READ_FILES for unstructured docs (NOT table columns)
+☐ **ai_parse_document**: ONLY used with READ_FILES for document docs (NOT table columns)
 
 #### **SECTION 7: BUSINESS REQUIREMENTS**
 
@@ -10223,6 +10185,25 @@ _TRANSIENT_UC_FIELDS = frozenset({
     'cte_col_ref_status', 'directly_involved_schema',
     '_pending_sub_batch_results',
 })
+
+_STATIC_VALIDATION_STATUS_KEYS = (
+    'cte_chaining_status', 'repeated_with_status', 'format_string_status',
+    'invalid_format_conversion_status', 'enrichment_propagation_status',
+    'dead_cte_status', 'column_ref_groupby_status', 'unquoted_coalesce_status',
+    'lateral_alias_window_status', 'agg_without_over_status', 'pii_leak_status',
+    'source_col_hallucination_status', 'distinct_window_status',
+    'scalar_subq_over_status', 'window_inside_agg_status',
+    'window_over_group_by_status', 'params_quoting_status',
+    'ai_forecast_named_struct_status', 'fs_col_availability_status',
+    'cte_col_ref_status', 'create_table_status', 'ai_functions_status',
+    'ai_query_params_status', 'quoted_datetime_unit_status',
+    'ansi_mode_division_status', 'limit_first_cte_status',
+    'mandatory_output_cols_status',
+)
+
+_STATIC_VALIDATION_WARNING_KEYS = tuple(
+    k.replace('_status', '_warnings') for k in _STATIC_VALIDATION_STATUS_KEYS
+)
 
 def _strip_transient_fields(use_case: dict) -> dict:
     """Remove transient/validation fields from a use case dict to reduce memory footprint."""
@@ -12717,12 +12698,14 @@ class AIAgent:
         self.worker_llm = worker_llm_config
         self.judge_llm = judge_llm_config
         self.prompt_templates = prompt_templates  # <-- NEW: Store the dictionary
-        self.current_language = "English"  # Default language for context limit calculations
+        self._language_local = threading.local()
+        self._language_local.language = "English"
         self.default_timeout_seconds = default_timeout_seconds
         self.max_retry_attempts = max(0, max_retry_attempts)
         self.status_emitter = status_emitter
         self._status_step_ids = {}
         self._warning_seq = 0
+        self._status_lock = threading.Lock()
         
         self._llm_cache_dir = None
         self._llm_cache_lock = threading.Lock()
@@ -12754,8 +12737,10 @@ class AIAgent:
 
     def _emit_runtime_warning(self, prompt_name: str, step_name: str, message: str, payload: dict = None):
         import time
-        self._warning_seq += 1
-        warning_step = f"{step_name}__warning_{int(time.time() * 1000)}_{self._warning_seq}"
+        with self._status_lock:
+            self._warning_seq += 1
+            seq = self._warning_seq
+        warning_step = f"{step_name}__warning_{int(time.time() * 1000)}_{seq}"
         self._emit_status(
             prompt_name=prompt_name,
             step_name=warning_step,
@@ -12780,10 +12765,12 @@ class AIAgent:
                     step_id=None
                 )
                 if step_id is not None:
-                    self._status_step_ids[key] = step_id
+                    with self._status_lock:
+                        self._status_step_ids[key] = step_id
                 return
 
-            existing_step_id = self._status_step_ids.get(key)
+            with self._status_lock:
+                existing_step_id = self._status_step_ids.get(key)
             self.status_emitter(
                 prompt_name=prompt_name,
                 step_name=step_name,
@@ -12793,7 +12780,8 @@ class AIAgent:
                 step_id=existing_step_id
             )
             if status.startswith("ended_"):
-                self._status_step_ids.pop(key, None)
+                with self._status_lock:
+                    self._status_step_ids.pop(key, None)
         except Exception:
             pass
 
@@ -12880,12 +12868,13 @@ class AIAgent:
         rows, total_rows, truncated = self._extract_csv_rows(raw_response)
         parsed_json = self._extract_json_object(raw_response)
 
-        if prompt_name in ("AI_USE_CASE_GEN_PROMPT", "STATS_USE_CASE_GEN_PROMPT", "BASE_USE_CASE_GEN_PROMPT", "UNSTRUCTURED_DATA_USE_CASE_GEN_PROMPT"):
+        if prompt_name in ("AI_USE_CASE_GEN_PROMPT", "STATS_USE_CASE_GEN_PROMPT", "BASE_USE_CASE_GEN_PROMPT"):
             use_cases = []
             for r in rows:
                 use_cases.append({
                     "id": r.get("No", ""),
                     "name": r.get("Name", ""),
+                    "usecase": r.get("usecase", ""),
                     "business_domain": r.get("Business Domain", ""),
                     "subdomain": r.get("Subdomain", ""),
                     "type": r.get("type", ""),
@@ -12914,6 +12903,7 @@ class AIAgent:
                 item = {
                     "id": r.get("No", ""),
                     "name": r.get("Name", ""),
+                    "usecase": r.get("usecase", ""),
                     "priority": r.get("Priority", r.get("priority", "")),
                     "value": r.get("Value", r.get("value", "")),
                     "feasibility": r.get("Feasibility", r.get("feasibility", "")),
@@ -12929,7 +12919,7 @@ class AIAgent:
             return f"{prompt_name} completed with {total_rows} scored use cases", payload
 
         if prompt_name in ("USE_CASE_SQL_GEN_PROMPT", "USE_CASE_SQL_FIX_PROMPT", "INTERPRET_USER_SQL_REGENERATION_PROMPT"):
-            payload["sql_preview"] = (raw_response or "")[:2000]
+            payload["sql"] = raw_response or ""
             return f"{prompt_name} completed", payload
 
         if rows:
@@ -12942,8 +12932,16 @@ class AIAgent:
             return f"{prompt_name} completed", payload
         return f"{prompt_name} completed", payload
     
+    @property
+    def current_language(self) -> str:
+        return getattr(self._language_local, 'language', 'English')
+
+    @current_language.setter
+    def current_language(self, value: str):
+        self._language_local.language = value
+
     def set_language(self, language: str):
-        self.current_language = language
+        self._language_local.language = language
 
     def enable_llm_cache(self, session_id):
         import tempfile, os
@@ -12995,6 +12993,26 @@ class AIAgent:
                     f.write(response)
         except Exception:
             pass
+
+    def _llm_cache_invalidate(self, prompt: str, model: str):
+        if not self._llm_cache_dir:
+            return
+        import os
+        key = self._llm_cache_key(prompt, model)
+        path = os.path.join(self._llm_cache_dir, f"{key}.txt")
+        try:
+            if os.path.exists(path):
+                with self._llm_cache_lock:
+                    os.remove(path)
+                self.logger.info(f"   LLM cache INVALIDATED: key={key[:12]}... (failed validation)")
+        except Exception:
+            pass
+
+    def _llm_cache_invalidate_all_models(self, prompt: str):
+        if not self._llm_cache_dir:
+            return
+        for model_config in TECHNICAL_CONTEXT.get("models", []):
+            self._llm_cache_invalidate(prompt, model_config["llm_endpoint_name"])
 
     _UNESCAPED_BRACE_RE = re.compile(r'(?<!\{)\{([^{}]+)\}(?!\})')
 
@@ -13059,10 +13077,10 @@ class AIAgent:
         """
         Calls Databricks AI query function with the given prompt.
         
-        Uses model_type cascade: resolves the prompt's model_type (thinker/worker) to an
-        ordered list of models. Tries the lowest-order model first; on failure, cascades
-        to the next model of the same type. Each model gets up to max_retries attempts
-        before cascading.
+        Uses model_type + model_size cascade: resolves the prompt's model bucket to an
+        ordered list of enabled models. Tries the lowest-order model first; on failure,
+        cascades to the next enabled model in the same bucket. Each model gets up to
+        max_retries attempts before cascading.
         
         Args:
             prompt: The prompt text
@@ -13108,8 +13126,6 @@ class AIAgent:
             model_cascade = [override_config]
         elif start_from_model:
             full_cascade = get_model_cascade_for_prompt(prompt_name)
-            if not full_cascade:
-                full_cascade = sorted(TECHNICAL_CONTEXT["models"], key=lambda m: m.get("order", 999))
             found_start = False
             model_cascade = []
             for m in full_cascade:
@@ -13122,8 +13138,8 @@ class AIAgent:
                 model_cascade = full_cascade
         else:
             model_cascade = get_model_cascade_for_prompt(prompt_name)
-            if not model_cascade:
-                model_cascade = sorted(TECHNICAL_CONTEXT["models"], key=lambda m: m.get("order", 999))
+        if not model_cascade:
+            raise ValueError(f"No enabled models available for prompt bucket of '{prompt_name}'")
 
         cascade_names = [m.get("name", m["llm_endpoint_name"]) for m in model_cascade]
         self.logger.info(f"   [{prompt_name}] Model cascade ({len(model_cascade)}): {' -> '.join(cascade_names)}")
@@ -13135,6 +13151,8 @@ class AIAgent:
                     return cached
         elif skip_cache and self._llm_cache_dir:
             self.logger.debug(f"   [{prompt_name}] Cache SKIPPED (retry wave — forcing fresh LLM call)")
+            for _mc in model_cascade:
+                self._llm_cache_invalidate(prompt, _mc["llm_endpoint_name"])
 
         last_error = None
         prompt_len = len(prompt)
@@ -13831,7 +13849,7 @@ class TranslationService:
         "total": "Total Use Cases",
         "summaries": "Use Case Summaries",
         "sum_id": "ID",
-        "sum_name": "Name",
+        "sum_name": "Use Case",
         "sum_value": "Business Value",
         "sum_outcome": "Expected Outcome",
         "warning_header": "WARNING",
@@ -13868,6 +13886,8 @@ class TranslationService:
         "business_priority_alignment": "Business Priority Alignment",
         "strategic_goals_alignment": "Strategic Goals Alignment",
         "subdomain": "Subdomain",
+        "usecase": "Use Case",
+        "description_label": "Description",
         "aspect_value": "Business Value",
         "business_value": "Business Value",
         "aspect_tables": "Tables Involved",
@@ -13953,7 +13973,8 @@ class TranslationService:
         """
         self.ai_agent = ai_agent
         self.logger = logger or logging.getLogger(self.__class__.__name__)
-        self.translation_cache = {} # Cache for UI elements
+        self.translation_cache = {}
+        self._translation_cache_lock = threading.Lock()
 
     # Complete fallback translations for ALL keys - ensures translations are 100% reliable
     TRANSLATION_FALLBACKS = {
@@ -15313,22 +15334,20 @@ class TranslationService:
             self.logger.info("Using default English UI translations.")
             return self.ENGLISH_TRANSLATIONS
         
-        if target_language in self.translation_cache:
-            cached = self.translation_cache[target_language]
-            # Check if all keys from ENGLISH_TRANSLATIONS are present in cache
-            missing_keys = set(self.ENGLISH_TRANSLATIONS.keys()) - set(cached.keys())
-            if not missing_keys:
-                # Validate that translations are actually in target language
-                if self._validate_translations(cached, target_language):
-                    self.logger.info(f"Using cached UI translations for {target_language}.")
-                    return cached
+        with self._translation_cache_lock:
+            if target_language in self.translation_cache:
+                cached = self.translation_cache[target_language]
+                missing_keys = set(self.ENGLISH_TRANSLATIONS.keys()) - set(cached.keys())
+                if not missing_keys:
+                    if self._validate_translations(cached, target_language):
+                        self.logger.info(f"Using cached UI translations for {target_language}.")
+                        return cached
+                    else:
+                        self.logger.warning(f"Cached translations for {target_language} contain English values. Forcing re-translation...")
+                        del self.translation_cache[target_language]
                 else:
-                    self.logger.warning(f"Cached translations for {target_language} contain English values. Forcing re-translation...")
+                    self.logger.info(f"Cache for {target_language} is outdated (missing {len(missing_keys)} keys). Refreshing...")
                     del self.translation_cache[target_language]
-            else:
-                self.logger.info(f"Cache for {target_language} is outdated (missing {len(missing_keys)} keys). Refreshing...")
-                # Remove from cache to force re-translation
-                del self.translation_cache[target_language]
 
         self.logger.debug(f"Calling LLM to get UI translations for {target_language}...")
         
@@ -15376,13 +15395,15 @@ class TranslationService:
                         final_translations = self._apply_translation_fallbacks(final_translations, target_language)
                         if self._validate_translations(final_translations, target_language):
                             self.logger.info(f"Fallback translations fixed the issue. Using fallbacks.")
-                            self.translation_cache[target_language] = final_translations
+                            with self._translation_cache_lock:
+                                self.translation_cache[target_language] = final_translations
                             return final_translations
                         self.logger.error(f"Translation validation failed on final attempt. Falling back to English.")
                         return self.ENGLISH_TRANSLATIONS
                 
                 self.logger.info(f"Successfully fetched and cached UI translations for {target_language} on attempt {attempt}.")
-                self.translation_cache[target_language] = final_translations
+                with self._translation_cache_lock:
+                    self.translation_cache[target_language] = final_translations
                 return final_translations
 
             except Exception as e:
@@ -15635,28 +15656,27 @@ class TranslationService:
                 # Debug-level logging instead of warning (reduces noise)
                 self.logger.debug(f"Batch #{batch_num}: Response contains {sql_pattern_count} SQL keywords (expected ~{expected_sql_mentions}). This is normal for complex queries.")
             
-            # Find header line (14 columns - SQL is NOT included in translation to prevent truncation)
-            # Support both quoted and unquoted headers from LLM
-            # Also support legacy formats for backwards compatibility
-            header_pattern_quoted = r'"No","Name","Business Domain","Subdomain","type","Analytics Technique","Statement","Solution","Business Value","Beneficiary","Sponsor","Business Priority Alignment","Tables Involved","Quality"'
-            header_pattern_unquoted = r'No,Name,Business Domain,Subdomain,type,Analytics Technique,Statement,Solution,Business Value,Beneficiary,Sponsor,Business Priority Alignment,Tables Involved,Quality'
-            # Legacy patterns (with Complexity instead of Analytics Technique - for backwards compatibility)
-            legacy_header_quoted = r'"No","Name","Business Domain","Subdomain","type","Statement","Solution","Business Value","Beneficiary","Sponsor","Business Priority Alignment","Tables Involved","Complexity","Quality"'
-            legacy_header_unquoted = r'No,Name,Business Domain,Subdomain,type,Statement,Solution,Business Value,Beneficiary,Sponsor,Business Priority Alignment,Tables Involved,Complexity,Quality'
-            header_match = re.search(header_pattern_quoted, csv_clean)
-            if not header_match:
-                header_match = re.search(header_pattern_unquoted, csv_clean)
-            if not header_match:
-                # Try legacy format (13 columns without Business Priority Alignment)
-                header_match = re.search(legacy_header_quoted, csv_clean)
+            header_patterns = [
+                (r'"No","Name","Business Domain","Subdomain","type","Analytics Technique","Statement","Solution","Business Value","Beneficiary","Sponsor","Business Priority Alignment","Tables Involved","Quality"', "14-col quoted Quality"),
+                (r'No,Name,Business Domain,Subdomain,type,Analytics Technique,Statement,Solution,Business Value,Beneficiary,Sponsor,Business Priority Alignment,Tables Involved,Quality', "14-col unquoted Quality"),
+                (r'"No","Name","Business Domain","Subdomain","type","Statement","Solution","Business Value","Beneficiary","Sponsor","Business Priority Alignment","Tables Involved","Quality"', "13-col quoted Quality (no Analytics Technique)"),
+                (r'No,Name,Business Domain,Subdomain,type,Statement,Solution,Business Value,Beneficiary,Sponsor,Business Priority Alignment,Tables Involved,Quality', "13-col unquoted Quality (no Analytics Technique)"),
+                (r'"No","Name","Business Domain","Subdomain","type","Analytics Technique","Statement","Solution","Business Value","Beneficiary","Sponsor","Business Priority Alignment","Tables Involved","Priority"', "14-col quoted Priority"),
+                (r'No,Name,Business Domain,Subdomain,type,Analytics Technique,Statement,Solution,Business Value,Beneficiary,Sponsor,Business Priority Alignment,Tables Involved,Priority', "14-col unquoted Priority"),
+                (r'"No","Name","Business Domain","Subdomain","type","Statement","Solution","Business Value","Beneficiary","Sponsor","Business Priority Alignment","Tables Involved","Priority"', "13-col quoted Priority (no Analytics Technique)"),
+                (r'No,Name,Business Domain,Subdomain,type,Statement,Solution,Business Value,Beneficiary,Sponsor,Business Priority Alignment,Tables Involved,Priority', "13-col unquoted Priority (no Analytics Technique)"),
+                (r'"No","Name","Business Domain","Subdomain","type","Statement","Solution","Business Value","Beneficiary","Sponsor","Business Priority Alignment","Tables Involved","Complexity","Quality"', "legacy 14-col Complexity+Quality"),
+                (r'No,Name,Business Domain,Subdomain,type,Statement,Solution,Business Value,Beneficiary,Sponsor,Business Priority Alignment,Tables Involved,Complexity,Quality', "legacy 14-col unquoted Complexity+Quality"),
+            ]
+            header_match = None
+            matched_format = None
+            for pattern, fmt_label in header_patterns:
+                header_match = re.search(pattern, csv_clean)
                 if header_match:
-                    self.logger.debug(f"Batch #{batch_num}: Using legacy 13-column format (Business Priority Alignment not in translation)")
+                    matched_format = fmt_label
+                    self.logger.debug(f"Batch #{batch_num}: Matched header format: {fmt_label}")
+                    break
             if not header_match:
-                header_match = re.search(legacy_header_unquoted, csv_clean)
-                if header_match:
-                    self.logger.debug(f"Batch #{batch_num}: Using legacy 13-column format (unquoted)")
-            if not header_match:
-                # Try to show what we found instead
                 first_line = csv_clean.split('\n')[0][:200] if csv_clean else "Empty"
                 self.logger.error(f"Batch #{batch_num}: CSV header not found. First line: {first_line}")
                 raise ValueError(f"Could not find CSV header. First line was: {first_line}")
@@ -15735,6 +15755,14 @@ class TranslationService:
                     raise ValueError(f"Translation response was TRUNCATED - missing {len(missing_ids)} rows. Reduce batch size or simplify content.")
                 else:
                     raise ValueError(f"Translation missing {len(missing_ids)} expected rows: {missing_ids}")
+            
+            _quality_labels = {'very high', 'high', 'medium', 'low', 'very low'}
+            for row in translated_rows:
+                if 'Priority' in row and 'Quality' not in row:
+                    pval = str(row['Priority']).strip().lower()
+                    if pval in _quality_labels:
+                        row['Quality'] = row.pop('Priority')
+                        self.logger.debug(f"Batch #{batch_num}: Remapped 'Priority' → 'Quality' for row {row.get('No', '?')}")
             
             self.logger.debug(f"Parsed {len(translated_rows)} translated rows from CSV for batch #{batch_num} (filtered from {len(all_parsed_rows)} total rows)")
             return translated_rows
@@ -16235,7 +16263,23 @@ class AtomicWriter:
         session_sql = f"""
         CREATE TABLE IF NOT EXISTS {self.session_table} (
             session_id BIGINT,
-            widget_values VARIANT,
+            business_name STRING,
+            inspire_database_name STRING,
+            operation_mode STRING,
+            table_election_mode STRING,
+            use_cases_quality STRING,
+            strategic_goals STRING,
+            business_priorities STRING,
+            business_domains STRING,
+            catalogs STRING,
+            schemas_str STRING,
+            tables_str STRING,
+            generate_choices STRING,
+            generation_path STRING,
+            output_language STRING,
+            sql_generation_per_domain STRING,
+            technical_exclusion_strategy STRING,
+            json_file_path STRING,
             processing_status STRING,
             completed_percent DOUBLE,
             create_at TIMESTAMP,
@@ -16261,10 +16305,29 @@ class AtomicWriter:
         """
         self.spark.sql(session_sql)
         self.spark.sql(steps_sql)
-        try:
-            self.spark.sql(f"ALTER TABLE {self.session_table} ADD COLUMNS (results_json VARIANT)")
-        except Exception:
-            pass
+
+    def _widget_to_columns_map(self) -> dict:
+        """Map widget_values dict keys to session table column names."""
+        wv = self.widget_values or {}
+        return {
+            "business_name": str(wv.get("business", "") or ""),
+            "inspire_database_name": str(wv.get("inspire_database", "") or ""),
+            "operation_mode": str(wv.get("operation_mode", "") or ""),
+            "table_election_mode": str(wv.get("table_election_mode", "") or ""),
+            "use_cases_quality": str(wv.get("use_cases_quality", "") or ""),
+            "strategic_goals": str(wv.get("strategic_goals", "") or ""),
+            "business_priorities": str(wv.get("business_priorities", "") or ""),
+            "business_domains": str(wv.get("business_domains", "") or ""),
+            "catalogs": str(wv.get("catalogs", "") or ""),
+            "schemas_str": str(wv.get("schemas", "") or ""),
+            "tables_str": str(wv.get("tables", "") or ""),
+            "generate_choices": str(wv.get("generate", "") or ""),
+            "generation_path": str(wv.get("generation_path", "") or ""),
+            "output_language": str(wv.get("output_language", "") or ""),
+            "sql_generation_per_domain": str(wv.get("sql_generation_per_domain", "") or ""),
+            "technical_exclusion_strategy": str(wv.get("technical_exclusion_strategy", "") or ""),
+            "json_file_path": str(wv.get("json_file_path", "") or ""),
+        }
 
     def initialize_session(self):
         if not self.enabled:
@@ -16272,14 +16335,23 @@ class AtomicWriter:
             return
         self._ensure_tables()
         ts = self._utc_now_str()
-        widget_values_json = self._escape_sql_str(self._safe_json_str(self.widget_values))
         inspire_json = self._escape_sql_str(self._safe_json_str({}))
+        col_map = self._widget_to_columns_map()
+        widget_col_select = ", ".join(
+            f"'{self._escape_sql_str(v)}' AS {k}" for k, v in col_map.items()
+        )
+        widget_col_update = ", ".join(
+            f"target.{k} = source.{k}" for k in col_map.keys()
+        )
+        widget_col_insert_names = ", ".join(col_map.keys())
+        widget_col_insert_vals = ", ".join(f"source.{k}" for k in col_map.keys())
+
         merge_sql = f"""
         MERGE INTO {self.session_table} AS target
         USING (
             SELECT
                 {self.session_id} AS session_id,
-                parse_json('{widget_values_json}') AS widget_values,
+                {widget_col_select},
                 'done' AS processing_status,
                 1.0 AS completed_percent,
                 TIMESTAMP('{ts}') AS create_at,
@@ -16290,7 +16362,7 @@ class AtomicWriter:
         ) AS source
         ON target.session_id = source.session_id
         WHEN MATCHED THEN UPDATE SET
-            target.widget_values = source.widget_values,
+            {widget_col_update},
             target.processing_status = source.processing_status,
             target.completed_percent = source.completed_percent,
             target.create_at = source.create_at,
@@ -16299,9 +16371,14 @@ class AtomicWriter:
             target.inspire_json = source.inspire_json,
             target.results_json = source.results_json
         WHEN NOT MATCHED THEN INSERT (
-            session_id, widget_values, processing_status, completed_percent, create_at, last_updated, completed_on, inspire_json, results_json
+            session_id, {widget_col_insert_names},
+            processing_status, completed_percent, create_at, last_updated, completed_on,
+            inspire_json, results_json
         ) VALUES (
-            source.session_id, source.widget_values, source.processing_status, source.completed_percent, source.create_at, source.last_updated, source.completed_on, source.inspire_json, source.results_json
+            source.session_id, {widget_col_insert_vals},
+            source.processing_status, source.completed_percent, source.create_at,
+            source.last_updated, source.completed_on,
+            source.inspire_json, source.results_json
         )
         """
         self.spark.sql(merge_sql)
@@ -16559,6 +16636,60 @@ class DatabricksInspire:
         if value and len(value) >= min_length:
             return value
         return fallback
+
+    def _build_use_case_step_payload(self, use_case: dict) -> dict:
+        uc = use_case
+        def _s(key, default=''):
+            v = uc.get(key, default)
+            return str(v) if v is not None else str(default)
+        def _n(key, default=0):
+            v = uc.get(key, default)
+            try:
+                return float(v) if v is not None else float(default)
+            except (TypeError, ValueError):
+                return float(default)
+        return {
+            "use_case_id": _s('No'),
+            "business_domain": _s('Business Domain'),
+            "subdomain": _s('Subdomain'),
+            "usecase": self._normalize_usecase(uc.get('usecase', ''), uc.get('Name', '')),
+            "name": _s('Name'),
+            "generated": _s('generated'),
+            "validated": _s('validated'),
+            "type": _s('type'),
+            "analytics_technique": _s('Analytics Technique'),
+            "business_priority_alignment": _s('Business Priority Alignment'),
+            "strategic_goals_alignment": _s('Strategic Goals Alignment'),
+            "statement": _s('Statement'),
+            "solution": _s('Solution'),
+            "business_value": _s('Business Value'),
+            "beneficiary": _s('Beneficiary'),
+            "sponsor": _s('Sponsor'),
+            "tables_involved": _s('Tables Involved'),
+            "primary_table": _s('Primary Table'),
+            "strategic_alignment": _n('Strategic Alignment'),
+            "return_on_investment": _n('Return on Investment'),
+            "reusability": _n('Reusability'),
+            "time_to_value": _n('Time to Value'),
+            "data_availability": _n('Data Availability'),
+            "data_accessibility": _n('Data Accessibility'),
+            "architecture_fitness": _n('Architecture Fitness'),
+            "team_skills": _n('Team Skills'),
+            "domain_knowledge": _n('Domain Knowledge'),
+            "people_allocation": _n('People Allocation'),
+            "budget_allocation": _n('Budget Allocation'),
+            "time_to_production": _n('Time to Production'),
+            "value_score": _n('Value'),
+            "feasibility_score": _n('Feasibility'),
+            "priority_score": _n('Priority'),
+            "quality": _s('Quality'),
+            "justification": _s('Justification'),
+            "quality_summary": _s('Quality Summary'),
+            "result_table": _s('result_table'),
+            "sql": _s('SQL'),
+            "sql_generation_status": _s('sql_generation_status'),
+            "sql_validation_status": _s('sql_validation_status'),
+        }
 
     def _get_business_context_fallback(self) -> str:
         ctx = getattr(self, 'merged_business_context', {})
@@ -16821,8 +16952,6 @@ class DatabricksInspire:
         self.cluster_memory_gb = int(kwargs.get("cluster_memory_gb", _runtime["cluster_memory_gb"]) or _runtime["cluster_memory_gb"])
         self.cluster_worker_count = int(kwargs.get("cluster_worker_count", _runtime["cluster_worker_count"]) or _runtime["cluster_worker_count"])
         
-        self.use_unstructured_data = kwargs.get("use_unstructured_data", "yes").lower() == "yes"
-        
         raw_technical_exclusion_strategy = kwargs.get("technical_exclusion_strategy", "Aggressive")
         if not raw_technical_exclusion_strategy or str(raw_technical_exclusion_strategy).strip().lower() == "none":
             raw_technical_exclusion_strategy = "Aggressive"
@@ -16844,15 +16973,15 @@ class DatabricksInspire:
         
         self.generate_sample_result = "Sample Results" in self.generate_choices
         
-        self.sql_model_serving = kwargs.get("sql_model_serving", "databricks-gpt-oss-120b").strip()
-        if not self.sql_model_serving:
-            self.sql_model_serving = "databricks-gpt-oss-120b"
+        self.sql_model_serving = _runtime.get("sql_model_serving", "databricks-gpt-oss-120b")
         _quality_filter_map = {
             "Good Quality": None,
             "High Quality": {'Medium', 'High', 'Very High', 'Ultra High'},
             "Very High Quality": {'High', 'Very High', 'Ultra High'},
         }
         self.quality_filter_acceptable = _quality_filter_map.get(self.use_cases_quality)
+
+        self.min_use_cases_for_selection = max(1, _runtime.get("min_use_cases_for_selection", 10))
 
         _sql_per_domain_raw = str(kwargs.get("sql_generation_per_domain", "0")).strip()
         if _sql_per_domain_raw.lower() == "all":
@@ -17061,6 +17190,10 @@ class DatabricksInspire:
 
     def _create_tracking_table(self):
         """Create the __inspire_usecases tracking table in the inspire database.
+        Schema mirrors Excel catalog columns exactly (same order) plus:
+          - session_id (first column)
+          - updated_at (second-to-last)
+          - generated_sql (last, stores actual SQL code)
         Uses Delta format for MERGE support. Thread-safe via _tracking_lock.
         """
         if not self._tracking_table_name or self._tracking_table_created:
@@ -17076,6 +17209,8 @@ class DatabricksInspire:
                     business_domain STRING,
                     subdomain STRING,
                     use_case STRING,
+                    description STRING,
+                    sql_generated STRING,
                     type STRING,
                     analytics_technique STRING,
                     business_priority_alignment STRING,
@@ -17086,6 +17221,7 @@ class DatabricksInspire:
                     beneficiary STRING,
                     sponsor STRING,
                     tables_involved STRING,
+                    primary_table STRING,
                     strategic_alignment DOUBLE,
                     roi DOUBLE,
                     reusability DOUBLE,
@@ -17102,10 +17238,11 @@ class DatabricksInspire:
                     feasibility_score DOUBLE,
                     priority_score DOUBLE,
                     quality STRING,
-                    justification STRING,
-                    result_table STRING,
-                    generated_sql STRING,
-                    updated_at TIMESTAMP
+                    priority_reasons STRING,
+                    quality_reasons STRING,
+                    result_database STRING,
+                    updated_at TIMESTAMP,
+                    generated_sql STRING
                 ) USING DELTA
                 """
                 self.spark.sql(create_sql)
@@ -17119,387 +17256,242 @@ class DatabricksInspire:
         import random as _rnd
         return f"_inspire_{prefix}_{self.session_id}_{_rnd.randint(100000, 999999)}"
 
-    def _tracking_merge_use_cases(self, use_cases: list):
-        """MERGE use cases into the tracking table immediately when LLM returns them.
-        Inserts new rows (WHEN NOT MATCHED) and updates existing rows (WHEN MATCHED).
-        Uses session_id + use_case (name) as the merge key because IDs are not stable
-        during early generation. Thread-safe via _tracking_lock — only one thread can
-        execute a MERGE at a time, so there are NEVER concurrent writes.
+    def _tracking_save_to_disk(self, use_cases: list, tag: str) -> str:
+        """Save use cases to a JSONL file on disk for memory-efficient streaming.
+        Returns the file path. Each line is one JSON object.
+        """
+        import json as _json_mod
+        _dir = os.path.join(tempfile.gettempdir(), f"inspire_{self.session_id}", "tracking_cache")
+        os.makedirs(_dir, exist_ok=True)
+        _path = os.path.join(_dir, f"{tag}.jsonl")
+        with open(_path, 'w', encoding='utf-8') as f:
+            for uc in use_cases:
+                f.write(_json_mod.dumps(uc, ensure_ascii=False, default=str) + "\n")
+        self.logger.debug(f"Saved {len(use_cases)} use cases to disk cache ({tag}): {_path}")
+        return _path
+
+    def _tracking_load_from_disk_chunked(self, tag: str, chunk_size: int = 500):
+        """Generator that yields chunks of use cases from a JSONL disk cache file.
+        Avoids loading the entire list into memory at once.
+        """
+        import json as _json_mod
+        _path = os.path.join(tempfile.gettempdir(), f"inspire_{self.session_id}", "tracking_cache", f"{tag}.jsonl")
+        if not os.path.exists(_path):
+            self.logger.warning(f"Tracking disk cache not found: {_path}")
+            return
+        chunk = []
+        with open(_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    chunk.append(_json_mod.loads(line))
+                except Exception:
+                    continue
+                if len(chunk) >= chunk_size:
+                    yield chunk
+                    chunk = []
+        if chunk:
+            yield chunk
+
+    @staticmethod
+    def _uc_to_row(uc: dict, session_id: int, normalize_fn) -> tuple:
+        """Convert a use case dict to a row tuple matching the full tracking table schema.
+        Static helper to avoid closure over large objects.
+        """
+        def _sf(val, default=None):
+            if val is None:
+                return default
+            try:
+                return float(val)
+            except (ValueError, TypeError):
+                return default
+        def _ss(val, default=''):
+            if val is None:
+                return default
+            s = str(val).strip()
+            return s if s else default
+
+        uc_name = _ss(uc.get('Name'))
+        uc_usecase = _ss(uc.get('usecase'))
+        normalized = str(normalize_fn(uc_usecase, uc_name)) if (uc_usecase or uc_name) else ''
+        return (
+            session_id,
+            _ss(uc.get('No')),
+            _ss(uc.get('Business Domain')),
+            _ss(uc.get('Subdomain')),
+            normalized,
+            uc_name,
+            _ss(uc.get('generated', 'N/A')),
+            _ss(uc.get('type')),
+            _ss(uc.get('Analytics Technique')),
+            _ss(uc.get('Business Priority Alignment', 'General Improvement')),
+            _ss(uc.get('Strategic Goals Alignment', 'General Improvement')),
+            _ss(uc.get('Statement')),
+            _ss(uc.get('Solution')),
+            _ss(uc.get('Business Value')),
+            _ss(uc.get('Beneficiary')),
+            _ss(uc.get('Sponsor')),
+            _ss(uc.get('Tables Involved')),
+            _ss(uc.get('Primary Table')),
+            _sf(uc.get('Strategic Alignment')),
+            _sf(uc.get('Return on Investment')),
+            _sf(uc.get('Reusability')),
+            _sf(uc.get('Time to Value')),
+            _sf(uc.get('Data Availability')),
+            _sf(uc.get('Data Accessibility')),
+            _sf(uc.get('Architecture Fitness')),
+            _sf(uc.get('Team Skills')),
+            _sf(uc.get('Domain Knowledge')),
+            _sf(uc.get('People Allocation')),
+            _sf(uc.get('Budget Allocation')),
+            _sf(uc.get('Time to Production')),
+            _sf(uc.get('Value')),
+            _sf(uc.get('Feasibility')),
+            _sf(uc.get('Priority')),
+            _ss(uc.get('Quality')) if uc.get('Quality') else None,
+            _ss(uc.get('Justification')) if uc.get('Justification') else None,
+            _ss(uc.get('Quality Summary')) if uc.get('Quality Summary') else None,
+            _ss(uc.get('result_table')) if uc.get('result_table') else None,
+            None,
+        )
+
+    _TRACKING_FULL_SCHEMA = None
+
+    @classmethod
+    def _get_tracking_full_schema(cls):
+        if cls._TRACKING_FULL_SCHEMA is None:
+            from pyspark.sql.types import StructType, StructField, LongType, StringType, DoubleType
+            cls._TRACKING_FULL_SCHEMA = StructType([
+                StructField("session_id", LongType(), False),
+                StructField("id", StringType(), True),
+                StructField("business_domain", StringType(), True),
+                StructField("subdomain", StringType(), True),
+                StructField("use_case", StringType(), True),
+                StructField("description", StringType(), True),
+                StructField("sql_generated", StringType(), True),
+                StructField("type", StringType(), True),
+                StructField("analytics_technique", StringType(), True),
+                StructField("business_priority_alignment", StringType(), True),
+                StructField("strategic_goals_alignment", StringType(), True),
+                StructField("statement", StringType(), True),
+                StructField("solution", StringType(), True),
+                StructField("business_value", StringType(), True),
+                StructField("beneficiary", StringType(), True),
+                StructField("sponsor", StringType(), True),
+                StructField("tables_involved", StringType(), True),
+                StructField("primary_table", StringType(), True),
+                StructField("strategic_alignment", DoubleType(), True),
+                StructField("roi", DoubleType(), True),
+                StructField("reusability", DoubleType(), True),
+                StructField("time_to_value", DoubleType(), True),
+                StructField("data_availability", DoubleType(), True),
+                StructField("data_accessibility", DoubleType(), True),
+                StructField("architecture_fitness", DoubleType(), True),
+                StructField("team_skills", DoubleType(), True),
+                StructField("domain_knowledge", DoubleType(), True),
+                StructField("people_allocation", DoubleType(), True),
+                StructField("budget_allocation", DoubleType(), True),
+                StructField("time_to_production", DoubleType(), True),
+                StructField("value_score", DoubleType(), True),
+                StructField("feasibility_score", DoubleType(), True),
+                StructField("priority_score", DoubleType(), True),
+                StructField("quality", StringType(), True),
+                StructField("priority_reasons", StringType(), True),
+                StructField("quality_reasons", StringType(), True),
+                StructField("result_database", StringType(), True),
+                StructField("generated_sql", StringType(), True),
+            ])
+        return cls._TRACKING_FULL_SCHEMA
+
+    def _tracking_replace_session(self, use_cases: list):
+        """UPDATE 1 of 2: Delete all rows for this session and re-insert with ALL columns
+        matching Excel exactly. Called after Excel generation when all fields (scores, quality,
+        primary table, result database) are available.
+        Saves to disk first, then streams from disk in chunks to avoid memory overload.
+        Thread-safe via _tracking_lock.
         """
         if not self._tracking_table_name or not use_cases:
             return
         self._create_tracking_table()
-        with self._tracking_lock:
-            try:
-                from pyspark.sql.types import StructType, StructField, LongType, StringType
-                from pyspark.sql.functions import current_timestamp as _cts
-                rows = []
-                for uc in use_cases:
-                    rows.append((
-                        self.session_id,
-                        str(uc.get('No', '')),
-                        str(uc.get('Business Domain', '')),
-                        str(uc.get('Subdomain', '')),
-                        str(uc.get('Name', '')),
-                        str(uc.get('type', '')),
-                        str(uc.get('Analytics Technique', '')),
-                        str(uc.get('Business Priority Alignment', '')),
-                        str(uc.get('Strategic Goals Alignment', '')),
-                        str(uc.get('Statement', '')),
-                        str(uc.get('Solution', '')),
-                        str(uc.get('Business Value', '')),
-                        str(uc.get('Beneficiary', '')),
-                        str(uc.get('Sponsor', '')),
-                        str(uc.get('Tables Involved', '')),
-                    ))
-                if not rows:
-                    return
-                # Deduplicate by merge key (session_id[0], use_case[4]) — keep last occurrence
-                seen = {}
-                for idx, row in enumerate(rows):
-                    seen[(row[0], row[4])] = idx
-                if len(seen) < len(rows):
-                    self.logger.warning(f"Deduplicating {len(rows) - len(seen)} duplicate use-case names in tracking merge batch")
-                    rows = [rows[i] for i in sorted(seen.values())]
-                schema = StructType([
-                    StructField("session_id", LongType(), False),
-                    StructField("id", StringType(), True),
-                    StructField("business_domain", StringType(), True),
-                    StructField("subdomain", StringType(), True),
-                    StructField("use_case", StringType(), True),
-                    StructField("type", StringType(), True),
-                    StructField("analytics_technique", StringType(), True),
-                    StructField("business_priority_alignment", StringType(), True),
-                    StructField("strategic_goals_alignment", StringType(), True),
-                    StructField("statement", StringType(), True),
-                    StructField("solution", StringType(), True),
-                    StructField("business_value", StringType(), True),
-                    StructField("beneficiary", StringType(), True),
-                    StructField("sponsor", StringType(), True),
-                    StructField("tables_involved", StringType(), True),
-                ])
-                view_name = self._tracking_unique_view("uc_merge")
-                df = self.spark.createDataFrame(rows, schema=schema)
-                df.createOrReplaceTempView(view_name)
-                merge_sql = f"""
-                MERGE INTO {self._tracking_table_name} AS target
-                USING {view_name} AS source
-                ON target.session_id = source.session_id
-                   AND target.use_case = source.use_case
-                WHEN MATCHED THEN UPDATE SET
-                    target.id = source.id,
-                    target.business_domain = source.business_domain,
-                    target.subdomain = source.subdomain,
-                    target.type = source.type,
-                    target.analytics_technique = source.analytics_technique,
-                    target.business_priority_alignment = source.business_priority_alignment,
-                    target.strategic_goals_alignment = source.strategic_goals_alignment,
-                    target.statement = source.statement,
-                    target.solution = source.solution,
-                    target.business_value = source.business_value,
-                    target.beneficiary = source.beneficiary,
-                    target.sponsor = source.sponsor,
-                    target.tables_involved = source.tables_involved,
-                    target.updated_at = current_timestamp()
-                WHEN NOT MATCHED THEN INSERT (
-                    session_id, id, business_domain, subdomain, use_case,
-                    type, analytics_technique, business_priority_alignment,
-                    strategic_goals_alignment, statement, solution,
-                    business_value, beneficiary, sponsor, tables_involved,
-                    updated_at
-                ) VALUES (
-                    source.session_id, source.id, source.business_domain,
-                    source.subdomain, source.use_case, source.type,
-                    source.analytics_technique, source.business_priority_alignment,
-                    source.strategic_goals_alignment, source.statement,
-                    source.solution, source.business_value, source.beneficiary,
-                    source.sponsor, source.tables_involved,
-                    current_timestamp()
-                )
-                """
-                self.spark.sql(merge_sql)
-                self.spark.catalog.dropTempView(view_name)
-                self.logger.info(f"✅ MERGED {len(rows)} use cases into tracking table (immediate)")
-            except Exception as e:
-                self.logger.error(f"Failed to merge use cases into tracking table: {get_clean_error_message(e)}")
-
-    def _tracking_replace_session(self, use_cases: list):
-        """Delete all rows for this session and re-insert with final IDs.
-        Called after renumbering when IDs have changed. All accumulated data
-        (name, domain, scores if available) is preserved. Thread-safe.
-        """
-        if not self._tracking_table_name or not use_cases:
-            return
+        self._tracking_save_to_disk(use_cases, "update1_post_excel")
         with self._tracking_lock:
             try:
                 self.spark.sql(
                     f"DELETE FROM {self._tracking_table_name} WHERE session_id = {self.session_id}"
                 )
-                from pyspark.sql.types import StructType, StructField, LongType, StringType, DoubleType, TimestampType
-                def safe_float(val, default=None):
-                    if val is None:
-                        return default
-                    try:
-                        return float(val)
-                    except (ValueError, TypeError):
-                        return default
-                rows = []
-                for uc in use_cases:
-                    rows.append((
-                        self.session_id,
-                        str(uc.get('No', '')),
-                        str(uc.get('Business Domain', '')),
-                        str(uc.get('Subdomain', '')),
-                        str(uc.get('Name', '')),
-                        str(uc.get('type', '')),
-                        str(uc.get('Analytics Technique', '')),
-                        str(uc.get('Business Priority Alignment', '')),
-                        str(uc.get('Strategic Goals Alignment', '')),
-                        str(uc.get('Statement', '')),
-                        str(uc.get('Solution', '')),
-                        str(uc.get('Business Value', '')),
-                        str(uc.get('Beneficiary', '')),
-                        str(uc.get('Sponsor', '')),
-                        str(uc.get('Tables Involved', '')),
-                        safe_float(uc.get('Strategic Alignment')),
-                        safe_float(uc.get('Return on Investment')),
-                        safe_float(uc.get('Reusability')),
-                        safe_float(uc.get('Time to Value')),
-                        safe_float(uc.get('Data Availability')),
-                        safe_float(uc.get('Data Accessibility')),
-                        safe_float(uc.get('Architecture Fitness')),
-                        safe_float(uc.get('Team Skills')),
-                        safe_float(uc.get('Domain Knowledge')),
-                        safe_float(uc.get('People Allocation')),
-                        safe_float(uc.get('Budget Allocation')),
-                        safe_float(uc.get('Time to Production')),
-                        safe_float(uc.get('Value')),
-                        safe_float(uc.get('Feasibility')),
-                        safe_float(uc.get('Priority')),
-                        str(uc.get('Quality', '')) if uc.get('Quality') else None,
-                        str(uc.get('Justification', '')) if uc.get('Justification') else None,
-                        str(uc.get('result_table', '')) if uc.get('result_table') else None,
-                        None,
-                    ))
-                if not rows:
-                    return
-                schema = StructType([
-                    StructField("session_id", LongType(), False),
-                    StructField("id", StringType(), True),
-                    StructField("business_domain", StringType(), True),
-                    StructField("subdomain", StringType(), True),
-                    StructField("use_case", StringType(), True),
-                    StructField("type", StringType(), True),
-                    StructField("analytics_technique", StringType(), True),
-                    StructField("business_priority_alignment", StringType(), True),
-                    StructField("strategic_goals_alignment", StringType(), True),
-                    StructField("statement", StringType(), True),
-                    StructField("solution", StringType(), True),
-                    StructField("business_value", StringType(), True),
-                    StructField("beneficiary", StringType(), True),
-                    StructField("sponsor", StringType(), True),
-                    StructField("tables_involved", StringType(), True),
-                    StructField("strategic_alignment", DoubleType(), True),
-                    StructField("roi", DoubleType(), True),
-                    StructField("reusability", DoubleType(), True),
-                    StructField("time_to_value", DoubleType(), True),
-                    StructField("data_availability", DoubleType(), True),
-                    StructField("data_accessibility", DoubleType(), True),
-                    StructField("architecture_fitness", DoubleType(), True),
-                    StructField("team_skills", DoubleType(), True),
-                    StructField("domain_knowledge", DoubleType(), True),
-                    StructField("people_allocation", DoubleType(), True),
-                    StructField("budget_allocation", DoubleType(), True),
-                    StructField("time_to_production", DoubleType(), True),
-                    StructField("value_score", DoubleType(), True),
-                    StructField("feasibility_score", DoubleType(), True),
-                    StructField("priority_score", DoubleType(), True),
-                    StructField("quality", StringType(), True),
-                    StructField("justification", StringType(), True),
-                    StructField("result_table", StringType(), True),
-                    StructField("generated_sql", StringType(), True),
-                ])
-                df = self.spark.createDataFrame(rows, schema=schema)
-                df.write.format("delta").mode("append").saveAsTable(self._tracking_table_name)
-                self.logger.info(f"✅ Replaced session rows: {len(rows)} use cases with final IDs")
+                from pyspark.sql.functions import current_timestamp as _cts
+                _schema = self._get_tracking_full_schema()
+                total_inserted = 0
+                for chunk in self._tracking_load_from_disk_chunked("update1_post_excel", chunk_size=500):
+                    rows = [self._uc_to_row(uc, self.session_id, self._normalize_usecase) for uc in chunk]
+                    if not rows:
+                        continue
+                    df = self.spark.createDataFrame(rows, schema=_schema)
+                    df = df.withColumn("updated_at", _cts())
+                    df.write.format("delta").mode("append").saveAsTable(self._tracking_table_name)
+                    total_inserted += len(rows)
+                    del rows, chunk, df
+                self.logger.info(f"✅ [UPDATE 1/2] Replaced session: {total_inserted} use cases (all Excel columns)")
             except Exception as e:
                 self.logger.error(f"Failed to replace session rows in tracking table: {get_clean_error_message(e)}")
 
-    def _tracking_update_scores(self, use_cases: list):
-        """MERGE scoring columns into the tracking table after scoring is complete.
-        Uses session_id + id as merge key (IDs must be final). Thread-safe.
-        """
-        if not self._tracking_table_name or not use_cases:
-            return
-        with self._tracking_lock:
-            try:
-                from pyspark.sql.types import StructType, StructField, LongType, StringType, DoubleType
-                def safe_float(val, default=0.0):
-                    if val is None:
-                        return default
-                    try:
-                        return float(val)
-                    except (ValueError, TypeError):
-                        return default
-                rows = []
-                for uc in use_cases:
-                    rows.append((
-                        self.session_id,
-                        str(uc.get('No', '')),
-                        safe_float(uc.get('Strategic Alignment')),
-                        safe_float(uc.get('Return on Investment')),
-                        safe_float(uc.get('Reusability')),
-                        safe_float(uc.get('Time to Value')),
-                        safe_float(uc.get('Data Availability')),
-                        safe_float(uc.get('Data Accessibility')),
-                        safe_float(uc.get('Architecture Fitness')),
-                        safe_float(uc.get('Team Skills')),
-                        safe_float(uc.get('Domain Knowledge')),
-                        safe_float(uc.get('People Allocation')),
-                        safe_float(uc.get('Budget Allocation')),
-                        safe_float(uc.get('Time to Production')),
-                        safe_float(uc.get('Value')),
-                        safe_float(uc.get('Feasibility')),
-                        safe_float(uc.get('Priority')),
-                    ))
-                if not rows:
-                    return
-                schema = StructType([
-                    StructField("session_id", LongType(), False),
-                    StructField("id", StringType(), True),
-                    StructField("strategic_alignment", DoubleType(), True),
-                    StructField("roi", DoubleType(), True),
-                    StructField("reusability", DoubleType(), True),
-                    StructField("time_to_value", DoubleType(), True),
-                    StructField("data_availability", DoubleType(), True),
-                    StructField("data_accessibility", DoubleType(), True),
-                    StructField("architecture_fitness", DoubleType(), True),
-                    StructField("team_skills", DoubleType(), True),
-                    StructField("domain_knowledge", DoubleType(), True),
-                    StructField("people_allocation", DoubleType(), True),
-                    StructField("budget_allocation", DoubleType(), True),
-                    StructField("time_to_production", DoubleType(), True),
-                    StructField("value_score", DoubleType(), True),
-                    StructField("feasibility_score", DoubleType(), True),
-                    StructField("priority_score", DoubleType(), True),
-                ])
-                view_name = self._tracking_unique_view("scores")
-                updates_df = self.spark.createDataFrame(rows, schema=schema)
-                updates_df.createOrReplaceTempView(view_name)
-                merge_sql = f"""
-                MERGE INTO {self._tracking_table_name} AS target
-                USING {view_name} AS source
-                ON target.session_id = source.session_id AND target.id = source.id
-                WHEN MATCHED THEN UPDATE SET
-                    target.strategic_alignment = source.strategic_alignment,
-                    target.roi = source.roi,
-                    target.reusability = source.reusability,
-                    target.time_to_value = source.time_to_value,
-                    target.data_availability = source.data_availability,
-                    target.data_accessibility = source.data_accessibility,
-                    target.architecture_fitness = source.architecture_fitness,
-                    target.team_skills = source.team_skills,
-                    target.domain_knowledge = source.domain_knowledge,
-                    target.people_allocation = source.people_allocation,
-                    target.budget_allocation = source.budget_allocation,
-                    target.time_to_production = source.time_to_production,
-                    target.value_score = source.value_score,
-                    target.feasibility_score = source.feasibility_score,
-                    target.priority_score = source.priority_score,
-                    target.updated_at = current_timestamp()
-                """
-                self.spark.sql(merge_sql)
-                self.spark.catalog.dropTempView(view_name)
-                self.logger.info(f"✅ MERGED scores for {len(rows)} use cases in tracking table")
-            except Exception as e:
-                self.logger.error(f"Failed to merge scores in tracking table: {get_clean_error_message(e)}")
-
-    def _tracking_update_quality(self, use_cases: list):
-        """MERGE quality and justification columns after quality scoring.
-        Thread-safe via _tracking_lock.
-        """
-        if not self._tracking_table_name or not use_cases:
-            return
-        with self._tracking_lock:
-            try:
-                from pyspark.sql.types import StructType, StructField, LongType, StringType
-                rows = []
-                for uc in use_cases:
-                    rows.append((
-                        self.session_id,
-                        str(uc.get('No', '')),
-                        str(uc.get('Quality', '')),
-                        str(uc.get('Justification', '')),
-                    ))
-                if not rows:
-                    return
-                schema = StructType([
-                    StructField("session_id", LongType(), False),
-                    StructField("id", StringType(), True),
-                    StructField("quality", StringType(), True),
-                    StructField("justification", StringType(), True),
-                ])
-                view_name = self._tracking_unique_view("quality")
-                updates_df = self.spark.createDataFrame(rows, schema=schema)
-                updates_df.createOrReplaceTempView(view_name)
-                merge_sql = f"""
-                MERGE INTO {self._tracking_table_name} AS target
-                USING {view_name} AS source
-                ON target.session_id = source.session_id AND target.id = source.id
-                WHEN MATCHED THEN UPDATE SET
-                    target.quality = source.quality,
-                    target.justification = source.justification,
-                    target.updated_at = current_timestamp()
-                """
-                self.spark.sql(merge_sql)
-                self.spark.catalog.dropTempView(view_name)
-                self.logger.info(f"✅ MERGED quality for {len(rows)} use cases in tracking table")
-            except Exception as e:
-                self.logger.error(f"Failed to merge quality in tracking table: {get_clean_error_message(e)}")
-
     def _tracking_update_sql(self, use_cases: list):
-        """MERGE generated SQL and result table after SQL generation.
+        """UPDATE 2 of 2: MERGE generated SQL, sql_generated flag, and result_database
+        after domain notebook SQL generation is complete.
+        Saves to disk first, then streams from disk in chunks to avoid memory overload.
         Thread-safe via _tracking_lock.
         """
         if not self._tracking_table_name or not use_cases:
             return
+        self._create_tracking_table()
+        self._tracking_save_to_disk(use_cases, "update2_post_sql")
         with self._tracking_lock:
             try:
                 from pyspark.sql.types import StructType, StructField, LongType, StringType
-                rows = []
-                for uc in use_cases:
-                    sql_text = str(uc.get('SQL', ''))
-                    if len(sql_text) > 65535:
-                        sql_text = sql_text[:65535]
-                    rows.append((
-                        self.session_id,
-                        str(uc.get('No', '')),
-                        str(uc.get('result_table', '')),
-                        sql_text,
-                    ))
-                if not rows:
-                    return
-                schema = StructType([
+                _SQL_SCHEMA = StructType([
                     StructField("session_id", LongType(), False),
                     StructField("id", StringType(), True),
-                    StructField("result_table", StringType(), True),
+                    StructField("sql_generated", StringType(), True),
+                    StructField("result_database", StringType(), True),
                     StructField("generated_sql", StringType(), True),
                 ])
-                view_name = self._tracking_unique_view("sql")
-                updates_df = self.spark.createDataFrame(rows, schema=schema)
-                updates_df.createOrReplaceTempView(view_name)
-                merge_sql = f"""
-                MERGE INTO {self._tracking_table_name} AS target
-                USING {view_name} AS source
-                ON target.session_id = source.session_id AND target.id = source.id
-                WHEN MATCHED THEN UPDATE SET
-                    target.result_table = source.result_table,
-                    target.generated_sql = source.generated_sql,
-                    target.updated_at = current_timestamp()
-                """
-                self.spark.sql(merge_sql)
-                self.spark.catalog.dropTempView(view_name)
-                self.logger.info(f"✅ MERGED SQL for {len(rows)} use cases in tracking table")
+                total_merged = 0
+                for chunk in self._tracking_load_from_disk_chunked("update2_post_sql", chunk_size=500):
+                    rows = []
+                    for uc in chunk:
+                        sql_text = str(uc.get('SQL', ''))
+                        if len(sql_text) > 65535:
+                            sql_text = sql_text[:65535]
+                        has_sql = 'Yes' if sql_text.strip() else 'No'
+                        rows.append((
+                            self.session_id,
+                            str(uc.get('No', '')),
+                            has_sql,
+                            str(uc.get('result_table', '')),
+                            sql_text,
+                        ))
+                    if not rows:
+                        continue
+                    view_name = self._tracking_unique_view("sql")
+                    updates_df = self.spark.createDataFrame(rows, schema=_SQL_SCHEMA)
+                    updates_df.createOrReplaceTempView(view_name)
+                    merge_sql = f"""
+                    MERGE INTO {self._tracking_table_name} AS target
+                    USING {view_name} AS source
+                    ON target.session_id = source.session_id AND target.id = source.id
+                    WHEN MATCHED THEN UPDATE SET
+                        target.sql_generated = source.sql_generated,
+                        target.result_database = source.result_database,
+                        target.generated_sql = source.generated_sql,
+                        target.updated_at = current_timestamp()
+                    """
+                    self.spark.sql(merge_sql)
+                    self.spark.catalog.dropTempView(view_name)
+                    total_merged += len(rows)
+                    del rows, chunk, updates_df
+                self.logger.info(f"✅ [UPDATE 2/2] MERGED SQL for {total_merged} use cases in tracking table")
             except Exception as e:
                 self.logger.error(f"Failed to merge SQL in tracking table: {get_clean_error_message(e)}")
 
@@ -22552,8 +22544,159 @@ Start your response with the CSV header line: use_case_id,domain
         sql_text, _ = self._auto_fix_quoted_datetime_units(sql_text, use_case_id)
         sql_text, _ = self._auto_fix_ansi_mode_for_division_functions(sql_text, use_case_id)
         sql_text = self._strip_ansi_mode_true_statements(sql_text, use_case_id)
+        sql_text, _ = self._auto_fix_remove_passthrough_ctes(sql_text, use_case_id)
+        sql_text, _ = self._auto_fix_simulated_data_warning(sql_text, use_case_id)
         sql_text = self._strip_internal_metadata_comments(sql_text)
+        sql_text = self._auto_fix_ensure_sql_output_tail(sql_text, use_case_id, result_table)
         return sql_text
+
+    _SQL_END_MARKER = "--END OF GENERATED SQL"
+    _SQL_FILTER_TODO_LINE = "-- TO DO: Use WHERE filtering below for further narrowing down the selected results"
+
+    @staticmethod
+    def _normalize_sql_identifier(identifier: str) -> str:
+        if not identifier:
+            return ""
+        return identifier.replace('`', '').strip().lower()
+
+    def _infer_result_table_from_sql(self, sql_text: str) -> str:
+        create_match = re.search(
+            r'CREATE\s+OR\s+REPLACE\s+TABLE\s+([^\s;]+)\s+AS',
+            sql_text,
+            re.IGNORECASE
+        )
+        if create_match:
+            return create_match.group(1).strip()
+        return ""
+
+    def _auto_fix_ensure_sql_output_tail(self, sql_text: str, use_case_id: str, result_table: str = '') -> str:
+        """Ensure SQL always ends with filter block + END marker.
+        Always regenerates the filter block with concrete ai_cat_ values."""
+        working_sql = (sql_text or "").replace('\r\n', '\n')
+        working_sql = re.sub(
+            r'(?im)^\s*--END OF GENERATED SQL\s*$',
+            '',
+            working_sql
+        ).rstrip()
+
+        inferred_table = (result_table or self._infer_result_table_from_sql(working_sql)).strip()
+        normalized_expected_table = self._normalize_sql_identifier(inferred_table)
+        if not normalized_expected_table:
+            return f"{working_sql.rstrip()}\n\n{self._SQL_END_MARKER}"
+
+        filter_lines = self._build_tail_filter_lines(working_sql)
+
+        existing_filter_re = re.compile(
+            r'\n\s*select\s+\*\s+from\s+\S+\s*\n'
+            + re.escape(self._SQL_FILTER_TODO_LINE)
+            + r'.*?;',
+            re.IGNORECASE | re.DOTALL,
+        )
+        working_sql = existing_filter_re.sub('', working_sql).rstrip()
+
+        has_plain_select = False
+        for table_match in re.finditer(r'(?im)^\s*select\s+\*\s+from\s+([^\s;]+)', working_sql):
+            selected_table = table_match.group(1).strip()
+            if self._normalize_sql_identifier(selected_table) == normalized_expected_table:
+                has_plain_select = True
+                break
+
+        tail_parts = []
+        if not has_plain_select:
+            tail_parts.append(f"\nSELECT * FROM {inferred_table};\n")
+        tail_parts.append(
+            f"\nselect * from {inferred_table}\n"
+            f"{self._SQL_FILTER_TODO_LINE}\n"
+            + "\n".join(filter_lines)
+            + "\n;"
+        )
+        working_sql = working_sql + "\n".join(tail_parts)
+        self.logger.info(
+            f"[{use_case_id}] AUTO-FIX SQL TAIL: "
+            f"{'regenerated' if has_plain_select else 'appended'} filter section for {inferred_table} "
+            f"with {len(filter_lines)} filter line(s)"
+        )
+
+        return f"{working_sql.rstrip()}\n\n{self._SQL_END_MARKER}"
+
+    def _build_tail_filter_lines(self, sql_text: str) -> list:
+        """Extract real ai_cat_ columns and their allowed values from the SQL to build concrete WHERE filters.
+
+        Strategy:
+        1. ai_classify columns: ARRAY('val1', ...)  ) AS ai_cat_xxx  — values from ARRAY
+        2. Categorical field definitions in prompt: - ai_cat_xxx: (MUST be exactly one of: v1|v2|...)
+        3. COALESCE(get_json_object(...), ...) AS ai_cat_xxx  — column name known, values from (2)
+        Merge priority: ai_classify ARRAY values > prompt MUST-be-one-of values > fallback placeholder
+        """
+        lines = []
+
+        ai_classify_vals_re = re.compile(
+            r"ARRAY\s*\(\s*([^)]+)\)\s*\)\s+AS\s+(ai_cat_\w+)",
+            re.IGNORECASE | re.DOTALL,
+        )
+        classify_cols = {}
+        for m in ai_classify_vals_re.finditer(sql_text):
+            raw_vals = m.group(1)
+            col_name = m.group(2)
+            vals = [v.strip().strip("'\"") for v in raw_vals.split(',') if v.strip().strip("'\"")]
+            if vals:
+                classify_cols[col_name] = vals
+
+        cat_def_re = re.compile(
+            r'-\s*(ai_cat_\w+)\s*:\s*\(MUST be exactly one of:\s*([^)]+)\)',
+            re.IGNORECASE,
+        )
+        prompt_cols = {}
+        for m in cat_def_re.finditer(sql_text):
+            col_name = m.group(1)
+            if col_name not in classify_cols:
+                raw_vals = m.group(2)
+                vals = [v.strip() for v in raw_vals.split('|') if v.strip()]
+                if vals:
+                    prompt_cols[col_name] = vals
+
+        json_extract_re = re.compile(
+            r"get_json_object\s*\([^,]+,\s*'\$\.(ai_cat_\w+)'\s*\)",
+            re.IGNORECASE | re.DOTALL,
+        )
+        coalesce_cols = []
+        seen_coalesce = set()
+        for m in json_extract_re.finditer(sql_text):
+            col = m.group(1)
+            if col not in seen_coalesce:
+                coalesce_cols.append(col)
+                seen_coalesce.add(col)
+
+        all_cols = {}
+        for col in coalesce_cols:
+            if col in classify_cols:
+                all_cols[col] = classify_cols[col]
+            elif col in prompt_cols:
+                all_cols[col] = prompt_cols[col]
+            else:
+                all_cols[col] = None
+        for col, vals in classify_cols.items():
+            if col not in all_cols:
+                all_cols[col] = vals
+
+        first = True
+        for col_name, vals in all_cols.items():
+            prefix = "-- WHERE" if first else "-- AND"
+            if vals:
+                quoted = ", ".join(f"'{v}'" for v in vals)
+                lines.append(f"{prefix} {col_name} IN ({quoted})")
+            else:
+                lines.append(f"{prefix} {col_name} IN ('<value1>', '<value2>')")
+            first = False
+
+        if not any('ai_sys_importance' in l for l in lines):
+            prefix = "-- WHERE" if first else "-- AND"
+            lines.append(f"{prefix} ai_sys_importance IN ('Very Low', 'Low', 'Medium', 'High', 'Very High', 'Critical')")
+            first = False
+        if not any('ai_sys_urgency' in l for l in lines):
+            lines.append(f"-- AND ai_sys_urgency IN ('Very Low', 'Low', 'Medium', 'High', 'Very High', 'Critical')")
+
+        return lines
 
     _VALID_DATETIME_UNITS = {
         'YEAR', 'QUARTER', 'MONTH', 'WEEK', 'DAY', 'DAYOFYEAR',
@@ -22596,6 +22739,134 @@ Start your response with the CSV header line: use_case_id,domain
         r'^--\s*(?:HONESTY_SCORE:|HONESTY_JUSTIFICATION:|Error fixed:).*$\n?',
         re.MULTILINE | re.IGNORECASE
     )
+
+    def _auto_fix_remove_passthrough_ctes(self, sql_text: str, use_case_id: str) -> tuple:
+        """Remove pure pass-through CTEs (SELECT * FROM previous_cte with no transformation).
+
+        A passthrough CTE is exactly:  name AS (SELECT * FROM other_cte)
+        with no WHERE, GROUP BY, ORDER BY, LIMIT, additional columns, or JOINs.
+
+        The leading comma (CTE separator before this CTE) is consumed by the match.
+        The trailing comma (CTE separator after this CTE) is NOT consumed.
+        Replacing with '' leaves exactly one comma between the preceding and following CTEs.
+        """
+        sql_no_comments = re.sub(r'--[^\n]*', '', sql_text)
+        cte_def_re = re.compile(
+            r'(?:WITH\s+|,\s*)(\w+)\s+AS\s*\(\s*SELECT',
+            re.IGNORECASE | re.DOTALL,
+        )
+        cte_matches = list(cte_def_re.finditer(sql_no_comments))
+        if len(cte_matches) < 3:
+            return sql_text, 0
+
+        passthrough_re = re.compile(
+            r',\s*\n*\s*(?:--[^\n]*\n\s*)*(\w+)\s+AS\s*\(\s*SELECT\s+\*\s+FROM\s+(\w+)\s*\)\s*',
+            re.IGNORECASE | re.DOTALL,
+        )
+        removed = 0
+        rename_map = {}
+        for m in passthrough_re.finditer(sql_text):
+            cte_name = m.group(1).lower()
+            source_name = m.group(2).lower()
+            rename_map[cte_name] = source_name
+
+        if not rename_map:
+            return sql_text, 0
+
+        visited = set()
+        for dead_name in list(rename_map.keys()):
+            target = rename_map[dead_name]
+            chain = {dead_name}
+            while target in rename_map:
+                if target in chain:
+                    break
+                chain.add(target)
+                target = rename_map[target]
+            rename_map[dead_name] = target
+            visited.add(dead_name)
+
+        for dead_name, target in rename_map.items():
+            removal_re = re.compile(
+                r',\s*\n*\s*(?:--[^\n]*\n\s*)*' + re.escape(dead_name) +
+                r'\s+AS\s*\(\s*SELECT\s+\*\s+FROM\s+\w+\s*\)\s*',
+                re.IGNORECASE | re.DOTALL,
+            )
+            new_sql = removal_re.sub('', sql_text)
+            if new_sql != sql_text:
+                ref_re = re.compile(
+                    r'\b(FROM|JOIN)\s+' + re.escape(dead_name) + r'\b',
+                    re.IGNORECASE,
+                )
+                new_sql = ref_re.sub(
+                    lambda m_inner, t=target: f"{m_inner.group(1)} {t}",
+                    new_sql,
+                )
+                qualified_re = re.compile(
+                    r'\b' + re.escape(dead_name) + r'\s*\.',
+                    re.IGNORECASE,
+                )
+                new_sql = qualified_re.sub(f"{target}.", new_sql)
+                sql_text = new_sql
+                removed += 1
+                self.logger.info(
+                    f"[{use_case_id}] AUTO-FIX PASSTHROUGH CTE: removed '{dead_name}' "
+                    f"(pure SELECT * FROM {target}), references rewritten"
+                )
+
+        if removed > 0:
+            sql_text = re.sub(r'\n{4,}', '\n\n\n', sql_text)
+
+        return sql_text, removed
+
+    _SIMULATED_EXTERNAL_DATA_WARNING = (
+        "-- ⚠️ PRODUCTION WARNING: The CTE below uses AI (ai_query) to SIMULATE external data.\n"
+        "-- This is acceptable for prototyping and demonstration purposes.\n"
+        "-- For PRODUCTION use, replace this CTE with a direct connection to verified external\n"
+        "-- data sources (e.g., weather APIs, market data feeds, industry databases).\n"
+        "-- AI-generated estimates require validation before business decisions."
+    )
+
+    _SIMULATED_INTERNAL_DATA_WARNING = (
+        "-- ⚠️ PRODUCTION WARNING: The CTE below uses AI (ai_query) to SIMULATE internal company data.\n"
+        "-- This is acceptable for prototyping and demonstration purposes.\n"
+        "-- For PRODUCTION use, replace this CTE with connections to your actual company systems\n"
+        "-- (e.g., policy databases, SLA repositories, knowledge management systems).\n"
+        "-- AI-generated company data requires validation before business decisions."
+    )
+
+    def _auto_fix_simulated_data_warning(self, sql_text: str, use_case_id: str) -> tuple:
+        """Inject production warning comments above simulated_external_data_for_* and
+        internal_data_for_* CTEs when the warning is not already present."""
+        sim_cte_re = re.compile(
+            r'(,\s*\n+)(\s*(?:--[^\n]*\n\s*)*)'
+            r'((simulated_external_data|internal_data)_for_\w+\s+AS\s*\()',
+            re.IGNORECASE,
+        )
+        injected = 0
+
+        def _inject(m):
+            nonlocal injected
+            comma_sep = m.group(1)
+            comment_block = m.group(2)
+            cte_def = m.group(3)
+            cte_type = m.group(4).lower()
+            if 'PRODUCTION WARNING' in comment_block:
+                return m.group(0)
+            injected += 1
+            warning = (
+                self._SIMULATED_EXTERNAL_DATA_WARNING
+                if 'simulated_external' in cte_type
+                else self._SIMULATED_INTERNAL_DATA_WARNING
+            )
+            return f"{comma_sep}{comment_block}{warning}\n{cte_def}"
+
+        new_sql = sim_cte_re.sub(_inject, sql_text)
+        if injected > 0:
+            self.logger.info(
+                f"[{use_case_id}] AUTO-FIX SIMULATED DATA WARNING: injected {injected} "
+                f"production warning(s) above simulated/internal data CTE(s)"
+            )
+        return new_sql, injected
 
     def _strip_internal_metadata_comments(self, sql_text: str) -> str:
         """Strip internal LLM metadata comments that should never appear in user-facing SQL.
@@ -23342,7 +23613,8 @@ Start your response with the CSV header line: use_case_id,domain
                 f"-- Empty LLM response\n"
                 f"-- Tables Involved: {tables_involved_str}\n"
                 f"SELECT 'Empty LLM Response' AS error_message;\n"
-                f"-- SQL failed to generate, set regenerate_sql:Yes and run Inspire again with Operation = 'SQL Regeneration', and Inspire will regenerate a new query."
+                f"-- SQL failed to generate, set regenerate_sql:Yes and run Inspire again with Operation = 'SQL Regeneration', and Inspire will regenerate a new query.\n"
+                f"--END OF GENERATED SQL"
             )
             return use_case
         sql_text, columns_from_response = self._extract_sql_and_columns_from_response(sql_response)
@@ -23358,7 +23630,8 @@ Start your response with the CSV header line: use_case_id,domain
                 f"-- Empty SQL after cleaning\n"
                 f"-- Tables Involved: {tables_involved_str}\n"
                 f"SELECT 'Empty SQL after cleaning' AS error_message;\n"
-                f"-- SQL failed to generate, set regenerate_sql:Yes and run Inspire again with Operation = 'SQL Regeneration', and Inspire will regenerate a new query."
+                f"-- SQL failed to generate, set regenerate_sql:Yes and run Inspire again with Operation = 'SQL Regeneration', and Inspire will regenerate a new query.\n"
+                f"--END OF GENERATED SQL"
             )
             return use_case
         use_case['sql_generation_status'] = 'succeeded'
@@ -23562,6 +23835,11 @@ Start your response with the CSV header line: use_case_id,domain
             warning_block = '\n'.join(f"-- 🚨 {w}" for w in static_validation_errors)
             use_case['SQL'] = f"-- ❌ STATIC VALIDATION FAILED\n{warning_block}\n\n{sql_clean}"
             return use_case
+        else:
+            for sk in _STATIC_VALIDATION_STATUS_KEYS:
+                use_case[sk] = 'passed'
+            for wk in _STATIC_VALIDATION_WARNING_KEYS:
+                use_case[wk] = []
         if columns_from_response and directly_involved_tables:
             is_valid_cols, invalid_cols, normalized_cols = self._validate_columns_used(use_case_id, columns_from_response, directly_involved_tables, schema_index, full_schema_details)
             involved_cols_value = normalized_cols if normalized_cols else columns_from_response
@@ -23756,7 +24034,7 @@ Start your response with the CSV header line: use_case_id,domain
         
         return adaptive_timeout
     
-    def _generate_sql_for_use_case(self, use_case: dict, full_schema_details: list, unstructured_docs: str, schema_index: dict = None) -> dict:
+    def _generate_sql_for_use_case(self, use_case: dict, full_schema_details: list, document_context: str, schema_index: dict = None) -> dict:
         """
         Generate SQL for a single use case using zero-shot LLM call.
         Prioritizes tables directly involved in the use case, then adds additional tables if space allows.
@@ -23764,13 +24042,13 @@ Start your response with the CSV header line: use_case_id,domain
         Args:
             use_case: Use case dictionary
             full_schema_details: Full schema (used as fallback if index not provided)
-            unstructured_docs: Unstructured documents markdown
+            document_context: Document documents markdown
             schema_index: Pre-built schema index for O(1) lookups (defaultdict mapping table_name -> [details])
         
         Args (legacy):
             use_case: Use case dictionary
             full_schema_details: Full list of (catalog, schema, table, column, type, comment) tuples
-            unstructured_docs: Unstructured documents markdown
+            document_context: Document documents markdown
             
         Returns:
             Use case dict with SQL field populated
@@ -23828,7 +24106,7 @@ Start your response with the CSV header line: use_case_id,domain
             validation_failed = False
             failure_reasons = []
             
-            # NEW: Validate that use case has tables involved (unless it's a volume path for unstructured data)
+            # NEW: Validate that use case has tables involved (unless it's a volume path for document data)
             if not tables_involved_str or tables_involved_str.strip() == "":
                 validation_failed = True
                 failure_reasons.append("No tables involved - every use case MUST reference at least one table")
@@ -24002,24 +24280,24 @@ Start your response with the CSV header line: use_case_id,domain
             self.logger.debug(f"Use case {use_case_id}: Max schema size allowed: {max_schema_size:,} chars")
             self.logger.debug(f"Use case {use_case_id}: Directly involved: {len(directly_involved_details)} columns, "
                             f"Additional: {len(additional_details)} columns, "
-                            f"Unstructured docs: {len(unstructured_docs):,} chars")
+                            f"Document docs: {len(document_context):,} chars")
             
             # Apply progressive truncation strategy
-            directly_involved_schema, additional_schema, final_unstructured_docs, was_truncated = self._apply_progressive_truncation(
+            directly_involved_schema, additional_schema, final_document_context, was_truncated = self._apply_progressive_truncation(
                 use_case_id,
                 directly_involved_details,
                 additional_details,
-                unstructured_docs,
+                document_context,
                 max_schema_size,
                 base_prompt_size,
                 directly_involved_tables  # Pass the tables that must be preserved
             )
             
-            # Update unstructured_docs if it was dropped during truncation
-            if final_unstructured_docs != unstructured_docs:
-                unstructured_docs = final_unstructured_docs
+            # Update document_context if it was dropped during truncation
+            if final_document_context != document_context:
+                document_context = final_document_context
                 if was_truncated:
-                    self.logger.warning(f"Use case {use_case_id}: Unstructured documents were dropped to fit context limits")
+                    self.logger.warning(f"Use case {use_case_id}: Document documents were dropped to fit context limits")
             
             final_directly_size = len(directly_involved_schema)
             final_additional_size = len(additional_schema)
@@ -24105,6 +24383,16 @@ Start your response with the CSV header line: use_case_id,domain
                 previous_feedback = f"**USER INSTRUCTIONS (MUST FOLLOW):**\nThe user has provided the following specific instructions for generating this SQL query. You MUST follow these instructions:\n\n{user_instructions}\n"
                 self.logger.info(f"[{use_case_id}] Passing SQL Generation Instructions to LLM: {user_instructions[:200]}...")
                 log_print(f"   📝 [{use_case_id}] Including user SQL instructions in prompt")
+
+            prev_validation_ctx = self._build_static_validation_fix_context(use_case) if use_case.get('_skip_llm_cache') else ""
+            if prev_validation_ctx:
+                previous_feedback += (
+                    "\n\n**⚠️ PREVIOUS ATTEMPT VALIDATION ERRORS (MUST AVOID):**\n"
+                    "A prior SQL generation attempt for this EXACT use case failed static validation.\n"
+                    "You MUST NOT repeat these errors. Study the violations below and generate SQL that avoids ALL of them:\n\n"
+                    f"{prev_validation_ctx}\n"
+                )
+                self.logger.info(f"[{use_case_id}] Injected {len(prev_validation_ctx):,} chars of previous validation errors into SQL gen prompt")
             
             # Get interpreted regeneration context if present (only populated during SQL Regeneration mode)
             interpreted_regeneration_context = use_case.get('_interpreted_regeneration_context', '')
@@ -24195,7 +24483,7 @@ Start your response with the CSV header line: use_case_id,domain
                 "directly_involved_schema": available_schema_out,
                 "use_case_columns": use_case_columns,
                 "foreign_key_relationships": fk_relationships_md,
-                "unstructured_docs": unstructured_docs,
+                "document_context": document_context,
                 "previous_feedback": previous_feedback,
                 "interpreted_regeneration_context": interpreted_regeneration_context,
                 "ai_functions_summary": generate_ai_functions_doc("summary"),
@@ -24371,11 +24659,13 @@ Start your response with the CSV header line: use_case_id,domain
                 
                 skip_llm_cache = bool(use_case.get('_skip_llm_cache'))
                 try:
+                    sql_regen_model_override = use_case.get('_sql_regeneration_model_override')
                     sql_response = self.ai_agent.run_worker(
                         step_name=f"Generate_SQL_{use_case_id}_Wave",
                         worker_prompt_path="USE_CASE_SQL_GEN_PROMPT",
                         prompt_vars=prompt_vars,
                         response_schema=None,
+                        model_override=sql_regen_model_override,
                         timeout_override=adaptive_timeout,
                         max_retries_override=0,
                         skip_cache=skip_llm_cache
@@ -24594,7 +24884,8 @@ Start your response with the CSV header line: use_case_id,domain
                     f"-- SQL generation timed out\n"
                     f"-- Tables Involved: {tables_involved_str}\n"
                     f"SELECT 'SQL Generation Timeout' AS error_message;\n"
-                    f"-- SQL failed to generate, set regenerate_sql:Yes and run Inspire again with Operation = 'SQL Regeneration', and Inspire will regenerate a new query."
+                    f"-- SQL failed to generate, set regenerate_sql:Yes and run Inspire again with Operation = 'SQL Regeneration', and Inspire will regenerate a new query.\n"
+                    f"--END OF GENERATED SQL"
                 )
                 use_case['sql_generation_status'] = 'timeout'
                 use_case['generated'] = 'N'
@@ -24605,7 +24896,8 @@ Start your response with the CSV header line: use_case_id,domain
                     f"-- SQL generation exception: {error_msg[:100]}\n"
                     f"-- Tables Involved: {tables_involved_str}\n"
                     f"SELECT 'SQL Generation Exception' AS error_message;\n"
-                    f"-- SQL failed to generate, set regenerate_sql:Yes and run Inspire again with Operation = 'SQL Regeneration', and Inspire will regenerate a new query."
+                    f"-- SQL failed to generate, set regenerate_sql:Yes and run Inspire again with Operation = 'SQL Regeneration', and Inspire will regenerate a new query.\n"
+                    f"--END OF GENERATED SQL"
                 )
                 use_case['sql_generation_status'] = 'failed'
                 use_case['generated'] = 'N'
@@ -24613,7 +24905,7 @@ Start your response with the CSV header line: use_case_id,domain
                 
             return use_case
 
-    def _fix_sql_after_validation_failure(self, use_case: dict, full_schema_details: list, unstructured_docs_markdown: str, schema_index: dict) -> dict:
+    def _fix_sql_after_validation_failure(self, use_case: dict, full_schema_details: list, document_context_markdown: str, schema_index: dict) -> dict:
         use_case_id = use_case.get('No', 'UNKNOWN')
         tables_involved_str = use_case.get('Tables Involved', '')
         directly_involved_schema = use_case.get('_directly_involved_schema', '')
@@ -25263,40 +25555,14 @@ Start your response with the CSV header line: use_case_id,domain
             )
         return "\n\n".join(parts)
 
-    def _run_sql_task_wrapper(self, use_case: dict, full_schema_details: list, unstructured_docs_markdown: str, schema_index: dict) -> dict:
+    def _run_sql_task_wrapper(self, use_case: dict, full_schema_details: list, document_context_markdown: str, schema_index: dict) -> dict:
         if use_case.get('_needs_fix'):
-            return self._fix_sql_after_validation_failure(use_case, full_schema_details, unstructured_docs_markdown, schema_index)
+            return self._fix_sql_after_validation_failure(use_case, full_schema_details, document_context_markdown, schema_index)
         
-        uc_with_sql = self._generate_sql_for_use_case(use_case, full_schema_details, unstructured_docs_markdown, schema_index)
+        uc_with_sql = self._generate_sql_for_use_case(use_case, full_schema_details, document_context_markdown, schema_index)
         
-        has_static_failure = (
-            uc_with_sql.get('cte_chaining_status') == 'failed' or
-            uc_with_sql.get('repeated_with_status') == 'failed' or
-            uc_with_sql.get('format_string_status') == 'failed' or
-            uc_with_sql.get('enrichment_propagation_status') == 'failed' or
-            uc_with_sql.get('dead_cte_status') == 'failed' or
-            uc_with_sql.get('column_ref_groupby_status') == 'failed' or
-            uc_with_sql.get('unquoted_coalesce_status') == 'failed' or
-            uc_with_sql.get('lateral_alias_window_status') == 'failed' or
-            uc_with_sql.get('agg_without_over_status') == 'failed' or
-            uc_with_sql.get('pii_leak_status') == 'failed' or
-            uc_with_sql.get('source_col_hallucination_status') == 'failed' or
-            uc_with_sql.get('distinct_window_status') == 'failed' or
-            uc_with_sql.get('scalar_subq_over_status') == 'failed' or
-            uc_with_sql.get('window_inside_agg_status') == 'failed' or
-            uc_with_sql.get('window_over_group_by_status') == 'failed' or
-            uc_with_sql.get('ai_forecast_named_struct_status') == 'failed' or
-            uc_with_sql.get('fs_col_availability_status') == 'failed' or
-            uc_with_sql.get('cte_col_ref_status') == 'failed' or
-            uc_with_sql.get('create_table_status') == 'failed' or
-            uc_with_sql.get('ai_functions_status') == 'failed' or
-            uc_with_sql.get('limit_first_cte_status') == 'failed' or
-            uc_with_sql.get('mandatory_output_cols_status') == 'failed' or
-            uc_with_sql.get('invalid_format_conversion_status') == 'failed' or
-            uc_with_sql.get('params_quoting_status') == 'failed' or
-            uc_with_sql.get('ai_query_params_status') == 'failed' or
-            uc_with_sql.get('quoted_datetime_unit_status') == 'failed' or
-            uc_with_sql.get('ansi_mode_division_status') == 'failed'
+        has_static_failure = any(
+            uc_with_sql.get(sk) == 'failed' for sk in _STATIC_VALIDATION_STATUS_KEYS
         )
         already_retried = uc_with_sql.get('_static_validation_retry_done', False)
         if has_static_failure and not already_retried:
@@ -25318,7 +25584,7 @@ Start your response with the CSV header line: use_case_id,domain
             uc_with_sql['_needs_fix'] = True
             uc_with_sql['_static_validation_retry_done'] = True
             fixed_result = self._fix_sql_after_validation_failure(
-                uc_with_sql, full_schema_details, unstructured_docs_markdown, schema_index
+                uc_with_sql, full_schema_details, document_context_markdown, schema_index
             )
             if fixed_result.get('_fix_skipped_context_too_large'):
                 self.logger.info(
@@ -25327,34 +25593,8 @@ Start your response with the CSV header line: use_case_id,domain
                 uc_with_sql['_static_validation_retry_done'] = False
                 return uc_with_sql
 
-            fix_still_failed = (
-                fixed_result.get('cte_chaining_status') == 'failed' or
-                fixed_result.get('repeated_with_status') == 'failed' or
-                fixed_result.get('format_string_status') == 'failed' or
-                fixed_result.get('enrichment_propagation_status') == 'failed' or
-                fixed_result.get('dead_cte_status') == 'failed' or
-                fixed_result.get('column_ref_groupby_status') == 'failed' or
-                fixed_result.get('unquoted_coalesce_status') == 'failed' or
-                fixed_result.get('lateral_alias_window_status') == 'failed' or
-                fixed_result.get('agg_without_over_status') == 'failed' or
-                fixed_result.get('pii_leak_status') == 'failed' or
-                fixed_result.get('source_col_hallucination_status') == 'failed' or
-                fixed_result.get('distinct_window_status') == 'failed' or
-                fixed_result.get('scalar_subq_over_status') == 'failed' or
-                fixed_result.get('window_inside_agg_status') == 'failed' or
-                fixed_result.get('window_over_group_by_status') == 'failed' or
-                fixed_result.get('ai_forecast_named_struct_status') == 'failed' or
-                fixed_result.get('fs_col_availability_status') == 'failed' or
-                fixed_result.get('cte_col_ref_status') == 'failed' or
-                fixed_result.get('create_table_status') == 'failed' or
-                fixed_result.get('ai_functions_status') == 'failed' or
-                fixed_result.get('limit_first_cte_status') == 'failed' or
-                fixed_result.get('mandatory_output_cols_status') == 'failed' or
-                fixed_result.get('invalid_format_conversion_status') == 'failed' or
-                fixed_result.get('params_quoting_status') == 'failed' or
-                fixed_result.get('ai_query_params_status') == 'failed' or
-                fixed_result.get('quoted_datetime_unit_status') == 'failed' or
-                fixed_result.get('ansi_mode_division_status') == 'failed'
+            fix_still_failed = any(
+                fixed_result.get(sk) == 'failed' for sk in _STATIC_VALIDATION_STATUS_KEYS
             )
             if fix_still_failed:
                 self.logger.warning(
@@ -25369,7 +25609,7 @@ Start your response with the CSV header line: use_case_id,domain
         
         return uc_with_sql
 
-    def _run_sql_wave(self, wave_id: int, use_cases: list, full_schema_details: list, unstructured_docs_markdown: str, schema_index: dict, parallelism: int) -> tuple:
+    def _run_sql_wave(self, wave_id: int, use_cases: list, full_schema_details: list, document_context_markdown: str, schema_index: dict, parallelism: int) -> tuple:
         use_cases_with_sql = []
         timed_out = []
         validation_failed = []
@@ -25378,7 +25618,7 @@ Start your response with the CSV header line: use_case_id,domain
         try:
             future_to_uc = {}
             for uc in use_cases:
-                future = executor.submit(self._run_sql_task_wrapper, uc, full_schema_details, unstructured_docs_markdown, schema_index)
+                future = executor.submit(self._run_sql_task_wrapper, uc, full_schema_details, document_context_markdown, schema_index)
                 future_to_uc[future] = uc
             try:
                 for future in safe_as_completed(future_to_uc, timeout=_sql_gen_total_timeout):
@@ -25460,7 +25700,7 @@ Start your response with the CSV header line: use_case_id,domain
             del executor
         return use_cases_with_sql, timed_out, validation_failed
 
-    def _generate_sql_sequential(self, use_cases: list, full_schema_details: list, unstructured_docs_markdown: str) -> list:
+    def _generate_sql_sequential(self, use_cases: list, full_schema_details: list, document_context_markdown: str) -> list:
         """
         Generate SQL for all use cases SEQUENTIALLY (no parallelism).
         Used within domain processing where the domain itself is already running in parallel.
@@ -25468,7 +25708,7 @@ Start your response with the CSV header line: use_case_id,domain
         Args:
             use_cases: List of use case dictionaries  
             full_schema_details: Full list of (catalog, schema, table, column, type, comment) tuples
-            unstructured_docs_markdown: Unstructured documents markdown
+            document_context_markdown: Document documents markdown
         """
         total_use_cases = len(use_cases)
         
@@ -25493,7 +25733,7 @@ Start your response with the CSV header line: use_case_id,domain
             use_case_name = uc.get('Name', '')[:40]
             
             try:
-                result = self._generate_sql_for_use_case(uc, full_schema_details, unstructured_docs_markdown, schema_by_table)
+                result = self._generate_sql_for_use_case(uc, full_schema_details, document_context_markdown, schema_by_table)
                 use_cases_with_sql.append(result)
                 completed_count += 1
                 
@@ -25549,7 +25789,7 @@ Start your response with the CSV header line: use_case_id,domain
         )
         return placeholder_sql
 
-    def _generate_sql_parallel(self, use_cases: list, full_schema_details: list, unstructured_docs_markdown: str, is_retry: bool = False) -> list:
+    def _generate_sql_parallel(self, use_cases: list, full_schema_details: list, document_context_markdown: str, is_retry: bool = False) -> list:
         """
         Generate SQL for all use cases in parallel using max_parallelism.
         Note: Uses lower parallelism (max 10) to avoid overwhelming the LLM service and cluster.
@@ -25557,7 +25797,7 @@ Start your response with the CSV header line: use_case_id,domain
         Args:
             use_cases: List of use case dictionaries
             full_schema_details: Full list of (catalog, schema, table, column, type, comment) tuples
-            unstructured_docs_markdown: Unstructured documents markdown
+            document_context_markdown: Document documents markdown
         """
         # === CHECK IF SQL CODE GENERATION IS DISABLED ===
         if not self.generate_sql_code:
@@ -25571,12 +25811,21 @@ Start your response with the CSV header line: use_case_id,domain
                 if 'result_table' not in uc:
                     tables_involved = uc.get('Tables Involved', 'your_table')
                     uc['result_table'] = compute_result_table_name(uc.get('No', 'unknown'), uc.get('Name', 'unknown'), tables_involved, inspire_database=self.inspire_database)
+                self._emit_pipeline_status(
+                    stage_name="Use Case SQL Result",
+                    step_name=uc.get('No', 'UNKNOWN'),
+                    sub_step_name=str(uc.get('Name', ''))[:120],
+                    message=f"SQL skipped (generation disabled) for {uc.get('No', 'UNKNOWN')}",
+                    status="ended_success",
+                    progress_increment=1.0,
+                    result_json=self._build_use_case_step_payload(uc)
+                )
             
             return use_cases
         
         total_use_cases = len(use_cases)
         total_columns = len(full_schema_details)
-        avg_prompt_chars = total_columns * 50 + len(unstructured_docs_markdown)  # Estimate based on schema + docs
+        avg_prompt_chars = total_columns * 50 + len(document_context_markdown)  # Estimate based on schema + docs
         
         # ADAPTIVE PARALLELISM: Calculate based on use cases, columns, and prompt size
         sql_parallelism, reason = calculate_adaptive_parallelism(
@@ -25642,7 +25891,7 @@ Start your response with the CSV header line: use_case_id,domain
             wave_start_time = time.time()
             self.logger.info(f"🔁 Wave {wave_id}: processing {len(backlog)} use cases with parallelism {wave_workers} (priority-ordered)")
             log_print(f"   ▶️ Wave {wave_id}: {len(backlog)} use cases, parallelism {wave_workers} (priority-ordered)")
-            results, timed_out, validation_failed = self._run_sql_wave(wave_id, backlog, full_schema_details, unstructured_docs_markdown, schema_by_table, wave_workers)
+            results, timed_out, validation_failed = self._run_sql_wave(wave_id, backlog, full_schema_details, document_context_markdown, schema_by_table, wave_workers)
             
             wave_end_time = time.time()
             wave_duration = wave_end_time - wave_start_time
@@ -25707,11 +25956,11 @@ Start your response with the CSV header line: use_case_id,domain
             # Build backlog for next wave: include BOTH validation failures AND timeouts for retry
             # Reset timeout status for timed_out items so they get retried
             for uc in timed_out:
-                # Clear timeout status to allow retry in next wave
                 if uc.get('sql_generation_status') == 'timeout':
                     uc['sql_generation_status'] = 'pending_retry'
                     uc['_retry_attempt'] = uc.get('_retry_attempt', 0) + 1
                     self.logger.debug(f"   🔄 [{uc.get('No', 'UNKNOWN')}] Marked for retry (attempt {uc['_retry_attempt']})")
+                uc['_skip_llm_cache'] = True
             
             # Combine validation failures and timed out items for next wave retry
             retry_items = validation_failed + timed_out
@@ -25794,6 +26043,21 @@ Start your response with the CSV header line: use_case_id,domain
             missing = total_use_cases - len(ordered_results)
             self.logger.warning(f"⚠️ Missing {missing} use cases from SQL generation results")
         
+        for uc in ordered_results:
+            uc_id = uc.get('No', 'UNKNOWN')
+            gen_status = uc.get('generated', 'N')
+            val_status = uc.get('validated', 'D')
+            is_success = gen_status == 'Y' and val_status in ['Y', 'D']
+            self._emit_pipeline_status(
+                stage_name="Use Case SQL Result",
+                step_name=uc_id,
+                sub_step_name=str(uc.get('Name', ''))[:120],
+                message=f"SQL {'generated' if is_success else 'failed'} for {uc_id}",
+                status="ended_success" if is_success else "ended_error",
+                progress_increment=1.0,
+                result_json=self._build_use_case_step_payload(uc)
+            )
+
         return ordered_results
 
     def _apply_sql_generation_selection(self, use_cases: list):
@@ -25858,7 +26122,7 @@ Start your response with the CSV header line: use_case_id,domain
         )
 
     def _generate_sql_and_notebooks_by_domain(self, all_use_cases: list, full_schema_details: list, 
-                                               unstructured_docs_markdown: str, translations: dict, 
+                                               document_context_markdown: str, translations: dict, 
                                                summary_dict: dict = None) -> list:
         """
         Generate SQL queries domain-by-domain, creating each notebook immediately after
@@ -25868,7 +26132,7 @@ Start your response with the CSV header line: use_case_id,domain
         Args:
             all_use_cases: All use cases to process
             full_schema_details: Schema details for SQL generation
-            unstructured_docs_markdown: Unstructured documentation
+            document_context_markdown: Document documentation
             translations: Translation dictionary
             summary_dict: Optional domain summaries
             
@@ -25899,6 +26163,15 @@ Start your response with the CSV header line: use_case_id,domain
                 if 'result_table' not in uc:
                     tables_involved = uc.get('Tables Involved', 'your_table')
                     uc['result_table'] = compute_result_table_name(uc.get('No', 'unknown'), uc.get('Name', 'unknown'), tables_involved, inspire_database=self.inspire_database)
+                self._emit_pipeline_status(
+                    stage_name="Use Case SQL Result",
+                    step_name=uc.get('No', 'UNKNOWN'),
+                    sub_step_name=str(uc.get('Name', ''))[:120],
+                    message=f"SQL skipped (generation disabled) for {uc.get('No', 'UNKNOWN')}",
+                    status="ended_success",
+                    progress_increment=1.0,
+                    result_json=self._build_use_case_step_payload(uc)
+                )
             
             # Still need to create notebooks - proceed to notebook assembly
             grouped_by_domain = self._group_use_cases_by_domain_flat(all_use_cases)
@@ -26059,7 +26332,19 @@ Start your response with the CSV header line: use_case_id,domain
                     _limit_label = "All" if self.max_sql_ucs_per_domain is None else str(self.max_sql_ucs_per_domain)
                     uc['SQL'] = self._build_placeholder_sql(uc, f"SQL generation skipped (per-domain limit: {_limit_label}) — To generate: Run 'Re-generate SQL' operation mode")
                     uc['validated'] = 'N'
+                    if 'result_table' not in uc:
+                        tables_involved = uc.get('Tables Involved', 'your_table')
+                        uc['result_table'] = compute_result_table_name(uc.get('No', 'unknown'), uc.get('Name', 'unknown'), tables_involved, inspire_database=self.inspire_database)
                     domain_final_results[uc.get('No', 'UNKNOWN')] = uc
+                    self._emit_pipeline_status(
+                        stage_name="Use Case SQL Result",
+                        step_name=uc.get('No', 'UNKNOWN'),
+                        sub_step_name=str(uc.get('Name', ''))[:120],
+                        message=f"SQL skipped (per-domain limit) for {uc.get('No', 'UNKNOWN')}",
+                        status="ended_success",
+                        progress_increment=1.0,
+                        result_json=self._build_use_case_step_payload(uc)
+                    )
                 self.logger.info(f"   ⏭️ [{domain_name}] Skipped SQL for {len(skip_sql_ucs)} use cases (per-domain limit)")
 
             sql_candidate_count = len(sql_candidates)
@@ -26094,7 +26379,7 @@ Start your response with the CSV header line: use_case_id,domain
                 log_print(f"      ▶️ [{actual_prefix}] Wave {wave_id}: {len(backlog)} use cases, parallelism {wave_workers}")
                 
                 results, timed_out, validation_failed = self._run_sql_wave(
-                    wave_id, backlog, full_schema_details, unstructured_docs_markdown, schema_by_table, wave_workers
+                    wave_id, backlog, full_schema_details, document_context_markdown, schema_by_table, wave_workers
                 )
                 
                 wave_duration = time.time() - wave_start_time
@@ -26111,11 +26396,13 @@ Start your response with the CSV header line: use_case_id,domain
                         del uc['_needs_fix']
                     else:
                         uc['_needs_fix'] = True
+                    uc['_skip_llm_cache'] = True
                 
                 for uc in timed_out:
                     if uc.get('sql_generation_status') == 'timeout':
                         uc['sql_generation_status'] = 'pending_retry'
                         uc['_retry_attempt'] = uc.get('_retry_attempt', 0) + 1
+                    uc['_skip_llm_cache'] = True
                 
                 retry_items = validation_failed + timed_out
                 backlog = sort_backlog(retry_items)
@@ -26142,6 +26429,23 @@ Start your response with the CSV header line: use_case_id,domain
                                and uc.get('sql_validation_status') != 'failed' 
                                and uc.get('column_validation_status') != 'failed')
             domain_failed = len(domain_ordered_results) - domain_success
+            
+            for uc in domain_ordered_results:
+                if uc.get('generated') == 'N':
+                    continue
+                uc_id = uc.get('No', 'UNKNOWN')
+                gen_status = uc.get('generated', 'N')
+                val_status = uc.get('validated', 'D')
+                is_success = gen_status == 'Y' and val_status in ['Y', 'D']
+                self._emit_pipeline_status(
+                    stage_name="Use Case SQL Result",
+                    step_name=uc_id,
+                    sub_step_name=str(uc.get('Name', ''))[:120],
+                    message=f"SQL {'generated' if is_success else 'failed'} for {uc_id}",
+                    status="ended_success" if is_success else "ended_error",
+                    progress_increment=1.0,
+                    result_json=self._build_use_case_step_payload(uc)
+                )
             
             sql_duration = time.time() - domain_start_time
             log_print(f"\n   ✅ [{actual_prefix}] SQL Generation Complete: {domain_success} succeeded, {domain_failed} failed ({sql_duration:.1f}s)")
@@ -26263,29 +26567,20 @@ Start your response with the CSV header line: use_case_id,domain
 
     def _build_dedup_markdown(self, use_cases: list) -> str:
         """
-        Build a markdown table for deduplication containing Name, Statement, Tables,
-        and optional scores if available. Shared by global and per-domain dedup (DRY).
+        Build a minimal markdown table for deduplication containing ONLY ID, Name,
+        and Business Domain. Intentionally excludes Statement, Tables, scores, and
+        all other fields to force the LLM to evaluate duplicates purely on business
+        intent rather than being distracted by structural/technical differences.
+        Shared by global and per-domain dedup (DRY).
         """
         pipe_esc = r'\|'
-        has_scores = any(uc.get('Return on Investment') for uc in use_cases)
-        
-        if has_scores:
-            header = "| ID | Name | Statement | Tables | ROI | Strat. Align |\n|---|---|---|---|---|---|\n"
-        else:
-            header = "| ID | Name | Statement | Tables |\n|---|---|---|---|\n"
+        header = "| ID | Name | Domain |\n|---|---|---|\n"
         
         md_parts = [header]
         for uc in use_cases:
             name = str(uc.get('Name', '')).replace('|', pipe_esc)
-            statement = str(uc.get('Statement', '')).replace('|', pipe_esc)
-            tables = str(uc.get('Tables Involved', '')).replace('|', pipe_esc)
-            
-            if has_scores:
-                roi = str(uc.get('Return on Investment', 'N/A'))
-                strat_align = str(uc.get('Strategic Alignment', 'N/A'))
-                md_parts.append(f"| {uc['No']} | {name} | {statement} | {tables} | {roi} | {strat_align} |\n")
-            else:
-                md_parts.append(f"| {uc['No']} | {name} | {statement} | {tables} |\n")
+            domain = str(uc.get('Business Domain', '')).replace('|', pipe_esc)
+            md_parts.append(f"| {uc['No']} | {name} | {domain} |\n")
         
         return "".join(md_parts)
 
@@ -27715,12 +28010,25 @@ Start your response with the CSV header line: use_case_id,domain
                     log_print(f"{'='*80}")
                     log_print(f"ℹ️  Executing SQL for all use cases and generating sample outputs")
                     log_print(f"ℹ️  Failed SQL will be auto-fixed and retried (up to 2 attempts)")
+                    self._emit_pipeline_status(
+                        stage_name="Sample Results", step_name="Generate Samples", sub_step_name="Started",
+                        message="Executing SQL and generating sample outputs", status="started", progress_increment=1.0
+                    )
                     try:
                         self._run_generate_sample_result_mode()
+                        self._emit_pipeline_status(
+                            stage_name="Sample Results", step_name="Generate Samples", sub_step_name="Complete",
+                            message="Sample result generation completed", status="ended_success", progress_increment=2.0
+                        )
                     except Exception as e:
                         self.logger.error(f"Sample generation failed: {get_clean_error_message(e)}")
                         log_print(f"⚠️ Sample generation encountered an issue: {str(e)[:100]}", level="WARNING")
                         log_print(f"ℹ️ Proceeding with remaining artifacts...")
+                        self._emit_pipeline_status(
+                            stage_name="Sample Results", step_name="Generate Samples", sub_step_name="Failed",
+                            message=f"Sample generation failed: {get_clean_error_message(e, max_chars=200)}",
+                            status="ended_error", progress_increment=1.0
+                        )
                 
                 # Upload log file and show summary
                 self.logger.info(f"✅ All artifacts for {self.business_name} generated successfully from JSON")
@@ -27828,47 +28136,13 @@ Start your response with the CSV header line: use_case_id,domain
             if self.data_loader:
                 self.logger.debug("Data loader found. Starting batched table processing with MAX_CONTEXT_CHARS management...")
                 
-                # Generate unstructured document list first (needs schema overview)
-                # Check if unstructured data is enabled
-                if self.use_unstructured_data:
-                    # We'll use a sampling approach or generate it once with limited schema
-                    self.logger.info("Generating unstructured document list and extracting business context...")
-                    # Get a small sample for unstructured doc generation
-                    sample_columns = self.data_loader.getNextTables(self.scan_parallelism)
-                    if sample_columns:
-                        sample_columns = self._augment_columns_with_foreign_keys(sample_columns)
-                        sample_schema_markdown = self._format_schema_for_prompt(sample_columns)
-                        business_context_dict = self._generate_unstructured_docs(sample_schema_markdown)
-                        
-                        # Extract individual variables from the returned dict
-                        unstructured_docs_markdown = business_context_dict.get("unstructured_docs_markdown", "")
-                        strategic_goals = business_context_dict.get("strategic_goals", [])
-                        business_context = business_context_dict.get("business_context", "")
-                        business_priorities = business_context_dict.get("business_priorities", [])
-                        strategic_initiative = business_context_dict.get("strategic_initiative", "")
-                        value_chain = business_context_dict.get("value_chain", "")
-                        revenue_model = business_context_dict.get("revenue_model", "")
-                        
-                        # Reset the data loader state to start from beginning
-                        self.data_loader.current_table_idx = 0
-                    else:
-                        unstructured_docs_markdown = ""
-                        strategic_goals = ctx_strategic_goals
-                        business_context = ""
-                        business_priorities = []
-                        strategic_initiative = ""
-                        value_chain = ""
-                        revenue_model = ""
-                        self.logger.warning("No tables found for unstructured doc generation")
-                else:
-                    self.logger.info("Unstructured data generation is disabled. Skipping...")
-                    unstructured_docs_markdown = ""
-                    strategic_goals = ctx_strategic_goals
-                    business_context = ""
-                    business_priorities = []
-                    strategic_initiative = ""
-                    value_chain = ""
-                    revenue_model = ""
+                document_context_markdown = ""
+                strategic_goals = ctx_strategic_goals
+                business_context = ""
+                business_priorities = []
+                strategic_initiative = ""
+                value_chain = ""
+                revenue_model = ""
 
                 # Now process tables in batches with model-specific context limits from TECHNICAL_CONTEXT
                 use_case_gen_context_limit = get_max_context_chars("English", "BASE_USE_CASE_GEN_PROMPT")
@@ -27880,7 +28154,7 @@ Start your response with the CSV header line: use_case_id,domain
                 
                 # Get the base prompt template size estimate
                 base_prompt_template = PROMPT_TEMPLATES.get("BASE_USE_CASE_GEN_PROMPT", "")
-                base_template_size = len(base_prompt_template) + len(unstructured_docs_markdown)
+                base_template_size = len(base_prompt_template) + len(document_context_markdown)
                 base_prompt_size = base_template_size + 2000
                 self.logger.debug(f"Base prompt template size: {base_template_size} chars, context limit: {use_case_gen_context_limit}")
                 
@@ -28177,7 +28451,7 @@ Start your response with the CSV header line: use_case_id,domain
                     use_cases = self._process_batch_with_retry(
                         column_details_inner,
                         unique_batch_id,
-                        unstructured_docs_markdown,
+                        document_context_markdown,
                         strategic_goals,
                         _p1_bc, _p1_bp, _p1_si, _p1_vc, _p1_rm,
                         _p1_max_attempts,
@@ -28212,11 +28486,6 @@ Start your response with the CSV header line: use_case_id,domain
                         batches_completed += 1
                         self.logger.info(f"✓ [PASS 1] Batch {unique_batch_id}: {len(use_cases)} use cases ({batches_completed}/{total_submissions})")
                         log_print(f"✓ [PASS 1] Batch complete ({batches_completed}/{total_submissions})")
-                        try:
-                            self._tracking_merge_use_cases(use_cases)
-                        except Exception as track_err:
-                            self.logger.error(f"⚠️ [PASS 1] Tracking merge failed for batch {unique_batch_id} (non-fatal): {track_err}")
-                            log_print(f"⚠️ Tracking merge failed for batch {unique_batch_id}: {track_err}", level="ERROR")
                 
                 # === MEMORY OPTIMIZATION: Save PASS 1 results to disk immediately ===
                 # Count use cases and save IDs without loading all into memory
@@ -28244,11 +28513,28 @@ Start your response with the CSV header line: use_case_id,domain
                 
                 transactional_batches = []
                 if not _pass1_already_tx_only:
-                    for batch_num, column_details in batches_to_process:
-                        tx_columns = [col for col in column_details 
-                                      if f"{col[0]}.{col[1]}.{col[2]}" in transactional_tables_set]
-                        if tx_columns:
-                            transactional_batches.append((batch_num, tx_columns))
+                    seen_tx_fqtns = set()
+                    unique_tx_columns_by_fqtn = {}
+                    for _, column_details in batches_to_process:
+                        for col in column_details:
+                            fqtn = f"{col[0]}.{col[1]}.{col[2]}"
+                            if fqtn in transactional_tables_set and fqtn not in seen_tx_fqtns:
+                                if fqtn not in unique_tx_columns_by_fqtn:
+                                    unique_tx_columns_by_fqtn[fqtn] = []
+                                unique_tx_columns_by_fqtn[fqtn].append(col)
+                        for fqtn in unique_tx_columns_by_fqtn:
+                            seen_tx_fqtns.add(fqtn)
+                    p2_batch_num = 1
+                    for fqtn, tx_cols in unique_tx_columns_by_fqtn.items():
+                        augmented_tx = self._augment_columns_with_related_tables(tx_cols)
+                        transactional_batches.append((p2_batch_num, augmented_tx))
+                        p2_batch_num += 1
+                    if len(transactional_batches) > 0:
+                        self.logger.info(
+                            f"PASS 2 batching: {len(unique_tx_columns_by_fqtn)} unique transactional tables "
+                            f"→ {len(transactional_batches)} batches (deduplicated from augmented Pass 1 batches)"
+                        )
+                    del seen_tx_fqtns, unique_tx_columns_by_fqtn
                 else:
                     self.logger.info("⏭️ PASS 2 skipped: PASS 1 already used transactional tables only (table election mode)")
                     log_print(f"⏭️ PASS 2 skipped: PASS 1 already covered transactional tables only [{self.table_election_mode}]")
@@ -28359,7 +28645,7 @@ Start your response with the CSV header line: use_case_id,domain
                         use_cases = self._process_batch_with_retry(
                             column_details_inner,
                             unique_batch_id,
-                            unstructured_docs_markdown,
+                            document_context_markdown,
                             strategic_goals,
                             _p2_bc, _p2_bp, _p2_si, _p2_vc, _p2_rm,
                             _p2_max_attempts,
@@ -28394,11 +28680,6 @@ Start your response with the CSV header line: use_case_id,domain
                             batches_completed += 1
                             self.logger.info(f"✓ [PASS 2] Batch {unique_batch_id}: {len(use_cases)} NEW use cases ({batches_completed}/{pass2_submissions})")
                             log_print(f"✓ [PASS 2] Batch complete ({batches_completed}/{pass2_submissions})")
-                            try:
-                                self._tracking_merge_use_cases(use_cases)
-                            except Exception as track_err:
-                                self.logger.error(f"⚠️ [PASS 2] Tracking merge failed for batch {unique_batch_id} (non-fatal): {track_err}")
-                                log_print(f"⚠️ Tracking merge failed for batch {unique_batch_id}: {track_err}", level="ERROR")
                     
                     # === MEMORY OPTIMIZATION: Count PASS 2 results without loading all into memory ===
                     total_after_pass2 = self.storage_manager.get_total_count()
@@ -28449,7 +28730,7 @@ Start your response with the CSV header line: use_case_id,domain
                 # Filter out use cases without valid tables (before deduplication)
                 # Keep use cases that have either:
                 # 1. Valid table references (non-empty and not just catalog/schema prefix)
-                # 2. Volume paths (for unstructured data use cases)
+                # 2. Volume paths (for document data use cases)
                 pre_filter_count = len(all_use_cases)
                 all_use_cases = [
                     uc for uc in all_use_cases 
@@ -28496,7 +28777,7 @@ Start your response with the CSV header line: use_case_id,domain
                     pre_scoring_retry = self._retry_missing_table_coverage(
                         unique_use_cases,
                         all_columns_for_sql,
-                        unstructured_docs_markdown,
+                        document_context_markdown,
                         strategic_goals,
                         include_business_catchall=True
                     )
@@ -28595,9 +28876,6 @@ Start your response with the CSV header line: use_case_id,domain
                 self.logger.debug(f"Re-numbered {len(renumbered_use_cases)} use cases to match notebook prefixes.")
                 del grouped_by_domain, domain_impact_scores, sorted_domain_names, domain_source_counters
                 
-                self._tracking_replace_session(renumbered_use_cases)
-                self._tracking_update_scores(renumbered_use_cases)
-                
                 # Set final_consolidated_use_cases before quality scoring
                 final_consolidated_use_cases = renumbered_use_cases
                 
@@ -28650,8 +28928,6 @@ Start your response with the CSV header line: use_case_id,domain
                         count = quality_distribution.get(label, 0)
                         if count > 0:
                             log_print(f"   {label}: {count} use cases")
-                    
-                    self._tracking_update_quality(final_consolidated_use_cases)
                     
                     # === USE CASES QUALITY FILTER: Apply filtering based on widget selection ===
                     if self.quality_filter_acceptable is not None:
@@ -28724,9 +29000,30 @@ Start your response with the CSV header line: use_case_id,domain
 
                         final_consolidated_use_cases = accepted_use_cases
                         
-                        log_print(f"\n✅ ACCEPTED USE CASES: {len(accepted_use_cases)} (passed {self.use_cases_quality} filter)")
+                        if len(final_consolidated_use_cases) < self.min_use_cases_for_selection:
+                            pool = [uc for uc in rejected_use_cases if uc not in final_consolidated_use_cases]
+                            if pool:
+                                _quality_order = {'Ultra High': 7, 'Very High': 6, 'High': 5, 'Medium': 4, 'Low': 3, 'Very Low': 2, 'Ultra Low': 1}
+                                def _sort_key(uc):
+                                    p = uc.get('Priority', 0)
+                                    try:
+                                        pval = float(p)
+                                    except (TypeError, ValueError):
+                                        pval = 0
+                                    q = uc.get('Quality', 'Medium')
+                                    qval = _quality_order.get(q, 0)
+                                    return (-pval, -qval)
+                                pool_sorted = sorted(pool, key=_sort_key)
+                                need = self.min_use_cases_for_selection - len(final_consolidated_use_cases)
+                                to_add = pool_sorted[:need]
+                                for uc in to_add:
+                                    final_consolidated_use_cases.append(uc)
+                                log_print(f"\n📈 MIN USE CASES TOP-UP [{self.min_use_cases_for_selection}]: Added {len(to_add)} use cases from below-threshold pool (sorted by Priority desc, Quality tie-break) to ensure minimum selection size")
+                                self.logger.info(f"📈 Min use cases top-up: added {len(to_add)} from rejected pool to reach {self.min_use_cases_for_selection}")
+                        
+                        log_print(f"\n✅ ACCEPTED USE CASES: {len(final_consolidated_use_cases)} (passed {self.use_cases_quality} filter)")
                         log_print(f"⚠️ REJECTED USE CASES: {len(rejected_use_cases)} (below threshold)")
-                        self.logger.info(f"✅ Quality filter [{self.use_cases_quality}]: {len(accepted_use_cases)} accepted, {len(rejected_use_cases)} rejected")
+                        self.logger.info(f"✅ Quality filter [{self.use_cases_quality}]: {len(final_consolidated_use_cases)} accepted, {len(rejected_use_cases)} rejected")
                         del rejected_use_cases, accepted_use_cases
                         
                         quality_distribution = {}
@@ -28786,6 +29083,10 @@ Start your response with the CSV header line: use_case_id,domain
                 self._generate_csv_catalog("English", lang_abbr_en, english_grouped_data)
             except Exception as e:
                 self.logger.error(f"Failed to generate English CSV before SQL: {get_clean_error_message(e)}")
+            try:
+                self._tracking_replace_session(final_consolidated_use_cases)
+            except Exception as _track_err:
+                self.logger.error(f"⚠️ Tracking table UPDATE 1/2 (post-Excel) failed (non-fatal): {_track_err}")
 
         
         # === PHASE 2: DOMAIN-BY-DOMAIN SQL GENERATION & NOTEBOOK CREATION ===
@@ -28834,7 +29135,7 @@ Start your response with the CSV header line: use_case_id,domain
             final_consolidated_use_cases = self._generate_sql_and_notebooks_by_domain(
                 final_consolidated_use_cases,
                 _schema_for_sql,
-                unstructured_docs_markdown,
+                document_context_markdown,
                 english_translations,
                 summary_dict
             )
@@ -28842,7 +29143,7 @@ Start your response with the CSV header line: use_case_id,domain
             final_consolidated_use_cases = self._generate_sql_parallel(
                 final_consolidated_use_cases,
                 _schema_for_sql,
-                unstructured_docs_markdown
+                document_context_markdown
             )
         del _schema_for_sql
         _force_gc(self.logger, "after SQL generation phase")
@@ -28910,12 +29211,25 @@ Start your response with the CSV header line: use_case_id,domain
             log_print(f"{'='*80}")
             log_print(f"ℹ️  Executing SQL for all use cases and generating sample outputs")
             log_print(f"ℹ️  Failed SQL will be auto-fixed and retried (up to 2 attempts)")
+            self._emit_pipeline_status(
+                stage_name="Sample Results", step_name="Generate Samples", sub_step_name="Started",
+                message="Executing SQL and generating sample outputs", status="started", progress_increment=1.0
+            )
             try:
                 self._run_generate_sample_result_mode()
+                self._emit_pipeline_status(
+                    stage_name="Sample Results", step_name="Generate Samples", sub_step_name="Complete",
+                    message="Sample result generation completed", status="ended_success", progress_increment=2.0
+                )
             except Exception as e:
                 self.logger.error(f"Sample generation failed: {get_clean_error_message(e)}")
                 log_print(f"⚠️ Sample generation encountered an issue: {str(e)[:100]}", level="WARNING")
                 log_print(f"ℹ️ Proceeding with remaining artifacts...")
+                self._emit_pipeline_status(
+                    stage_name="Sample Results", step_name="Generate Samples", sub_step_name="Failed",
+                    message=f"Sample generation failed: {get_clean_error_message(e, max_chars=200)}",
+                    status="ended_error", progress_increment=1.0
+                )
         
         self.storage_manager.cleanup()
         self.ai_agent.cleanup_llm_cache()
@@ -28934,59 +29248,6 @@ Start your response with the CSV header line: use_case_id,domain
         # Show AI usage summary as the very last run output
         AIAgent.get_summary_report()
             
-
-    def _generate_unstructured_docs(self, combined_schema_markdown: str) -> dict:
-        """
-        Generates unstructured doc list using fallback approach.
-        
-        Returns:
-            dict: Dictionary containing:
-                - unstructured_docs_markdown: str
-                - strategic_goals: list
-                - business_context: str
-                - business_priorities: list
-                - strategic_initiative: str
-                - value_chain: str
-                - revenue_model: str
-        """
-        if not combined_schema_markdown:
-            self.logger.warning("No schema markdown provided, cannot generate unstructured docs list.")
-            return ""
-        
-        try:
-            self.logger.info("Generating fallback unstructured document list...")
-            fallback_context = {
-                "unstructured_docs_markdown": self._generate_fallback_unstructured_docs(),
-                "strategic_goals": [],
-                "business_context": self._get_business_context_fallback(),
-                "business_priorities": [],
-                "strategic_initiative": "Data-driven transformation",
-                "value_chain": "Standard business operations",
-                "revenue_model": "Product and service sales"
-            }
-            return fallback_context
-            
-        except Exception as e:
-            self.logger.error(f"Failed to generate unstructured document list: {get_clean_error_message(e)}. Proceeding with empty list.")
-            fallback_context = {
-                "unstructured_docs_markdown": "",
-                "strategic_goals": [],
-                "business_context": self._get_business_context_fallback(),
-                "business_priorities": [],
-                "strategic_initiative": "Data-driven transformation",
-                "value_chain": "Standard business operations",
-                "revenue_model": "Product and service sales"
-            }
-            return fallback_context
-    
-    def _generate_fallback_unstructured_docs(self) -> str:
-        """Fallback: Generate a minimal set of generic documents."""
-        return """| "Document Name" | "Description" | "Type" | "Extracted Entities" | "File Path" |
-|---|---|---|---|---|
-| "Business Invoices" | "PDF invoices from vendors" | "PDF" | "vendor_name, invoice_number, amount, date" | "/Volumes/finance/invoices/" |
-| "Customer Emails" | "Email correspondence with customers" | "DOCX" | "customer_name, subject, date, sentiment" | "/Volumes/communications/emails/" |
-| "Product Images" | "Product photography and diagrams" | "JPG" | "product_id, image_type" | "/Volumes/products/images/" |
-"""
 
     # === MODIFIED: _get_salesy_summary (Req 2) ===
     def _get_salesy_summary(self, grouped_data: dict, business_name: str, language: str, translations: dict) -> tuple:
@@ -30984,7 +31245,7 @@ Start your response with: {{{{"honesty_score":
                 "directly_involved_schema": directly_involved_schema,
                 "use_case_columns": use_case.get('Involved Columns') or use_case.get('Columns Involved') or "",
                 "foreign_key_relationships": "None",
-                "unstructured_docs": "",  # Not available during execution/validation, use empty string
+                "document_context": "",  # Not available during execution/validation, use empty string
                 "previous_feedback": "",  # Required by USE_CASE_SQL_GEN_PROMPT
                 "ai_functions_summary": generate_ai_functions_doc("summary"),  # Required by USE_CASE_SQL_GEN_PROMPT
                 "statistical_functions_detailed": generate_statistical_functions_doc("detailed"),
@@ -31010,6 +31271,7 @@ Start your response with: {{{{"honesty_score":
                 worker_prompt_path="USE_CASE_SQL_GEN_PROMPT",
                 prompt_vars=regeneration_prompt_vars,
                 response_schema=None,
+                model_override=use_case.get('_sql_regeneration_model_override'),
                 timeout_override=adaptive_timeout,
                 max_retries_override=self.max_retry_attempts,
                 skip_cache=skip_llm_cache
@@ -31781,17 +32043,18 @@ Start your response with: {{{{"honesty_score":
                     # Add page-break-after class to every 2nd use case (2, 4, 6, 8, etc.)
                     page_break_class = ' page-break-after' if idx % 2 == 0 else ''
                     html_parts.append(f'<div class="use-case-block{page_break_class}">')
-                    html_parts.append(f"<h3>{e(uc['No'])}: {e(uc['Name'])}</h3>")
+                    normalized_usecase = self._normalize_usecase(uc.get('usecase', ''), uc.get('Name', ''))
+                    html_parts.append(f"<h3>{e(uc['No'])}: {e(normalized_usecase)}</h3>")
+                    html_parts.append(f"<p><strong>{e(t.get('description_label', 'Description'))}:</strong> {e(uc.get('Name', 'N/A'))}</p>")
                     # Add header line with Subdomain, Type, Analytics Technique, and Priority (with translations)
                     subdomain_val = e(uc.get('Subdomain', 'N/A'))
                     type_val = e(translate_pdf_value(uc.get('type', 'N/A')))
                     analytics_technique_val = e(translate_analytics_technique(uc.get('Analytics Technique', 'N/A')))
                     quality_val = e(translate_pdf_value(uc.get('Quality', 'N/A')))
-                    html_parts.append(f"<p style='font-weight: bold; color: #0066cc;'>{e(t['subdomain'])}: {subdomain_val} | {e(t['type'])}: {type_val}, {e(t.get('analytics_technique', 'Analytics Technique'))}: {analytics_technique_val}, {e(t['quality'])}: {quality_val}</p>")
+                    html_parts.append(f"<p style='font-weight: bold; color: #0066cc;'>{e(t['subdomain'])}: {subdomain_val} | {e(t['type'])}: {type_val} | {e(t.get('analytics_technique', 'Analytics Technique'))}: {analytics_technique_val} | {e(t['quality'])}: {quality_val}</p>")
                     html_parts.append(f"<p><strong>{e(t['statement'])}:</strong> {e(uc.get('Statement', 'N/A'))}</p>")
                     html_parts.append(f"<p><strong>{e(t['solution'])}:</strong> {e(uc.get('Solution', 'N/A'))}</p>")
                     html_parts.append(f"<p><strong>{e(t['business_value'])}:</strong> {e(uc.get('Business Value', 'N/A'))}</p>")
-                    html_parts.append(f"<p><strong>{e(t.get('quality_reasons', 'Quality Reasons'))}:</strong> {e(uc.get('Quality Summary', 'N/A'))}</p>")
                     html_parts.append(f"<p><strong>{e(t['beneficiary'])}:</strong> {e(uc.get('Beneficiary', 'N/A'))}</p>")
                     html_parts.append(f"<p><strong>{e(t['sponsor'])}:</strong> {e(uc.get('Sponsor', 'N/A'))}</p>")
                     html_parts.append(f"<p><strong>{e(t.get('business_priority_alignment', 'Business Priority Alignment'))}:</strong> {e(translate_strategic_value(uc.get('Business Priority Alignment', 'General Improvement')))}</p>")
@@ -32190,7 +32453,8 @@ Start your response with: {{{{"honesty_score":
                     
                     title = slide.shapes.title; title.left, title.width = int(LEFT_MARGIN_CM), int(CONTENT_WIDTH_CM)
                     title.top = int(Cm(1.0)); title.height = int(Cm(2.5))
-                    title.text = f"{uc['No']}: {uc['Name']}"
+                    normalized_usecase = self._normalize_usecase(uc.get('usecase', ''), uc.get('Name', ''))
+                    title.text = f"{uc['No']}: {normalized_usecase}"
                     p = title.text_frame.paragraphs[0]; p.font.color.rgb = DATABRICKS_BLUE; p.font.size = Pt(32); p.alignment = align
                     
                     content_placeholder = slide.placeholders[1]; content_placeholder.left, content_placeholder.width = int(LEFT_MARGIN_CM), int(Cm(30.5))
@@ -32204,7 +32468,7 @@ Start your response with: {{{{"honesty_score":
                     type_val = translate_pptx_value(uc.get('type', 'N/A'))
                     analytics_technique_val = translate_analytics_pptx_value(uc.get('Analytics Technique', 'N/A'))
                     quality_val = translate_pptx_value(uc.get('Quality', 'N/A'))
-                    header_text = f"{t['subdomain']}: {subdomain_val} | {t['type']}: {type_val}, {t.get('analytics_technique', 'Analytics Technique')}: {analytics_technique_val}, {t['quality']}: {quality_val}"
+                    header_text = f"{t['subdomain']}: {subdomain_val} | {t['type']}: {type_val} | {t.get('analytics_technique', 'Analytics Technique')}: {analytics_technique_val} | {t['quality']}: {quality_val}"
                     header_run = header_p.add_run(); header_run.text = header_text; header_run.font.bold = True; header_run.font.size = Pt(22)
                     set_font_color(header_run, DATABRICKS_ORANGE)
                     header_p.space_after = Pt(16)
@@ -32217,10 +32481,14 @@ Start your response with: {{{{"honesty_score":
                         run_value = p.add_run(); run_value.text = value; run_value.font.size = Pt(20)
                         set_font_color(run_value, TEXT_COLOR)
                     # Type is already shown in header line above, no need to repeat it
-                    add_detail_line(content_frame, 'statement', uc.get('Statement', 'N/A'), align, is_first=True)
+                    p = content_frame.add_paragraph(); p.level = 0; p.alignment = align
+                    run_label = p.add_run(); run_label.text = f"{t.get('description_label', 'Description')}: "; run_label.font.bold = True; run_label.font.size = Pt(20)
+                    set_font_color(run_label, DATABRICKS_BLUE)
+                    run_value = p.add_run(); run_value.text = uc.get('Name', 'N/A'); run_value.font.size = Pt(20)
+                    set_font_color(run_value, TEXT_COLOR)
+                    add_detail_line(content_frame, 'statement', uc.get('Statement', 'N/A'), align)
                     add_detail_line(content_frame, 'solution', uc.get('Solution', 'N/A'), align)
                     add_detail_line(content_frame, 'business_value', uc.get('Business Value', 'N/A'), align)
-                    add_detail_line(content_frame, 'quality_reasons', uc.get('Quality Summary', 'N/A'), align)
                     add_detail_line(content_frame, 'beneficiary', uc.get('Beneficiary', 'N/A'), align)
                     add_detail_line(content_frame, 'sponsor', uc.get('Sponsor', 'N/A'), align)
                     # Add Business Priority Alignment
@@ -32343,41 +32611,42 @@ Start your response with: {{{{"honesty_score":
                         safe_str(uc.get('No'), 'N/A'),                                 # 0 - ID (A)
                         safe_str(uc.get('Business Domain'), 'N/A'),                    # 1 - Business Domain (B)
                         safe_str(uc.get('Subdomain'), 'N/A'),                          # 2 - Subdomain (C)
-                        safe_str(uc.get('Name'), 'N/A'),                               # 3 - Use Case (D)
-                        safe_str(uc.get('generated', 'N/A'), 'N/A'),                   # 4 - SQL Generated (E)
-                        safe_str(uc.get('type'), 'N/A'),                               # 5 - Type (F)
-                        safe_str(uc.get('Analytics Technique'), 'N/A'),                # 6 - Analytics Technique (G)
-                        safe_str(uc.get('Business Priority Alignment'), 'General Improvement'),  # 7 - Business Priority Alignment (H)
-                        safe_str(uc.get('Strategic Goals Alignment'), 'General Improvement'),    # 8 - Strategic Goals Alignment (I)
-                        safe_str(uc.get('Statement'), 'N/A'),                          # 9 - Statement (J)
-                        safe_str(uc.get('Solution'), 'N/A'),                           # 10 - Solution (K)
-                        safe_str(uc.get('Business Value'), 'N/A'),                     # 11 - Business Value (L)
-                        safe_str(uc.get('Beneficiary'), 'N/A'),                        # 12 - Beneficiary (M)
-                        safe_str(uc.get('Sponsor'), 'N/A'),                            # 13 - Sponsor (N)
-                        safe_str(uc.get('Tables Involved'), 'N/A'),                    # 14 - Tables Involved (O)
-                        safe_str(uc.get('Primary Table'), 'N/A'),                      # 15 - Primary Table (P)
-                        uc.get('Strategic Alignment', 0),                              # 16 - Strategic Alignment (Q)
-                        uc.get('Return on Investment', 0),                             # 17 - ROI (R)
-                        uc.get('Reusability', 0),                                      # 18 - Reusability (S)
-                        uc.get('Time to Value', 0),                                    # 19 - Time to Value (T)
-                        uc.get('Data Availability', 0),                                # 20 - Data Availability (U)
-                        uc.get('Data Accessibility', 0),                               # 21 - Data Accessibility (V)
-                        uc.get('Architecture Fitness', 0),                             # 22 - Architecture Fitness (W)
-                        uc.get('Team Skills', 0),                                      # 23 - Team Skills (X)
-                        uc.get('Domain Knowledge', 0),                                 # 24 - Domain Knowledge (Y)
-                        uc.get('People Allocation', 0),                                # 25 - People Allocation (Z)
-                        uc.get('Budget Allocation', 0),                                # 26 - Budget Allocation (AA)
-                        uc.get('Time to Production', 0),                               # 27 - Time to Production (AB)
-                        uc.get('Value', 0),                                            # 28 - Value (AC)
-                        uc.get('Feasibility', 0),                                      # 29 - Feasibility (AD)
-                        uc.get('Priority', 0),                                         # 30 - Priority (AE)
-                        safe_str(uc.get('Quality'), 'N/A'),                            # 31 - Quality (AF)
-                        safe_str(uc.get('Justification'), 'N/A'),                      # 32 - Priority Reasons (AG)
-                        safe_str(uc.get('Quality Summary'), 'N/A'),                    # 33 - Quality Reasons (AH)
-                        safe_str(uc.get('result_table'), 'N/A'),                       # 34 - Result Database (AI)
+                        safe_str(self._normalize_usecase(uc.get('usecase', ''), uc.get('Name', '')), 'N/A'),  # 3 - Use Case (D)
+                        safe_str(uc.get('Name'), 'N/A'),                               # 4 - Description (E)
+                        safe_str(uc.get('generated', 'N/A'), 'N/A'),                   # 5 - SQL Generated (F)
+                        safe_str(uc.get('type'), 'N/A'),                               # 6 - Type (G)
+                        safe_str(uc.get('Analytics Technique'), 'N/A'),                # 7 - Analytics Technique (H)
+                        safe_str(uc.get('Business Priority Alignment'), 'General Improvement'),  # 8 - Business Priority Alignment (I)
+                        safe_str(uc.get('Strategic Goals Alignment'), 'General Improvement'),    # 9 - Strategic Goals Alignment (J)
+                        safe_str(uc.get('Statement'), 'N/A'),                          # 10 - Statement (K)
+                        safe_str(uc.get('Solution'), 'N/A'),                           # 11 - Solution (L)
+                        safe_str(uc.get('Business Value'), 'N/A'),                     # 12 - Business Value (M)
+                        safe_str(uc.get('Beneficiary'), 'N/A'),                        # 13 - Beneficiary (N)
+                        safe_str(uc.get('Sponsor'), 'N/A'),                            # 14 - Sponsor (O)
+                        safe_str(uc.get('Tables Involved'), 'N/A'),                    # 15 - Tables Involved (P)
+                        safe_str(uc.get('Primary Table'), 'N/A'),                      # 16 - Primary Table (Q)
+                        uc.get('Strategic Alignment', 0),                              # 17 - Strategic Alignment (R)
+                        uc.get('Return on Investment', 0),                             # 18 - ROI (S)
+                        uc.get('Reusability', 0),                                      # 19 - Reusability (T)
+                        uc.get('Time to Value', 0),                                    # 20 - Time to Value (U)
+                        uc.get('Data Availability', 0),                                # 21 - Data Availability (V)
+                        uc.get('Data Accessibility', 0),                               # 22 - Data Accessibility (W)
+                        uc.get('Architecture Fitness', 0),                             # 23 - Architecture Fitness (X)
+                        uc.get('Team Skills', 0),                                      # 24 - Team Skills (Y)
+                        uc.get('Domain Knowledge', 0),                                 # 25 - Domain Knowledge (Z)
+                        uc.get('People Allocation', 0),                                # 26 - People Allocation (AA)
+                        uc.get('Budget Allocation', 0),                                # 27 - Budget Allocation (AB)
+                        uc.get('Time to Production', 0),                               # 28 - Time to Production (AC)
+                        uc.get('Value', 0),                                            # 29 - Value (AD)
+                        uc.get('Feasibility', 0),                                      # 30 - Feasibility (AE)
+                        uc.get('Priority', 0),                                         # 31 - Priority (AF)
+                        safe_str(uc.get('Quality'), 'N/A'),                            # 32 - Quality (AG)
+                        safe_str(uc.get('Justification'), 'N/A'),                      # 33 - Priority Reasons (AH)
+                        safe_str(uc.get('Quality Summary'), 'N/A'),                    # 34 - Quality Reasons (AI)
+                        safe_str(uc.get('result_table'), 'N/A'),                       # 35 - Result Database (AJ)
                     ])
             
-            priority_score_idx = 30
+            priority_score_idx = 31
             data_rows.sort(key=lambda row: float(row[priority_score_idx]) if isinstance(row[priority_score_idx], (int, float)) else 0, reverse=True)
             
             if not data_rows:
@@ -32429,7 +32698,7 @@ Start your response with: {{{{"honesty_score":
             })
             
             headers = [
-                "ID", "Business Domain", "Subdomain", "Use Case", "SQL Generated",
+                "ID", "Business Domain", "Subdomain", "Use Case", "Description", "SQL Generated",
                 "Type", "Analytics Technique",
                 "Business Priority Alignment", "Strategic Goals Alignment",
                 "Statement", "Solution", "Business Value", "Beneficiary", "Sponsor",
@@ -32448,8 +32717,8 @@ Start your response with: {{{{"honesty_score":
             
             # Write data rows
             for row_num, row_data in enumerate(data_rows, start=1):
-                numeric_start = 16  # Strategic Alignment score (index 16)
-                numeric_end = 30    # Priority (index 30)
+                numeric_start = 17  # Strategic Alignment score (index 17)
+                numeric_end = 31    # Priority (index 31)
                 for col_num, cell_data in enumerate(row_data):
                     if col_num >= numeric_start and col_num <= numeric_end:
                         try:
@@ -32485,20 +32754,20 @@ Start your response with: {{{{"honesty_score":
             })
             
             scoring_columns = [
-                (16, '#4472C4'),  # Strategic Alignment
-                (17, '#ED7D31'),  # ROI
-                (18, '#A5A5A5'),  # Reusability
-                (19, '#FFC000'),  # Time to Value
-                (20, '#5B9BD5'),  # Data Availability
-                (21, '#70AD47'),  # Data Accessibility
-                (22, '#264478'),  # Architecture Fitness
-                (23, '#9E480E'),  # Team Skills
-                (24, '#636363'),  # Domain Knowledge
-                (25, '#997300'),  # People Allocation
-                (26, '#255E91'),  # Budget Allocation
-                (27, '#43682B'),  # Time to Production
-                (28, ACCENT),     # Value
-                (29, SECONDARY),  # Feasibility
+                (17, '#4472C4'),  # Strategic Alignment
+                (18, '#ED7D31'),  # ROI
+                (19, '#A5A5A5'),  # Reusability
+                (20, '#FFC000'),  # Time to Value
+                (21, '#5B9BD5'),  # Data Availability
+                (22, '#70AD47'),  # Data Accessibility
+                (23, '#264478'),  # Architecture Fitness
+                (24, '#9E480E'),  # Team Skills
+                (25, '#636363'),  # Domain Knowledge
+                (26, '#997300'),  # People Allocation
+                (27, '#255E91'),  # Budget Allocation
+                (28, '#43682B'),  # Time to Production
+                (29, ACCENT),     # Value
+                (30, SECONDARY),  # Feasibility
             ]
             
             for col_idx, bar_color in scoring_columns:
@@ -32508,7 +32777,7 @@ Start your response with: {{{{"honesty_score":
                     'bar_only': False
                 })
             
-            worksheet.conditional_format(1, 30, last_row, 30, {
+            worksheet.conditional_format(1, 31, last_row, 31, {
                 'type': '3_color_scale',
                 'min_color': '#F8696B',
                 'mid_color': '#FFEB84',
@@ -32575,6 +32844,7 @@ Start your response with: {{{{"honesty_score":
                 for uc in use_cases:
                     uc_id = uc.get('No', 'N/A')
                     uc_name = uc.get('Name', 'Unnamed')
+                    uc_usecase = self._normalize_usecase(uc.get('usecase', ''), uc_name)
                     uc_quality = uc.get('Quality', 'Medium')
                     uc_type = uc.get('type', 'N/A')
                     uc_statement = uc.get('Statement', 'N/A')
@@ -32590,7 +32860,8 @@ Start your response with: {{{{"honesty_score":
                     uc_bp_alignment = uc.get('Business Priority Alignment', 'N/A')
                     uc_sg_alignment = uc.get('Strategic Goals Alignment', 'N/A')
                     
-                    md_content.append(f"\n#### {uc_id}: {uc_name}\n")
+                    md_content.append(f"\n#### {uc_id}: {uc_usecase}\n")
+                    md_content.append(f"- **Description:** {uc_name}\n")
                     md_content.append(f"- **Subdomain:** {uc_subdomain}\n")
                     md_content.append(f"- **Type:** {uc_type}\n")
                     md_content.append(f"- **Quality:** {uc_quality} (Score: {uc_priority_score})\n")
@@ -32638,7 +32909,7 @@ Start your response with: {{{{"honesty_score":
         try:
             data_rows = []
             headers = [
-                "ID", "Business Domain", "Subdomain", "Use Case", "SQL Generated",
+                "ID", "Business Domain", "Subdomain", "Use Case", "Description", "SQL Generated",
                 "Type", "Analytics Technique",
                 "Business Priority Alignment", "Strategic Goals Alignment",
                 "Statement", "Solution", "Business Value", "Beneficiary", "Sponsor",
@@ -32657,6 +32928,7 @@ Start your response with: {{{{"honesty_score":
                         uc.get('No', 'N/A'),
                         uc.get('Business Domain', 'N/A'),
                         uc.get('Subdomain', 'N/A'),
+                        self._normalize_usecase(uc.get('usecase', ''), uc.get('Name', '')),
                         uc.get('Name', 'N/A'),
                         uc.get('generated', 'N/A'),
                         uc.get('type', 'N/A'),
@@ -32691,8 +32963,8 @@ Start your response with: {{{{"honesty_score":
                         uc.get('result_table', 'N/A'),
                     ])
             
-            # Sort by Priority descending (index 30)
-            data_rows.sort(key=lambda row: float(row[30]) if isinstance(row[30], (int, float)) else 0, reverse=True)
+            # Sort by Priority descending (index 31)
+            data_rows.sort(key=lambda row: float(row[31]) if isinstance(row[31], (int, float)) else 0, reverse=True)
             
             if not data_rows:
                 self.logger.warning(f"No data to write to CSV for {language}. Skipping.")
@@ -33839,9 +34111,9 @@ Start your response with: {{{{"honesty_score":
         return tables_str
 
     def _parse_llm_csv_response(self, llm_response: str, log_prefix: str) -> list:
-        self.logger.info(f"{log_prefix} Starting robust 11-column CSV parsing (SQL and scoring metrics will be assigned separately)...")
+        self.logger.info(f"{log_prefix} Starting robust 12-column CSV parsing (SQL and scoring metrics will be assigned separately)...")
         parsed_rows = []
-        _canonical_header = '"No","Name","type","Analytics Technique","Statement","Solution","Business Value","Beneficiary","Sponsor","Tables Involved","Technical Design"'
+        _canonical_header = '"No","Name","usecase","type","Analytics Technique","Statement","Solution","Business Value","Beneficiary","Sponsor","Tables Involved","Technical Design"'
         
         try:
             # Clean response - remove markdown fences if present
@@ -33850,12 +34122,12 @@ Start your response with: {{{{"honesty_score":
                 csv_clean = re.sub(r'^```[a-z]*\n', '', csv_clean)
                 csv_clean = re.sub(r'\n```$', '', csv_clean)
             
-            # Find header line (11 columns - Business Domain, Subdomain, SQL, and scoring columns will be calculated in code)
+            # Find header line (12 columns - Business Domain, Subdomain, SQL, and scoring columns will be calculated in code)
             # Support both quoted and unquoted headers from LLM, with case-insensitive matching
-            # Analytics Technique is now generated by LLM as column 4
-            # Column 5 MUST be "Statement" (not "Opportunity" or any other name)
-            header_pattern_quoted = r'"No","Name","[Tt]ype","Analytics Technique","Statement","Solution","Business Value","Beneficiary","Sponsor","Tables Involved","Technical Design"(?:\s*,\s*"honesty_score"\s*,\s*"honesty_justification")?'
-            header_pattern_unquoted = r'No,Name,[Tt]ype,Analytics Technique,Statement,Solution,Business Value,Beneficiary,Sponsor,Tables Involved,Technical Design(?:\s*,\s*honesty_score\s*,\s*honesty_justification)?'
+            # Analytics Technique is now generated by LLM as column 5
+            # Column 6 MUST be "Statement" (not "Opportunity" or any other name)
+            header_pattern_quoted = r'"No","Name","usecase","[Tt]ype","Analytics Technique","Statement","Solution","Business Value","Beneficiary","Sponsor","Tables Involved","Technical Design"(?:\s*,\s*"honesty_score"\s*,\s*"honesty_justification")?'
+            header_pattern_unquoted = r'No,Name,usecase,[Tt]ype,Analytics Technique,Statement,Solution,Business Value,Beneficiary,Sponsor,Tables Involved,Technical Design(?:\s*,\s*honesty_score\s*,\s*honesty_justification)?'
             header_match = re.search(header_pattern_quoted, csv_clean, re.IGNORECASE)
             if not header_match:
                 header_match = re.search(header_pattern_unquoted, csv_clean, re.IGNORECASE)
@@ -33905,8 +34177,8 @@ Start your response with: {{{{"honesty_score":
             # Search ALL matches and validate each one (the first match may be prompt echoes or corrupted data)
             if not header_match:
                 simpler_pattern = r'(?:"No"|No)\s*,\s*(?:"Name"|Name)\s*,\s*(?:"[Tt]ype"|[Tt]ype)'
-                canonical_col_count = 11
-                _CANONICAL_FIELDS = ["No", "Name", "type", "Analytics Technique", "Statement",
+                canonical_col_count = 12
+                _CANONICAL_FIELDS = ["No", "Name", "usecase", "type", "Analytics Technique", "Statement",
                                      "Solution", "Business Value", "Beneficiary", "Sponsor",
                                      "Tables Involved", "Technical Design"]
                 _REMAP_ALIASES = {
@@ -33944,20 +34216,20 @@ Start your response with: {{{{"honesty_score":
                         self.logger.warning(f"{log_prefix} Skipping candidate header match (field too long: {max_field_len} chars, likely a data row): {original_header[:150]}")
                         continue
                     
-                    # VALIDATION: At least 5 of 11 canonical fields should be recognizable
+                    # VALIDATION: At least 6 of 12 canonical fields should be recognizable
                     canonical_lower = {c.lower() for c in _CANONICAL_FIELDS}
                     alias_keys = set(_REMAP_ALIASES.keys())
                     recognized_count = sum(
                         1 for f in actual_fields
                         if f in _CANONICAL_FIELDS or f.lower().strip() in canonical_lower or f.lower().strip() in alias_keys
                     )
-                    if recognized_count < 5:
-                        self.logger.warning(f"{log_prefix} Skipping candidate header match (only {recognized_count}/11 fields recognized): {original_header[:150]}")
+                    if recognized_count < 6:
+                        self.logger.warning(f"{log_prefix} Skipping candidate header match (only {recognized_count}/12 fields recognized): {original_header[:150]}")
                         continue
                     
                     self.logger.info(f"{log_prefix} Using fallback CSV header detection (found simplified pattern, {recognized_count} canonical fields recognized)")
                     
-                    # Accept honesty column count (11 or 13) as matching canonical
+                    # Accept honesty column count (12 or 14) as matching canonical
                     if actual_col_count == canonical_col_count or actual_col_count == canonical_col_count + 2:
                         self.logger.info(f"{log_prefix} Replacing non-standard header ({actual_col_count} cols) with canonical header. Original: {original_header[:200]}")
                         csv_clean = csv_clean[:line_start] + _canonical_header + csv_clean[line_end:]
@@ -33989,17 +34261,17 @@ Start your response with: {{{{"honesty_score":
                                     remapped_fields.append(mapped if mapped else field)
                             rebuilt_header = ','.join(f'"{f}"' for f in remapped_fields)
                             
-                            # Post-remap validation: check that at least 7/11 canonical fields are in the rebuilt header
+                            # Post-remap validation: check that at least 8/12 canonical fields are in the rebuilt header
                             canonical_in_rebuilt = sum(1 for f in remapped_fields if f in _CANONICAL_FIELDS)
-                            if canonical_in_rebuilt < 7:
-                                self.logger.warning(f"{log_prefix} Remap produced only {canonical_in_rebuilt}/11 canonical fields. Skipping this match: {rebuilt_header[:200]}")
+                            if canonical_in_rebuilt < 8:
+                                self.logger.warning(f"{log_prefix} Remap produced only {canonical_in_rebuilt}/12 canonical fields. Skipping this match: {rebuilt_header[:200]}")
                                 continue
                             
                             extra_cols = [f for f in remapped_fields if f not in _CANONICAL_FIELDS and f.lower() not in ('honesty_score', 'honesty_justification')]
                             if extra_cols:
-                                self.logger.info(f"{log_prefix} Remapped header ({canonical_in_rebuilt}/11 canonical, {len(extra_cols)} extra cols ignored: {extra_cols}): {rebuilt_header[:200]}")
+                                self.logger.info(f"{log_prefix} Remapped header ({canonical_in_rebuilt}/12 canonical, {len(extra_cols)} extra cols ignored: {extra_cols}): {rebuilt_header[:200]}")
                             else:
-                                self.logger.info(f"{log_prefix} Remapped header ({canonical_in_rebuilt}/11 canonical): {rebuilt_header[:200]}")
+                                self.logger.info(f"{log_prefix} Remapped header ({canonical_in_rebuilt}/12 canonical): {rebuilt_header[:200]}")
                             csv_clean = csv_clean[:line_start] + rebuilt_header + csv_clean[line_end:]
                             header_match = re.search(re.escape(rebuilt_header), csv_clean)
                             break
@@ -34026,7 +34298,7 @@ Start your response with: {{{{"honesty_score":
             csv_data = csv_clean[header_match.start():]
             
             # Use centralized CSV parser for robust parsing
-            _expected_csv_fields = ["No", "Name", "type", "Analytics Technique", "Statement",
+            _expected_csv_fields = ["No", "Name", "usecase", "type", "Analytics Technique", "Statement",
                                     "Solution", "Business Value", "Beneficiary", "Sponsor",
                                     "Tables Involved", "Technical Design"]
             csv_rows = CSVParser.parse_csv_string(
@@ -34053,11 +34325,11 @@ Start your response with: {{{{"honesty_score":
                     if _fields:
                         _fields[0] = _fields[0].lstrip('"')
                         _fields[-1] = _fields[-1].rstrip('"')
-                    if len(_fields) >= 11:
-                        _tolerant_rows.append(dict(zip(_expected_csv_fields, _fields[:11])))
+                    if len(_fields) >= 12:
+                        _tolerant_rows.append(dict(zip(_expected_csv_fields, _fields[:12])))
                     elif len(_fields) >= 5:
-                        _padded = _fields + [''] * (11 - len(_fields))
-                        _tolerant_rows.append(dict(zip(_expected_csv_fields, _padded[:11])))
+                        _padded = _fields + [''] * (12 - len(_fields))
+                        _tolerant_rows.append(dict(zip(_expected_csv_fields, _padded[:12])))
                 if _tolerant_rows:
                     self.logger.info(f"{log_prefix} Tolerant parser recovered {len(_tolerant_rows)} rows")
                     csv_rows = _tolerant_rows
@@ -34129,6 +34401,10 @@ Start your response with: {{{{"honesty_score":
                     row = {
                         "No": use_case_no,
                         "Name": safe_get(row_dict, 'Name'),
+                        "usecase": self._normalize_usecase(
+                            safe_get(row_dict, 'usecase'),
+                            safe_get(row_dict, 'Name')
+                        ),
                         "Business Domain": "",  # Will be set during domain clustering
                         "Subdomain": "",  # Will be set during subdomain clustering
                         "type": safe_get(row_dict, 'type'),
@@ -34193,7 +34469,7 @@ Start your response with: {{{{"honesty_score":
         return parsed_rows
 
 
-    def _retry_missing_table_coverage(self, use_cases: list, all_columns: list, unstructured_docs_markdown: str, strategic_goals: list = None, include_business_catchall: bool = False) -> list:
+    def _retry_missing_table_coverage(self, use_cases: list, all_columns: list, document_context_markdown: str, strategic_goals: list = None, include_business_catchall: bool = False) -> list:
         """
         Retry use case generation for tables that have no use cases.
         Each table can be retried up to 2 times maximum.
@@ -34201,7 +34477,7 @@ Start your response with: {{{{"honesty_score":
         Args:
             use_cases: List of existing use case dictionaries
             all_columns: List of all column details (catalog, schema, table, column, type, comment)
-            unstructured_docs_markdown: Markdown for unstructured documents
+            document_context_markdown: Markdown for document documents
             strategic_goals: List of strategic goals
             include_business_catchall: If True, also include BUSINESS tables that were never involved in any use cases (catch-all mode)
             
@@ -34328,7 +34604,7 @@ Start your response with: {{{{"honesty_score":
         for batch_idx, (batch_tables, batch_columns) in enumerate(retry_batches, 1):
             task = (
                 self._process_batch_with_retry,
-                (batch_columns, f"RETRY_{batch_idx}", unstructured_docs_markdown, strategic_goals, 2)
+                (batch_columns, f"RETRY_{batch_idx}", document_context_markdown, strategic_goals, 2)
             )
             tasks.append(task)
             self.logger.info(f"✓ Prepared retry batch {batch_idx}/{len(retry_batches)} ({len(batch_tables)} tables)")
@@ -34378,7 +34654,7 @@ Start your response with: {{{{"honesty_score":
             return all_results
         return current_results
     
-    def _process_batch_with_retry(self, column_details: list, batch_num, unstructured_docs_markdown: str, strategic_goals: list = None, business_context: str = "", business_priorities: str = "", strategic_initiative: str = "", value_chain: str = "", revenue_model: str = "", max_attempts: int = 3, previous_use_cases_feedback: str = "") -> list:
+    def _process_batch_with_retry(self, column_details: list, batch_num, document_context_markdown: str, strategic_goals: list = None, business_context: str = "", business_priorities: str = "", strategic_initiative: str = "", value_chain: str = "", revenue_model: str = "", max_attempts: int = 3, previous_use_cases_feedback: str = "") -> list:
         """
         Process a batch of column details to generate use cases with retry logic.
         Automatically splits context if input is too long for the model.
@@ -34392,7 +34668,7 @@ Start your response with: {{{{"honesty_score":
         Args:
             column_details: List of column tuples (catalog, schema, table, column, type, comment)
             batch_num: Batch number for logging and prefixing (can be int or str)
-            unstructured_docs_markdown: Unstructured documents markdown
+            document_context_markdown: Document documents markdown
             strategic_goals: List of strategic goals for the business (used for Strategic Alignment scoring)
             max_attempts: Maximum number of attempts (default 3)
             
@@ -34472,7 +34748,7 @@ The user provided Strategic Goals that MUST be followed during generation.
         ai_functions_summary = generate_ai_functions_doc("summary")
         ai_functions_detailed = generate_ai_functions_doc("detailed")
         statistical_functions_detailed = generate_statistical_functions_doc("detailed")
-        base_prompt_size = len(prompt_template) + len(unstructured_docs_markdown) + len(business_context) + len(business_priorities_text) + len(strategic_initiative) + len(value_chain) + len(revenue_model) + len(strategic_goals_text) + len(additional_context_section) + len(focus_areas_instruction) + len(ai_functions_summary) + len(ai_functions_detailed) + len(statistical_functions_detailed) + len(previous_use_cases_feedback) + 1000
+        base_prompt_size = len(prompt_template) + len(document_context_markdown) + len(business_context) + len(business_priorities_text) + len(strategic_initiative) + len(value_chain) + len(revenue_model) + len(strategic_goals_text) + len(additional_context_section) + len(focus_areas_instruction) + len(ai_functions_summary) + len(ai_functions_detailed) + len(statistical_functions_detailed) + len(previous_use_cases_feedback) + 1000
         
         self.logger.info(f"{log_prefix} Starting batch processing with {len(column_details)} columns from {len(set([c[2] for c in column_details]))} tables")
         all_tables_in_call = sorted({f"{c[0]}.{c[1]}.{c[2]}" for c in column_details})
@@ -34604,7 +34880,7 @@ The user provided Strategic Goals that MUST be followed during generation.
                 prompt_vars = {
                     "schema_markdown": schema_markdown,
                     "foreign_key_relationships": fk_relationships_text,
-                    "unstructured_documents_markdown": unstructured_docs_markdown,
+                    "document_context_markdown": document_context_markdown,
                     "business_context": business_context,
                     "business_priorities": business_priorities_text,
                     "strategic_initiative": strategic_initiative,
@@ -34791,13 +35067,15 @@ The user provided Strategic Goals that MUST be followed during generation.
                 if ai_cases:
                     log_print(f"🤖 Top {min(5, len(ai_cases))} AI-focused use cases:")
                     for use_case in ai_cases[:5]:
-                        log_print(f"   {use_case.get('No', 'N/A')}: {use_case.get('Name', 'N/A')}")
+                        use_case_name = self._normalize_usecase(use_case.get('usecase', ''), use_case.get('Name', ''))
+                        log_print(f"   {use_case.get('No', 'N/A')}: {use_case_name or 'N/A'}")
                     print()
                 
                 if stats_cases:
                     log_print(f"📊 Top {min(5, len(stats_cases))} STATS-focused use cases:")
                     for use_case in stats_cases[:5]:
-                        log_print(f"   {use_case.get('No', 'N/A')}: {use_case.get('Name', 'N/A')}")
+                        use_case_name = self._normalize_usecase(use_case.get('usecase', ''), use_case.get('Name', ''))
+                        log_print(f"   {use_case.get('No', 'N/A')}: {use_case_name or 'N/A'}")
                     print()
                 
                 log_print(f"{'='*80}\n")
@@ -34867,7 +35145,7 @@ The user provided Strategic Goals that MUST be followed during generation.
                         single_use_cases = self._process_batch_with_retry(
                             single_cols,
                             single_batch_id,
-                            unstructured_docs_markdown,
+                            document_context_markdown,
                             strategic_goals,
                             max_attempts
                         )
@@ -35075,7 +35353,7 @@ The user provided Strategic Goals that MUST be followed during generation.
                 excluded_count += 1
                 continue
             
-            numbered_title = f"{use_case['No']}: {use_case['Name']}"
+            numbered_title = f"{use_case['No']}: {self._normalize_usecase(use_case.get('usecase', ''), use_case.get('Name', ''))}"
             
             # Helper function to translate field values
             def translate_value(field_name, value):
@@ -35117,6 +35395,7 @@ The user provided Strategic Goals that MUST be followed during generation.
             combined_source = [
                 f"### {numbered_title}\n\n",
                 f"| {t['aspect']} | {t['description']} |\n", "|---|---|\n",
+                f"| **Description** | {safe_notebook_str(use_case.get('Name'))} |\n",
                 f"| **{t['subdomain']}** | {safe_notebook_str(use_case.get('Subdomain'))} |\n",
                 f"| **{t['type']}** | {translate_value('type', use_case.get('type', 'N/A'))} |\n",
                 f"| **{t.get('analytics_technique', 'Analytics Technique')}** | {safe_notebook_str(use_case.get('Analytics Technique'))} |\n",
@@ -35126,6 +35405,7 @@ The user provided Strategic Goals that MUST be followed during generation.
                 f"| **{t['solution']}** | {safe_notebook_str(use_case.get('Solution'))} |\n",
                 f"| **{t['aspect_value']}** | {safe_notebook_str(use_case.get('Business Value'))} |\n",
                 f"| **{t['aspect_tables']}** | {safe_notebook_str(use_case.get('Tables Involved'))} |\n",
+                f"| **{t.get('quality', 'Quality')}** | {safe_notebook_str(use_case.get('Quality'))} |\n",
                 f"| **{t.get('quality_reasons', 'Quality Reasons')}** | {safe_notebook_str(use_case.get('Quality Summary'))} |\n"
             ]
             details_cell = {"cell_type": "markdown", "metadata": {"application/vnd.databricks.v1+cell": {"nuid": str(uuid.uuid4())}}, "source": combined_source}
@@ -36147,14 +36427,14 @@ The user provided Strategic Goals that MUST be followed during generation.
         return expanded, relationships
 
     def _apply_progressive_truncation(self, use_case_id: str, directly_involved_details: list, 
-                                      additional_details: list, unstructured_docs: str, 
+                                      additional_details: list, document_context: str, 
                                       max_schema_size: int, base_prompt_size: int,
                                       directly_involved_tables: set = None) -> tuple:
         """
         Apply progressive truncation strategy to fit schema within context limits.
         
         NEW STRATEGY (Updated):
-        1. Drop unstructured documents and check if it fits
+        1. Drop document documents and check if it fits
         2. Truncate tables with >250 columns to 250 columns (ALL tables, including directly involved)
         3. If still doesn't fit, take your chances anyway and send the request to the LLM
            - The LLM might succeed despite exceeding the limit
@@ -36166,7 +36446,7 @@ The user provided Strategic Goals that MUST be followed during generation.
             directly_involved_tables: Set of table names that are directly involved in the query
         
         Returns:
-            tuple: (directly_involved_schema, additional_schema, final_unstructured_docs, was_truncated)
+            tuple: (directly_involved_schema, additional_schema, final_document_context, was_truncated)
         """
         from collections import defaultdict
         
@@ -36214,13 +36494,13 @@ The user provided Strategic Goals that MUST be followed during generation.
             clean_name = table_name.replace('`', '')
             return business_scores.get(clean_name, 50)  # Default to 50 if not found
         
-        def format_and_measure(directly_inv_details, additional_det, unstructured):
+        def format_and_measure(directly_inv_details, additional_det, document):
             """Format schema and return (total_size, directly_schema, additional_schema)."""
             directly_schema = self._format_schema_for_prompt(directly_inv_details, load_column_tracking=True)
             additional_schema = ""
             if additional_det:
                 additional_schema = self._format_schema_for_prompt(additional_det, load_column_tracking=True)
-            total = len(directly_schema) + len(additional_schema) + len(unstructured)
+            total = len(directly_schema) + len(additional_schema) + len(document)
             return total, directly_schema, additional_schema
         
         def truncate_tables_to_limit(details, col_limit):
@@ -36233,26 +36513,26 @@ The user provided Strategic Goals that MUST be followed during generation.
                     count += 1
             return rebuild_details_from_tables(tables), count
         
-        # target_size accounts for unstructured docs allowance on top of max_schema_size
-        target_size = max_schema_size + len(unstructured_docs)
+        # target_size accounts for document docs allowance on top of max_schema_size
+        target_size = max_schema_size + len(document_context)
         
         # Initial check
-        total_size, d_schema, a_schema = format_and_measure(directly_involved_details, additional_details, unstructured_docs)
+        total_size, d_schema, a_schema = format_and_measure(directly_involved_details, additional_details, document_context)
         
         if total_size <= target_size:
-            return (d_schema, a_schema, unstructured_docs, False)
+            return (d_schema, a_schema, document_context, False)
         
         self.logger.warning(f"Use case {use_case_id}: Schema exceeds limit. Starting progressive truncation...")
         
-        # STEP 1: Drop unstructured documents
-        self.logger.info(f"Use case {use_case_id}: Step 1 - Dropping unstructured documents")
-        unstructured_docs_truncated = ""
-        target_size = max_schema_size  # Recalculate: no unstructured docs allowance anymore
-        total_size, d_schema, a_schema = format_and_measure(directly_involved_details, additional_details, unstructured_docs_truncated)
+        # STEP 1: Drop document documents
+        self.logger.info(f"Use case {use_case_id}: Step 1 - Dropping document documents")
+        document_context_truncated = ""
+        target_size = max_schema_size  # Recalculate: no document docs allowance anymore
+        total_size, d_schema, a_schema = format_and_measure(directly_involved_details, additional_details, document_context_truncated)
         
         if total_size <= target_size:
-            self.logger.info(f"Use case {use_case_id}: Fits after dropping unstructured docs (size: {total_size:,} chars)")
-            return (d_schema, a_schema, unstructured_docs_truncated, True)
+            self.logger.info(f"Use case {use_case_id}: Fits after dropping document docs (size: {total_size:,} chars)")
+            return (d_schema, a_schema, document_context_truncated, True)
         
         # STEP 2: Truncate ALL tables (directly involved + additional) with >250 columns
         self.logger.info(f"Use case {use_case_id}: Step 2 - Truncating tables >250 columns to 250 columns")
@@ -36263,40 +36543,70 @@ The user provided Strategic Goals that MUST be followed during generation.
         else:
             a_trunc = 0
         
-        total_size, d_schema, a_schema = format_and_measure(directly_involved_details, additional_details_working, unstructured_docs_truncated)
+        total_size, d_schema, a_schema = format_and_measure(directly_involved_details, additional_details_working, document_context_truncated)
         if total_size <= target_size:
             self.logger.info(f"Use case {use_case_id}: Fits after truncating {d_trunc + a_trunc} tables to 250 columns (size: {total_size:,} chars)")
-            return (d_schema, a_schema, unstructured_docs_truncated, True)
+            return (d_schema, a_schema, document_context_truncated, True)
         
         # STEP 3: Drop additional_details (keep only directly involved tables)
         if additional_details_working:
             self.logger.info(f"Use case {use_case_id}: Step 3 - Dropping additional context tables")
-            total_size, d_schema, a_schema = format_and_measure(directly_involved_details, [], unstructured_docs_truncated)
+            total_size, d_schema, a_schema = format_and_measure(directly_involved_details, [], document_context_truncated)
             if total_size <= target_size:
                 self.logger.info(f"Use case {use_case_id}: Fits after dropping additional tables (size: {total_size:,} chars)")
-                return (d_schema, "", unstructured_docs_truncated, True)
+                return (d_schema, "", document_context_truncated, True)
         
         # STEP 4-6: Progressive column reduction on directly involved tables (100 -> 50 -> 25)
         column_limits = [100, 50, 25]
         for step_idx, col_limit in enumerate(column_limits, start=4):
             self.logger.info(f"Use case {use_case_id}: Step {step_idx} - Truncating directly-involved tables to {col_limit} columns")
             directly_involved_details, _ = truncate_tables_to_limit(directly_involved_details, col_limit)
-            total_size, d_schema, a_schema = format_and_measure(directly_involved_details, [], unstructured_docs_truncated)
+            total_size, d_schema, a_schema = format_and_measure(directly_involved_details, [], document_context_truncated)
             if total_size <= target_size:
                 self.logger.info(f"Use case {use_case_id}: Fits after truncating to {col_limit} columns/table (size: {total_size:,} chars)")
-                return (d_schema, "", unstructured_docs_truncated, True)
+                return (d_schema, "", document_context_truncated, True)
         
         # STEP 7: Send what we have — the pre-flight check in the caller will apply
         # token-aware truncation or the retry loop will handle the overflow
         self.logger.warning(f"Use case {use_case_id}: Context still exceeds limit after aggressive truncation (size: {total_size:,} chars, limit: {target_size:,} chars)")
         self.logger.warning(f"Use case {use_case_id}: Sending reduced schema - pre-flight check or retry loop will handle overflow")
-        return (d_schema, "", unstructured_docs_truncated, True)
+        return (d_schema, "", document_context_truncated, True)
 
     def _sanitize_name(self, name: str) -> str:
         if not name: return "_"
         s = re.sub(r'[^a-z0-9_]', '_', str(name).lower())
         s = re.sub(r'_+', '_', s).strip('_')
         return s or "_"
+
+    def _normalize_usecase(self, usecase: str, full_name: str = "") -> str:
+        candidate = (usecase or "").strip()
+        source = candidate if candidate else (full_name or "").strip()
+        if not source:
+            return "N/A"
+        source = re.sub(r"\s+", " ", source).strip()
+        if " with " in source.lower():
+            source = re.split(r"\s+with\s+", source, flags=re.IGNORECASE)[0].strip()
+        if source.lower().startswith("reveal "):
+            source = "Identify " + source[7:].strip()
+        verb_to_noun = {
+            "detect": "Detection",
+            "identify": "Identification",
+            "simulate": "Simulation",
+            "classify": "Classification",
+            "forecast": "Forecast",
+            "predict": "Forecast",
+            "optimize": "Optimization",
+            "optimise": "Optimization",
+            "close": "Closure",
+        }
+        parts = source.split(" ", 1)
+        if len(parts) > 1:
+            verb = parts[0].lower()
+            rest = parts[1].strip()
+            if verb in verb_to_noun and rest:
+                source = f"{rest} {verb_to_noun[verb]}".strip()
+        source = source.replace("  ", " ").strip()
+        return source if source else "N/A"
 
     def _save_usecases_catalog_json(self, final_consolidated_use_cases: list, english_translations: dict, summary_dict: dict = None) -> dict:
         """
@@ -36541,6 +36851,10 @@ The user provided Strategic Goals that MUST be followed during generation.
         log_print(f"📁 JSON File (for schema): {json_file_path}")
         self.logger.info(f"Loading schema from: {json_file_path}")
         
+        self._emit_pipeline_status(
+            stage_name="SQL Regeneration", step_name="Load JSON Catalog", sub_step_name="Loading",
+            message="Loading JSON catalog for schema info", status="started", progress_increment=1.0
+        )
         try:
             file_info = self.w_client.workspace.export(path=json_file_path, format=workspace.ExportFormat.AUTO)
             json_content = base64.b64decode(file_info.content).decode('utf-8')
@@ -36549,7 +36863,17 @@ The user provided Strategic Goals that MUST be followed during generation.
         except Exception as e:
             self.logger.error(f"Failed to load JSON file: {get_clean_error_message(e)}")
             log_print(f"❌ Failed to load JSON file: {get_clean_error_message(e, max_chars=200)}")
+            self._emit_pipeline_status(
+                stage_name="SQL Regeneration", step_name="Load JSON Catalog", sub_step_name="Failed",
+                message=f"Failed to load JSON: {get_clean_error_message(e, max_chars=200)}",
+                status="ended_error", progress_increment=1.0
+            )
             return
+        self._emit_pipeline_status(
+            stage_name="SQL Regeneration", step_name="Load JSON Catalog", sub_step_name="Complete",
+            message=f"JSON loaded: {len(catalog_json.get('column_registry', {}))} columns, {sum(len(d.get('use_cases', [])) for d in catalog_json.get('domains', []))} use cases",
+            status="ended_success", progress_increment=2.0
+        )
         
         json_business_name = catalog_json.get("business_name", None)
         if json_business_name:
@@ -36616,6 +36940,12 @@ The user provided Strategic Goals that MUST be followed during generation.
             }
         
         self.logger.info(f"Rebuilt schema: {len(full_schema_details)} columns across {len(schema_by_table)//2} tables")
+        self._emit_pipeline_status(
+            stage_name="SQL Regeneration", step_name="Schema Reconstruction", sub_step_name="Complete",
+            message=f"Schema rebuilt: {len(full_schema_details)} columns across {len(schema_by_table)//2} tables",
+            status="ended_success", progress_increment=2.0,
+            result_json={"columns_count": len(full_schema_details), "tables_count": len(schema_by_table) // 2}
+        )
         
         # === CRITICAL FIX: Initialize lightweight DataLoader for dynamic table loading ===
         # This enables loading tables requested by users in regeneration instructions
@@ -36703,6 +37033,10 @@ The user provided Strategic Goals that MUST be followed during generation.
         self.logger.info(f"Use case IDs in lookup from JSON: {list(use_case_lookup.keys())[:20]}...")  # First 20
         
         log_print(f"\n🔍 Scanning notebooks for SQL status...")
+        self._emit_pipeline_status(
+            stage_name="SQL Regeneration", step_name="Scan Notebooks", sub_step_name="Scanning",
+            message="Scanning notebooks for use cases needing SQL regeneration", status="started", progress_increment=1.0
+        )
         
         try:
             notebook_list = list(self.w_client.workspace.list(self.notebook_output_dir))
@@ -36783,6 +37117,14 @@ The user provided Strategic Goals that MUST be followed during generation.
         total_use_cases = len(all_use_cases)
         failed_count = len(failed_use_cases)
         
+        self._emit_pipeline_status(
+            stage_name="SQL Regeneration", step_name="Scan Notebooks", sub_step_name="Complete",
+            message=f"Scan complete: {len(notebook_list)} notebooks, {failed_count} use cases need regeneration",
+            status="ended_success", progress_increment=2.0,
+            result_json={"notebooks_scanned": len(notebook_list), "use_cases_in_notebooks": len(notebook_status),
+                         "total_use_cases": total_use_cases, "failed_count": failed_count}
+        )
+        
         log_print(f"\n📊 USE CASE STATISTICS:")
         log_print(f"   • Total Use Cases: {total_use_cases}")
         log_print(f"   • Failed/Missing SQL: {failed_count}")
@@ -36792,6 +37134,11 @@ The user provided Strategic Goals that MUST be followed during generation.
             log_print(f"\n✅ SUCCESS: All {total_use_cases} use cases have valid SQL!")
             log_print(f"   No queries need to be fixed.")
             self.logger.info(f"No failed queries found. All {total_use_cases} use cases have valid SQL.")
+            self._emit_pipeline_status(
+                stage_name="SQL Regeneration", step_name="Result", sub_step_name="No Regeneration Needed",
+                message=f"All {total_use_cases} use cases already have valid SQL",
+                status="ended_success", progress_increment=5.0
+            )
             return
         
         log_print(f"\n🔧 REGENERATING SQL FOR {failed_count} FAILED USE CASES (using wave pattern):")
@@ -36811,6 +37158,12 @@ The user provided Strategic Goals that MUST be followed during generation.
         if use_cases_with_instructions:
             log_print(f"\n🔍 INTERPRETING USER INSTRUCTIONS FOR {len(use_cases_with_instructions)} USE CASES (parallel, max {self.max_parallelism} workers)...")
             self.logger.info(f"Interpreting user instructions for {len(use_cases_with_instructions)} use cases in parallel...")
+            self._emit_pipeline_status(
+                stage_name="SQL Regeneration", step_name="Interpret Instructions", sub_step_name="Started",
+                message=f"Interpreting user instructions for {len(use_cases_with_instructions)} use cases",
+                status="started", progress_increment=1.0,
+                result_json={"use_cases_with_instructions": len(use_cases_with_instructions)}
+            )
             
             # Build available tables registry from column_registry (done once, shared by all workers)
             available_tables = set()
@@ -36899,12 +37252,11 @@ The user provided Strategic Goals that MUST be followed during generation.
                             tables_needing_schema.append(tbl_clean)
                     
                     self.logger.info(f"[{uc_id}] Tables needing dynamic load: {len(tables_needing_schema)} - {tables_needing_schema}")
-                    
+                    tables_not_found = []
                     if tables_needing_schema:
                         self.logger.info(f"[{uc_id}] Loading schema for {len(tables_needing_schema)} tables not in registry: {tables_needing_schema}")
                         additional_schema_lines = []
                         tables_loaded = []
-                        tables_not_found = []
                         
                         for tbl_name in tables_needing_schema:
                             # Find columns for this table in schema_by_table
@@ -37094,6 +37446,12 @@ The user has provided the following instructions for regenerating this SQL query
                     failed_use_cases[i] = interpretation_results[uc_id]
             
             log_print(f"   ✅ All {len(use_cases_with_instructions)} interpretations complete")
+            self._emit_pipeline_status(
+                stage_name="SQL Regeneration", step_name="Interpret Instructions", sub_step_name="Complete",
+                message=f"All {len(use_cases_with_instructions)} user instruction interpretations completed",
+                status="ended_success", progress_increment=3.0,
+                result_json={"interpretations_completed": len(use_cases_with_instructions)}
+            )
         
         # Merge dynamically loaded column details into full_schema_details for SQL generation
         dynamic_columns_added = 0
@@ -37121,6 +37479,27 @@ The user has provided the following instructions for regenerating this SQL query
                 self.logger.info(f"   📥 {tbl}: {col_count} columns loaded")
         
         self.logger.info(f"Starting SQL regeneration using WAVE PATTERN for {failed_count} failed use cases...")
+        self._emit_pipeline_status(
+            stage_name="SQL Regeneration", step_name="Generate SQL", sub_step_name="Started",
+            message=f"Regenerating SQL for {failed_count} failed use cases using wave pattern",
+            status="started", progress_increment=1.0,
+            result_json={"failed_count": failed_count}
+        )
+        sql_regen_model_override = None
+        if failed_count < 5:
+            thinker_large_models = get_models_by_type_and_size("thinker", "large")
+            if thinker_large_models:
+                sql_regen_model_override = thinker_large_models[0].get("llm_endpoint_name")
+            else:
+                thinker_models = get_models_by_type("thinker")
+                if thinker_models:
+                    sql_regen_model_override = thinker_models[0].get("llm_endpoint_name")
+            if sql_regen_model_override:
+                for uc in failed_use_cases:
+                    uc["_sql_regeneration_model_override"] = sql_regen_model_override
+                self.logger.info(
+                    f"SQL regeneration override enabled (<5 use cases): using thinker-large model '{sql_regen_model_override}'"
+                )
         
         regenerated_use_cases = self._generate_sql_parallel(
             failed_use_cases, 
@@ -37179,9 +37558,20 @@ The user has provided the following instructions for regenerating this SQL query
                 log_print(f"   • [{uc_id}] {uc_name} (generated={gen}, validated={val})")
         
         log_print(f"\n{'='*80}")
+        self._emit_pipeline_status(
+            stage_name="SQL Regeneration", step_name="Generate SQL", sub_step_name="Complete",
+            message=f"SQL regeneration complete: {regenerated_count} succeeded, {still_failed_count} still failed",
+            status="ended_success", progress_increment=3.0,
+            result_json={"regenerated_count": regenerated_count, "still_failed_count": still_failed_count,
+                         "total_attempted": len(regenerated_use_cases)}
+        )
         
         # Update JSON with new SQL (but NOT generated/validated - those are in notebooks now)
         self.logger.info("Updating JSON file with regenerated SQL...")
+        self._emit_pipeline_status(
+            stage_name="SQL Regeneration", step_name="Update Artifacts", sub_step_name="JSON Update",
+            message="Updating JSON catalog with regenerated SQL", status="started", progress_increment=1.0
+        )
         
         for domain_obj in catalog_json.get("domains", []):
             domain_name = domain_obj.get("domain_name", "")
@@ -37211,9 +37601,18 @@ The user has provided the following instructions for regenerating this SQL query
             )
             log_print(f"\n✅ JSON file updated: {json_file_path}")
             self.logger.info(f"JSON file updated successfully: {json_file_path}")
+            self._emit_pipeline_status(
+                stage_name="SQL Regeneration", step_name="Update Artifacts", sub_step_name="JSON Saved",
+                message="JSON catalog updated with regenerated SQL", status="ended_success", progress_increment=2.0
+            )
         except Exception as e:
             self.logger.error(f"Failed to update JSON file: {get_clean_error_message(e)}")
             log_print(f"⚠️ Failed to update JSON file: {get_clean_error_message(e, max_chars=200)}", level="WARNING")
+            self._emit_pipeline_status(
+                stage_name="SQL Regeneration", step_name="Update Artifacts", sub_step_name="JSON Failed",
+                message=f"Failed to update JSON: {get_clean_error_message(e, max_chars=200)}",
+                status="ended_error", progress_increment=1.0
+            )
         
         # Update notebook cells with new SQL and reset header
         # FIX: Batch updates by notebook to avoid lost updates from eventual consistency
@@ -37222,6 +37621,10 @@ The user has provided the following instructions for regenerating this SQL query
         # Solution: Group by notebook, load ONCE, update ALL cells, save ONCE.
         self.logger.info("Updating notebook cells with regenerated SQL (batched by notebook)...")
         log_print(f"\n📓 UPDATING NOTEBOOKS (batched to prevent lost updates)...")
+        self._emit_pipeline_status(
+            stage_name="SQL Regeneration", step_name="Update Notebooks", sub_step_name="Started",
+            message="Updating notebook cells with regenerated SQL", status="started", progress_increment=1.0
+        )
         
         # Group use cases by notebook path
         notebook_updates = {}  # notebook_path -> list of (use_case, domain_name, domain_prefix)
@@ -37257,6 +37660,12 @@ The user has provided the following instructions for regenerating this SQL query
                 cells_updated += batch_result
         
         self.logger.info(f"Batched notebook update complete: {cells_updated} cells across {notebooks_updated} notebooks")
+        self._emit_pipeline_status(
+            stage_name="SQL Regeneration", step_name="Update Notebooks", sub_step_name="Complete",
+            message=f"Notebook updates complete: {cells_updated} cells across {notebooks_updated} notebooks",
+            status="ended_success", progress_increment=3.0,
+            result_json={"notebooks_updated": notebooks_updated, "cells_updated": cells_updated}
+        )
         
         log_print(f"\n{'='*80}")
         log_print(f"✅ SQL REGENERATION COMPLETE")
@@ -37277,11 +37686,24 @@ The user has provided the following instructions for regenerating this SQL query
         # Re-generate SQL mode also handles sample generation (but not vice versa)
         log_print(f"\n🔍 Checking for generate_sample_result:Yes flags...")
         self.logger.info("Re-generate SQL mode: Also checking for sample generation requests...")
+        self._emit_pipeline_status(
+            stage_name="SQL Regeneration", step_name="Sample Results", sub_step_name="Started",
+            message="Checking for sample result generation requests", status="started", progress_increment=1.0
+        )
         try:
             self._run_generate_sample_result_mode(called_from_sql_regen=True)
+            self._emit_pipeline_status(
+                stage_name="SQL Regeneration", step_name="Sample Results", sub_step_name="Complete",
+                message="Sample result generation completed", status="ended_success", progress_increment=2.0
+            )
         except Exception as e:
             self.logger.warning(f"Sample generation after SQL regeneration failed: {get_clean_error_message(e)}")
             log_print(f"⚠️ Sample generation encountered an issue: {get_clean_error_message(e, max_chars=200)}", level="WARNING")
+            self._emit_pipeline_status(
+                stage_name="SQL Regeneration", step_name="Sample Results", sub_step_name="Failed",
+                message=f"Sample generation failed: {get_clean_error_message(e, max_chars=200)}",
+                status="ended_error", progress_increment=1.0
+            )
         
         self._upload_log_file()
         AIAgent.get_summary_report()
@@ -38609,13 +39031,19 @@ The user has provided the following instructions for regenerating this SQL query
                 return
             
             output_log_path = os.path.join(self.base_output_dir, "log.txt")
-            try:
-                os.makedirs(os.path.dirname(output_log_path), exist_ok=True)
-                shutil.copy2(log_file_path, output_log_path)
-                self.logger.info(f"✅ Log file copied to output directory: {output_log_path}")
-                log_print(f"✅ Log file available at: {output_log_path}")
-            except Exception as copy_error:
-                self.logger.warning(f"Failed to copy log file to output directory: {copy_error}")
+            _is_workspace_path = '@' in self.base_output_dir or (
+                self.base_output_dir.startswith('/Users/') and not os.path.exists(self.base_output_dir)
+            ) or self.base_output_dir.startswith('/Workspace/')
+            if not _is_workspace_path:
+                try:
+                    os.makedirs(os.path.dirname(output_log_path), exist_ok=True)
+                    shutil.copy2(log_file_path, output_log_path)
+                    self.logger.info(f"✅ Log file copied to output directory: {output_log_path}")
+                    log_print(f"✅ Log file available at: {output_log_path}")
+                except Exception as copy_error:
+                    self.logger.warning(f"Failed to copy log file to output directory: {copy_error}")
+            else:
+                self.logger.debug(f"Skipping local log copy — output is a workspace path: {self.base_output_dir}")
             
             local_backup_log = os.path.join("/tmp", self.sanitized_customer_name, "log.txt")
             if log_file_path != local_backup_log:
@@ -38649,4 +39077,93 @@ The user has provided the following instructions for regenerating this SQL query
 # ==============================================================================
 # 4. MAIN EXECUTION METHOD (MODIFIED)
 # ==============================================================================
+
+
+# COMMAND ----------
+
+
+# ════════════════════════════════════════════════════════════════════
+# PIPELINE STATE PERSISTENCE (for multi-notebook workflow)
+# ════════════════════════════════════════════════════════════════════
+import json as _json
+
+class PipelineState:
+    """Persist state between workflow tasks using Delta tables."""
+    
+    def __init__(self, spark, inspire_database):
+        self.spark = spark
+        self.inspire_database = inspire_database
+        self._state_table = f"{inspire_database}._inspire_pipeline_state"
+    
+    def save(self, phase_name, data):
+        """Save phase output state as JSON to Delta table."""
+        json_str = _json.dumps(data, default=str)
+        self.spark.sql(f"""
+            MERGE INTO {self._state_table} AS target
+            USING (SELECT '{phase_name}' AS phase_name, '{json_str.replace("'", "''")}' AS state_json, current_timestamp() AS updated_at) AS source
+            ON target.phase_name = source.phase_name
+            WHEN MATCHED THEN UPDATE SET state_json = source.state_json, updated_at = source.updated_at
+            WHEN NOT MATCHED THEN INSERT (phase_name, state_json, updated_at) VALUES (source.phase_name, source.state_json, source.updated_at)
+        """)
+        log_print(f"💾 Saved pipeline state for phase: {phase_name}")
+    
+    def load(self, phase_name):
+        """Load phase output state from Delta table."""
+        try:
+            rows = self.spark.sql(f"SELECT state_json FROM {self._state_table} WHERE phase_name = '{phase_name}'").collect()
+            if rows:
+                return _json.loads(rows[0]['state_json'])
+        except Exception as e:
+            log_print(f"⚠️ Could not load state for phase {phase_name}: {e}", level="WARNING")
+        return None
+    
+    def ensure_table(self):
+        """Create the state table if it doesn't exist."""
+        parts = self.inspire_database.split('.')
+        if len(parts) == 2:
+            self.spark.sql(f"CREATE CATALOG IF NOT EXISTS {parts[0]}")
+            self.spark.sql(f"CREATE SCHEMA IF NOT EXISTS {self.inspire_database}")
+        self.spark.sql(f"""
+            CREATE TABLE IF NOT EXISTS {self._state_table} (
+                phase_name STRING,
+                state_json STRING,
+                updated_at TIMESTAMP
+            ) USING DELTA
+        """)
+    
+    def save_use_cases_delta(self, use_cases, table_suffix="_pipeline_use_cases"):
+        """Save use cases list to a Delta table for cross-notebook sharing."""
+        import pyspark.sql.functions as F
+        json_rows = [_json.dumps(uc, default=str) for uc in use_cases]
+        df = self.spark.createDataFrame([(i, j) for i, j in enumerate(json_rows)], ["idx", "use_case_json"])
+        df.write.mode("overwrite").saveAsTable(f"{self.inspire_database}.{table_suffix}")
+        log_print(f"💾 Saved {len(use_cases)} use cases to {self.inspire_database}.{table_suffix}")
+    
+    def load_use_cases_delta(self, table_suffix="_pipeline_use_cases"):
+        """Load use cases list from Delta table."""
+        try:
+            rows = self.spark.sql(f"SELECT use_case_json FROM {self.inspire_database}.{table_suffix} ORDER BY idx").collect()
+            return [_json.loads(r['use_case_json']) for r in rows]
+        except Exception as e:
+            log_print(f"⚠️ Could not load use cases from Delta: {e}", level="WARNING")
+            return []
+    
+    def save_schema_delta(self, schema_details, table_suffix="_pipeline_schema"):
+        """Save schema details (column tuples) to Delta for cross-notebook sharing."""
+        rows = []
+        for detail in schema_details:
+            (catalog, schema, table, col_name, col_type, col_comment) = detail
+            rows.append((catalog, schema, table, col_name, col_type, str(col_comment) if col_comment else ""))
+        df = self.spark.createDataFrame(rows, ["catalog", "schema", "table_name", "col_name", "col_type", "col_comment"])
+        df.write.mode("overwrite").saveAsTable(f"{self.inspire_database}.{table_suffix}")
+        log_print(f"💾 Saved {len(schema_details)} column details to {self.inspire_database}.{table_suffix}")
+    
+    def load_schema_delta(self, table_suffix="_pipeline_schema"):
+        """Load schema details from Delta table."""
+        try:
+            rows = self.spark.sql(f"SELECT * FROM {self.inspire_database}.{table_suffix}").collect()
+            return [(r['catalog'], r['schema'], r['table_name'], r['col_name'], r['col_type'], r['col_comment']) for r in rows]
+        except Exception as e:
+            log_print(f"⚠️ Could not load schema from Delta: {e}", level="WARNING")
+            return []
 

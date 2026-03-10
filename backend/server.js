@@ -27,11 +27,24 @@ const SERVICE_TOKEN = process.env.DATABRICKS_TOKEN || '';
 
 // Path to the bundled DBC file — try several candidate locations
 const DBC_CANDIDATES = [
-  path.resolve(__dirname, '..', 'databricks_inspire_v41.dbc'),
-  path.resolve(__dirname, 'databricks_inspire_v41.dbc'),
-  path.resolve(__dirname, '..', 'notebooks', 'databricks_inspire_v41.dbc'),
+  path.resolve(__dirname, '..', 'databricks_inspire_v43.dbc'),
+  path.resolve(__dirname, 'databricks_inspire_v43.dbc'),
+  path.resolve(__dirname, '..', 'notebooks', 'databricks_inspire_v43.dbc'),
 ];
-const BUNDLED_DBC_PATH = DBC_CANDIDATES.find(p => fs.existsSync(p)) || DBC_CANDIDATES[0];
+let BUNDLED_DBC_PATH = DBC_CANDIDATES.find(p => fs.existsSync(p)) || '';
+
+// If no physical DBC file found, try to materialize from embedded base64 bundle
+if (!BUNDLED_DBC_PATH) {
+  try {
+    const b64 = require('./dbc_bundle');
+    const materializedPath = path.resolve(__dirname, 'databricks_inspire_v43.dbc');
+    fs.writeFileSync(materializedPath, Buffer.from(b64, 'base64'));
+    BUNDLED_DBC_PATH = materializedPath;
+    console.log('DBC materialized from embedded bundle.');
+  } catch (_) {
+    BUNDLED_DBC_PATH = DBC_CANDIDATES[0]; // fallback path (will show "not found")
+  }
+}
 
 // ═══════════════════════════════════════════════════
 //  Middleware
@@ -98,9 +111,16 @@ async function dbFetch(host, token, apiPath, options = {}) {
 }
 
 function getToken(req) {
+  // 1) Custom header from frontend — survives Databricks App proxy (which strips Authorization)
+  const customToken = req.headers['x-db-pat-token'];
+  if (customToken) return customToken;
+  // 2) Standard Authorization header (works in local dev / non-proxy mode)
   const auth = req.headers.authorization;
   if (auth && auth.startsWith('Bearer ')) return auth.slice(7);
-  // Fall back to service-principal token from env (Databricks App)
+  // 3) Databricks Apps inject the logged-in user's OAuth token here
+  const forwarded = req.headers['x-forwarded-access-token'];
+  if (forwarded) return forwarded;
+  // 4) Fall back to service-principal token from env
   return SERVICE_TOKEN || null;
 }
 
@@ -190,12 +210,15 @@ function sqlResultToObjects(result) {
 app.get('/api/health', (req, res) => {
   const hasBundledDbc = fs.existsSync(BUNDLED_DBC_PATH);
   const host = resolveHost(req);
+  const hasForwardedToken = !!req.headers['x-forwarded-access-token'];
   res.json({
     status: 'ok',
     host: host ? host.replace(/https?:\/\//, '').split('.')[0] + '...' : 'not configured',
     hostConfigured: !!host,
     hasBundledDbc,
     hasServiceToken: !!SERVICE_TOKEN,
+    isDatabricksApp: hasForwardedToken || !!DATABRICKS_HOST,
+    hasUserToken: hasForwardedToken,
   });
 });
 
@@ -614,7 +637,7 @@ app.post('/api/run/:runId/cancel', requireToken, async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════
-//  V41 Session & Step Tracking (READY/DONE Protocol)
+//  V43 Session & Step Tracking (READY/DONE Protocol)
 // ═══════════════════════════════════════════════════
 
 // Poll session status
@@ -628,12 +651,15 @@ app.get('/api/inspire/session', requireToken, async (req, res) => {
     const [catalog, schema] = inspire_database.split('.');
     const table = `\`${catalog}\`.\`${schema}\`.\`__inspire_session\``;
 
+    // v43 session table has individual widget columns instead of a single widget_values JSON
+    const widgetCols = `business_name, inspire_database_name, operation_mode, table_election_mode, use_cases_quality, strategic_goals, business_priorities, business_domains, catalogs, schemas_str, tables_str, generate_choices, generation_path, output_language, sql_generation_per_domain, technical_exclusion_strategy, json_file_path`;
+    const baseCols = `session_id, processing_status, completed_percent, create_at, last_updated, completed_on, inspire_json, results_json`;
+
     let sql;
     if (session_id) {
-      sql = `SELECT session_id, processing_status, completed_percent, create_at, last_updated, completed_on, widget_values, inspire_json, results_json FROM ${table} WHERE session_id = ${session_id} LIMIT 1`;
+      sql = `SELECT ${baseCols}, ${widgetCols} FROM ${table} WHERE session_id = ${session_id} LIMIT 1`;
     } else {
-      // Get the latest session
-      sql = `SELECT session_id, processing_status, completed_percent, create_at, last_updated, completed_on, widget_values, inspire_json, results_json FROM ${table} ORDER BY create_at DESC LIMIT 1`;
+      sql = `SELECT ${baseCols}, ${widgetCols} FROM ${table} ORDER BY create_at DESC LIMIT 1`;
     }
 
     const result = await executeSql(req.dbHost, req.dbToken, warehouse_id, sql);
@@ -644,14 +670,39 @@ app.get('/api/inspire/session', requireToken, async (req, res) => {
     }
 
     const session = rows[0];
-    // Parse JSON fields
-    try { session.widget_values = JSON.parse(session.widget_values); } catch { session.widget_values = null; }
-    try { session.inspire_json = JSON.parse(session.inspire_json); } catch { session.inspire_json = null; }
-    try { session.results_json = JSON.parse(session.results_json); } catch { session.results_json = null; }
+
+    // Reconstruct widget_values from individual columns for frontend compatibility
+    session.widget_values = {
+      business: session.business_name || '',
+      inspire_database: session.inspire_database_name || '',
+      operation_mode: session.operation_mode || '',
+      table_election_mode: session.table_election_mode || '',
+      use_cases_quality: session.use_cases_quality || '',
+      strategic_goals: session.strategic_goals || '',
+      business_priorities: session.business_priorities || '',
+      business_domains: session.business_domains || '',
+      catalogs: session.catalogs || '',
+      schemas: session.schemas_str || '',
+      tables: session.tables_str || '',
+      generate: session.generate_choices || '',
+      generation_path: session.generation_path || '',
+      output_language: session.output_language || '',
+      sql_generation_per_domain: session.sql_generation_per_domain || '',
+      technical_exclusion_strategy: session.technical_exclusion_strategy || '',
+      json_file_path: session.json_file_path || '',
+    };
+
+    // Parse VARIANT fields (may come as object or string)
+    for (const field of ['inspire_json', 'results_json']) {
+      if (session[field] && typeof session[field] === 'string') {
+        try { session[field] = JSON.parse(session[field]); } catch { session[field] = null; }
+      } else if (!session[field]) {
+        session[field] = null;
+      }
+    }
 
     // Parse numeric fields
     session.completed_percent = parseFloat(session.completed_percent) || 0;
-    session.session_id = session.session_id;
 
     res.json({ session });
   } catch (err) {
@@ -780,13 +831,18 @@ app.get('/api/inspire/sessions', requireToken, async (req, res) => {
 
     const [catalog, schema] = inspire_database.split('.');
     const table = `\`${catalog}\`.\`${schema}\`.\`__inspire_session\``;
-    const sql = `SELECT session_id, processing_status, completed_percent, create_at, completed_on, widget_values FROM ${table} ORDER BY create_at DESC LIMIT 20`;
+    const sql = `SELECT session_id, processing_status, completed_percent, create_at, completed_on, business_name, inspire_database_name, operation_mode FROM ${table} ORDER BY create_at DESC LIMIT 20`;
 
     const result = await executeSql(req.dbHost, req.dbToken, warehouse_id, sql);
     const sessions = sqlResultToObjects(result);
 
     for (const s of sessions) {
-      try { s.widget_values = JSON.parse(s.widget_values); } catch { s.widget_values = null; }
+      // Reconstruct minimal widget_values for frontend compatibility
+      s.widget_values = {
+        business: s.business_name || '',
+        inspire_database: s.inspire_database_name || '',
+        operation_mode: s.operation_mode || '',
+      };
       s.completed_percent = parseFloat(s.completed_percent) || 0;
     }
 
@@ -865,7 +921,7 @@ if (fs.existsSync(STATIC_DIR)) {
 //  Start server
 // ═══════════════════════════════════════════════════
 
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   const hasDbc = fs.existsSync(BUNDLED_DBC_PATH);
   const servingStatic = fs.existsSync(STATIC_DIR);

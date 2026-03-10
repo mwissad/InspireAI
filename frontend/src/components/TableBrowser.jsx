@@ -27,7 +27,7 @@ export default function TableBrowser({
 
   const apiFetch = useCallback(async (url) => {
     const resp = await fetch(url, {
-      headers: { Authorization: `Bearer ${token}` },
+      headers: { Authorization: `Bearer ${token}`, 'X-DB-PAT-Token': token },
     });
     if (!resp.ok) throw new Error(`API error ${resp.status}`);
     return resp.json();

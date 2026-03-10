@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Split databricks_inspire_v41.dbc into independent phase notebooks
+Split databricks_inspire_v43.dbc into independent phase notebooks
 for a Databricks Lakeflow (Workflows) multi-task job.
 
 Architecture:
@@ -27,7 +27,7 @@ import zipfile
 import shutil
 
 # ─── Configuration ───
-DBC_PATH = "databricks_inspire_v41.dbc"
+DBC_PATH = "databricks_inspire_v43.dbc"
 OUTPUT_DIR = "notebooks"
 
 # ─── Extract notebook from DBC ───
@@ -56,8 +56,8 @@ def main():
     print("📂 Extracting notebook from DBC...")
     nb = extract_notebook_source(DBC_PATH)
     
-    # v41: main code is in commands[2] (commands[0] is entry point, commands[1] is markdown)
-    main_code = nb['commands'][2]['command']
+    # v43: main code is in commands[0] (commands[1] is entry point, commands[2] is markdown)
+    main_code = nb['commands'][0]['command']
     lines = main_code.split('\n')
     total_lines = len(lines)
     print(f"   Total lines: {total_lines}")
@@ -239,22 +239,23 @@ create_widgets()
     # --- Build config dict from validated widget values ---
     widget_values = {
         "business": business_name,
+        "inspire_database": inspire_database,
+        "operation_mode": operation_mode,
+        "table_election_mode": table_election_mode,
+        "use_cases_quality": use_cases_quality,
+        "strategic_goals": strategic_goals_str,
+        "business_priorities": business_priorities_str,
+        "business_domains": business_domains_str,
         "catalogs": catalogs_str,
         "schemas": schemas_str,
         "tables": tables_str,
         "generate": generate_str,
         "generation_path": generation_path,
         "output_language": output_language_str,
-        "business_priorities": business_priorities_str,
-        "strategic_goals": strategic_goals_str,
-        "business_domains": business_domains_str,
-        "use_unstructured_data": use_unstructured_data_str,
+        "sql_generation_per_domain": sql_generation_per_domain,
         "technical_exclusion_strategy": technical_exclusion_strategy,
-        "operation_mode": operation_mode,
-        "sql_model_serving": sql_model_serving,
-        "quality_level": quality_level,
         "json_file_path": json_file_path,
-        "inspire_database": inspire_database,
+        "session_id": user_session_id,
     }
 
     # --- Save validated config to pipeline state ---

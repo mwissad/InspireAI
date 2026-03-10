@@ -32,7 +32,7 @@ Inspire AI scans your Unity Catalog tables, understands their structure and rela
 
 - The **frontend** is a single-page React app that never talks to Databricks directly. Every Databricks API call goes through the Express backend, which attaches the user's PAT and routes to the correct workspace.
 - The **backend** acts as an API proxy: it forwards requests to the Databricks REST API (Unity Catalog, Jobs, SQL Statement Execution, Workspace) and adds auth headers. It also handles DBC file uploads and serves the built frontend in production.
-- The **Databricks notebook** (`databricks_inspire_v41.dbc`) is the AI engine. It reads Unity Catalog metadata, calls a Foundation Model endpoint to analyze table structures, and writes results to two tracking tables (`__inspire_session` and `__inspire_step`) in the user-specified "Inspire Database".
+- The **Databricks notebook** (`databricks_inspire_v43.dbc`) is the AI engine. It reads Unity Catalog metadata, calls a Foundation Model endpoint to analyze table structures, and writes results to two tracking tables (`__inspire_session` and `__inspire_step`) in the user-specified "Inspire Database".
 - The **SQL Warehouse** is used by both the notebook (to read metadata) and the backend (to poll the tracking tables for real-time progress).
 
 ---
@@ -50,7 +50,7 @@ A 4-step sequential wizard. Each step unlocks once the previous one is completed
 | **1. Workspace URL** | Enter your Databricks workspace host (e.g. `https://adb-xxx.14.azuredatabricks.net`) | — |
 | **2. Authentication** | Enter a Personal Access Token (PAT). Click **Test Connection** to validate against `/api/2.0/preview/scim/v2/Me`. Shows "Connected as {username}" on success. | SCIM API |
 | **3. SQL Warehouse** | Auto-loads available warehouses via `/api/2.0/sql/warehouses`. Select one (shows name, state, cluster size). | SQL Warehouses API |
-| **4. Publish Notebook** | Uploads the bundled `databricks_inspire_v41.dbc` to your workspace (default path: `/Users/{username}/inspire_ai`). Uses the Workspace Import API with `format: DBC`. Automatically finds the notebook inside the imported folder. | Workspace API |
+| **4. Publish Notebook** | Uploads the bundled `databricks_inspire_v43.dbc` to your workspace (default path: `/Users/{username}/inspire_ai`). Uses the Workspace Import API with `format: DBC`. Automatically finds the notebook inside the imported folder. | Workspace API |
 
 All settings are persisted in `localStorage` so they survive page refreshes.
 
@@ -71,7 +71,7 @@ Configure the 15 notebook widget parameters and start the AI analysis:
 
 **Quality & Outputs:**
 - `05_use_cases_quality` — Good / High / Very High Quality
-- `09_generation_options` — Multi-select: SQL Code, Sample Results, PDF Catalog, Presentation, Dashboards, Unstructured Data Usecases
+- `09_generation_options` — Multi-select: SQL Code, Sample Results, PDF Catalog, Presentation
 - `12_documents_languages` — Output languages (default: English)
 
 **Advanced:**
@@ -255,7 +255,7 @@ All configuration is done through the UI (Settings panel) or environment variabl
 ```
 InspireApp/
 ├── .env.example                 # Environment template
-├── databricks_inspire_v41.dbc   # Packaged notebook for workspace import
+├── databricks_inspire_v43.dbc   # Packaged notebook for workspace import
 ├── backend/
 │   ├── server.js                # Express API — Databricks proxy & SQL bridge
 │   └── package.json             # Backend dependencies
