@@ -18,6 +18,8 @@ import {
   Layers,
   Sparkles,
   CheckCircle2,
+  Copy,
+  Check,
 } from 'lucide-react';
 
 /* ── Priority sort order ── */
@@ -39,6 +41,17 @@ const TYPE_ICONS = {
   Improvement: '📈',
 };
 
+/* ── Pipeline stages for execution summary ── */
+const PIPELINE_STAGES = [
+  'Setup',
+  'Business Understanding',
+  'Use Case Design',
+  'Domain Mapping',
+  'Prioritization',
+  'Implementation',
+  'Executive Readout',
+];
+
 export default function ResultsPage({ settings, update, sessionId: propSessionId }) {
   const { databricksHost, token, warehouseId: settingsWarehouseId, inspireDatabase: settingsInspireDb } = settings;
 
@@ -54,6 +67,8 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
   const [results, setResults] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [isProgressive, setIsProgressive] = useState(false);
+  const [usecases, setUsecases] = useState(null);
 
   // Filters & sort
   const [searchQuery, setSearchQuery] = useState('');
@@ -124,18 +139,45 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
     setLoading(true);
     setError('');
     setResults(null);
+    setUsecases(null);
+    setIsProgressive(false);
     try {
       const q = new URLSearchParams({
         inspire_database: inspireDb,
         warehouse_id: warehouseId,
       });
       if (sid) q.set('session_id', sid);
+
+      // Try final results_json first
       const data = await apiFetch(`/api/inspire/results?${q}`);
-      if (!data.results) {
-        setError(data.message || 'No results found.');
+      if (data.results) {
+        setResults(data.results);
+        // Also try loading polished usecases from __inspire_usecases
+        try {
+          const ucData = await apiFetch(`/api/inspire/usecases?${q}`);
+          if (ucData.usecases?.length > 0) {
+            setUsecases(ucData.usecases);
+          }
+        } catch { /* silent */ }
         return;
       }
-      setResults(data.results);
+
+      // No final results — try progressive results from __inspire_step
+      const stepData = await apiFetch(`/api/inspire/step-results?${q}`);
+      if (stepData.results && stepData.results._use_case_count > 0) {
+        setResults(stepData.results);
+        setIsProgressive(true);
+        // Also try loading polished usecases
+        try {
+          const ucData = await apiFetch(`/api/inspire/usecases?${q}`);
+          if (ucData.usecases?.length > 0) {
+            setUsecases(ucData.usecases);
+          }
+        } catch { /* silent */ }
+        return;
+      }
+
+      setError('No results found yet. The pipeline may still be starting.');
     } catch (err) {
       setError(err.message);
     } finally {
@@ -146,7 +188,18 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
   // ── Extract use cases (defensive — guard against non-array shapes) ──
   let allUseCases = [];
   try {
-    if (Array.isArray(results?.domains)) {
+    // Priority: use polished usecases from __inspire_usecases if available
+    if (usecases && usecases.length > 0) {
+      allUseCases = usecases.map((uc) => ({
+        ...uc,
+        _domain: uc['Business Domain'] || uc.domain || uc._domain || '',
+        Name: uc.Name || uc.use_case_name || uc.name || '',
+        Statement: uc.Statement || uc.description || uc.problem_statement || '',
+        Solution: uc.Solution || uc.solution || '',
+        Priority: uc.Priority || uc.priority || '',
+        SQL: uc.SQL || uc.sql || uc.sql_query || '',
+      }));
+    } else if (Array.isArray(results?.domains)) {
       for (const domain of results.domains) {
         const ucs = Array.isArray(domain?.use_cases) ? domain.use_cases : [];
         for (const uc of ucs)
@@ -237,6 +290,8 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
 
   const hasActiveFilters = searchQuery || filterDomain !== 'all' || filterPriority !== 'all' || filterType !== 'all';
 
+  const highPriorityCount = allUseCases.filter((uc) => ['Ultra High', 'Very High', 'High'].includes(String(uc?.Priority || ''))).length;
+
   return (
     <div className="max-w-7xl mx-auto px-6 py-8">
       {/* Page header */}
@@ -257,10 +312,12 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
             <button
               onClick={() => {
                 setResults(null);
+                setUsecases(null);
                 setError('');
                 setExpandedUseCase(null);
                 setSelectedSessionId(null);
                 setSessionsLoaded(false);
+                setIsProgressive(false);
               }}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm text-text-tertiary border border-border rounded-lg hover:bg-bg-subtle transition-smooth"
             >
@@ -433,7 +490,7 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
                       >
                         {isDone
                           ? 'Complete'
-                          : `${Math.round(s.completed_percent)}%`}
+                          : `${Math.round(s.completed_percent)}% — Preview`}
                       </span>
                     </button>
                   );
@@ -466,6 +523,27 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
       {/* ═══ Results content ═══ */}
       {results && (
         <>
+          {/* Progressive results banner */}
+          {isProgressive && (
+            <div className="flex items-center gap-3 p-3 bg-warning-bg border border-warning/20 rounded-lg mb-6">
+              <Loader2 size={14} className="animate-spin text-warning shrink-0" />
+              <div className="flex-1">
+                <span className="text-sm font-semibold text-warning">Live Preview</span>
+                <span className="text-xs text-text-secondary ml-2">
+                  Showing {allUseCases.length} use cases from {results._step_count || 0} completed steps.
+                  Results will be enriched as the pipeline progresses.
+                </span>
+              </div>
+              <button
+                onClick={() => loadResults(selectedSessionId)}
+                className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-warning border border-warning/30 rounded-md hover:bg-warning/10 transition-smooth"
+              >
+                <RefreshCw size={11} />
+                Refresh
+              </button>
+            </div>
+          )}
+
           {/* Executive summary */}
           <div className="bg-surface border border-border rounded-xl overflow-hidden mb-6 shadow-sm">
             <div className="flex items-center gap-3 px-5 py-3 border-b border-border bg-gradient-to-r from-db-red-50 to-surface">
@@ -490,13 +568,64 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
             </div>
           </div>
 
+          {/* ═══ Execution Summary Banner ═══ */}
+          {!isProgressive && (
+            <div className="bg-surface border border-border rounded-xl overflow-hidden mb-6 shadow-sm">
+              <div className="px-5 py-4">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-3">
+                    <div className="w-7 h-7 rounded-lg bg-success/10 flex items-center justify-center">
+                      <CheckCircle2 size={14} className="text-success" />
+                    </div>
+                    <div>
+                      <h3 className="text-sm font-bold text-text-primary">Execution Complete</h3>
+                      <p className="text-[10px] text-text-tertiary">
+                        {typeof results.title === 'string' ? results.title.replace(/<[^>]*>/g, '') : 'Pipeline finished successfully'}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-4">
+                    <div className="text-center">
+                      <div className="text-lg font-bold text-text-primary">{allUseCases.length}</div>
+                      <div className="text-[9px] text-text-tertiary uppercase tracking-wider font-semibold">Use Cases</div>
+                    </div>
+                    <div className="w-px h-8 bg-border" />
+                    <div className="text-center">
+                      <div className="text-lg font-bold text-text-primary">{domains.length}</div>
+                      <div className="text-[9px] text-text-tertiary uppercase tracking-wider font-semibold">Domains</div>
+                    </div>
+                    <div className="w-px h-8 bg-border" />
+                    <div className="text-center">
+                      <div className="text-lg font-bold text-db-red">{highPriorityCount}</div>
+                      <div className="text-[9px] text-text-tertiary uppercase tracking-wider font-semibold">High Priority</div>
+                    </div>
+                  </div>
+                </div>
+                {/* Pipeline stages row */}
+                <div className="flex items-center gap-1 pt-3 border-t border-border overflow-x-auto">
+                  {PIPELINE_STAGES.map((stage, i) => (
+                    <div key={stage} className="flex items-center shrink-0">
+                      <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md bg-success-bg">
+                        <CheckCircle2 size={11} className="text-success shrink-0" />
+                        <span className="text-[10px] font-medium text-success whitespace-nowrap">{stage}</span>
+                      </div>
+                      {i < PIPELINE_STAGES.length - 1 && (
+                        <span className="text-text-tertiary text-[10px] mx-1 shrink-0">&rarr;</span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Stats */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
             <StatCard label="Domains" value={results.domains?.length || domains.length} icon={Building2} />
             <StatCard label="Use Cases" value={allUseCases.length} icon={FileText} />
             <StatCard
               label="High Priority"
-              value={allUseCases.filter((uc) => ['Ultra High', 'Very High', 'High'].includes(String(uc?.Priority || ''))).length}
+              value={highPriorityCount}
               icon={Target}
             />
             <StatCard
@@ -781,6 +910,45 @@ function GlowFilterSelect({ value, onChange, options, label, isSort }) {
   );
 }
 
+/* ── Copy Button ── */
+function CopyButton({ text }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = async (e) => {
+    e.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Fallback for older browsers
+      const textarea = document.createElement('textarea');
+      textarea.value = text;
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textarea);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
+  };
+
+  return (
+    <button
+      onClick={handleCopy}
+      className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-medium transition-smooth border ${
+        copied
+          ? 'bg-success-bg text-success border-success/20'
+          : 'bg-bg text-text-tertiary border-border hover:text-text-secondary hover:border-border-strong'
+      }`}
+      title={copied ? 'Copied!' : 'Copy to clipboard'}
+    >
+      {copied ? <Check size={10} /> : <Copy size={10} />}
+      {copied ? 'Copied' : 'Copy'}
+    </button>
+  );
+}
+
 /* ── Use Case Card ── */
 function UseCaseCard({ uc, index, expanded, onToggle, resolveTable }) {
   if (!uc || typeof uc !== 'object') return null;
@@ -859,7 +1027,7 @@ function UseCaseCard({ uc, index, expanded, onToggle, resolveTable }) {
           </div>
           <div className="text-[10px] text-text-tertiary mt-1 flex items-center gap-3">
             <span>🏢 {domain || 'Unknown'}</span>
-            {subdomain && <span>→ {subdomain}</span>}
+            {subdomain && <span>&rarr; {subdomain}</span>}
             <span>🔬 {technique || ucType || '—'}</span>
           </div>
         </div>
@@ -957,17 +1125,23 @@ function UseCaseCard({ uc, index, expanded, onToggle, resolveTable }) {
           {/* SQL */}
           {sql && !sql.startsWith('--') && (
             <div>
-              <h4 className="text-[10px] font-bold text-info uppercase tracking-wider mb-1 flex items-center gap-1.5">
-                <Code size={10} /> SQL Implementation
-                {resultTable && (
-                  <span className="text-text-tertiary font-normal normal-case ml-1">
-                    → {resultTable}
-                  </span>
-                )}
-              </h4>
-              <pre className="text-[11px] text-text-primary bg-bg p-4 rounded-lg border border-border overflow-x-auto max-h-60 overflow-y-auto font-mono leading-relaxed whitespace-pre-wrap">
-                {sql}
-              </pre>
+              <div className="flex items-center justify-between mb-1">
+                <h4 className="text-[10px] font-bold text-info uppercase tracking-wider flex items-center gap-1.5">
+                  <Code size={10} /> SQL Implementation
+                  {resultTable && (
+                    <span className="text-text-tertiary font-normal normal-case ml-1">
+                      &rarr; {resultTable}
+                    </span>
+                  )}
+                </h4>
+                <CopyButton text={sql} />
+              </div>
+              <div className="relative rounded-lg border border-border overflow-hidden">
+                <div className="absolute left-0 top-0 bottom-0 w-1 bg-info/30 rounded-l-lg" />
+                <pre className="text-[11px] text-text-primary bg-bg p-4 pl-5 overflow-x-auto max-h-60 overflow-y-auto font-mono leading-relaxed whitespace-pre-wrap">
+                  {sql}
+                </pre>
+              </div>
             </div>
           )}
         </div>

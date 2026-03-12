@@ -11,13 +11,13 @@ import {
   Search,
   CheckCircle2,
   Globe2,
-  ChevronDown,
   ChevronRight,
   BarChart3,
   Sliders,
   Sparkles,
   Settings2,
   Zap,
+  Table2,
 } from 'lucide-react';
 
 /* ─── Constants (v43 notebook widget options) ─── */
@@ -43,6 +43,7 @@ const BUSINESS_PRIORITIES = [
   { key: 'Execute Strategy', icon: '🎯' },
 ];
 const SQL_PER_DOMAIN = ['0', '1', '2', '3', '4', '5', 'All'];
+const TECH_EXCLUSION_OPTIONS = ['None', 'Exclude System Tables', 'Exclude All Technical'];
 
 export default function LaunchPage({ settings, update, onLaunched }) {
   const { databricksHost, token, notebookPath, warehouseId, inspireDatabase } = settings;
@@ -56,10 +57,10 @@ export default function LaunchPage({ settings, update, onLaunched }) {
     '04_table_election': 'Let Inspire Decides',
     '05_use_cases_quality': 'High Quality',
     '06_business_domains': '',
-    '07_business_priorities': 'Increase Revenue',
+    '07_business_priorities': '',
     '08_strategic_goals': '',
-    '09_generation_options': 'SQL Code',
-    '10_sql_generation_per_domain': '0',
+    '09_generation_options': 'PDF Catalog',
+    '10_sql_generation_per_domain': '3',
     '11_generation_path': './inspire_gen/',
     '12_documents_languages': 'English',
     '14_session_id': '',
@@ -70,11 +71,16 @@ export default function LaunchPage({ settings, update, onLaunched }) {
   const [schemas, setSchemas] = useState([]);
   const [selectedCatalogs, setSelectedCatalogs] = useState([]);
   const [selectedSchemas, setSelectedSchemas] = useState([]);
-  const [manualTables, setManualTables] = useState('');
   const [loadingCatalogs, setLoadingCatalogs] = useState(false);
   const [loadingSchemas, setLoadingSchemas] = useState(false);
   const [catalogSearch, setCatalogSearch] = useState('');
   const [schemaSearch, setSchemaSearch] = useState('');
+
+  // ── Table state ──
+  const [tables, setTables] = useState([]);
+  const [selectedTables, setSelectedTables] = useState([]);
+  const [loadingTables, setLoadingTables] = useState(false);
+  const [tableSearch, setTableSearch] = useState('');
 
   // ── Launch state ──
   const [launching, setLaunching] = useState(false);
@@ -82,17 +88,20 @@ export default function LaunchPage({ settings, update, onLaunched }) {
   const [showAdvanced, setShowAdvanced] = useState(false);
 
   // ── Multiselects ──
-  const [genChecks, setGenChecks] = useState({ 'SQL Code': true });
-  const [priorityChecks, setPriorityChecks] = useState({ 'Increase Revenue': true });
+  const [genChecks, setGenChecks] = useState({ 'PDF Catalog': true });
+  const [priorityChecks, setPriorityChecks] = useState({});
+
 
   const apiFetch = useCallback(
     async (url, opts = {}) => {
       const headers = {
-        Authorization: `Bearer ${token}`,
-        'X-DB-PAT-Token': token,
         'Content-Type': 'application/json',
         ...opts.headers,
       };
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+        headers['X-DB-PAT-Token'] = token;
+      }
       if (databricksHost) headers['X-Databricks-Host'] = databricksHost;
       const resp = await fetch(url, { ...opts, headers });
       if (!resp.ok) throw new Error(`${resp.status}`);
@@ -100,6 +109,13 @@ export default function LaunchPage({ settings, update, onLaunched }) {
     },
     [token, databricksHost]
   );
+
+  // Sync inspire database from settings
+  useEffect(() => {
+    if (inspireDatabase) {
+      setParams((p) => ({ ...p, '02_inspire_database': inspireDatabase }));
+    }
+  }, [inspireDatabase]);
 
   // Sync generation options
   useEffect(() => {
@@ -113,25 +129,31 @@ export default function LaunchPage({ settings, update, onLaunched }) {
     setParams((p) => ({ ...p, '07_business_priorities': sel.join(',') }));
   }, [priorityChecks]);
 
-  // Build UC metadata from selections
+  // Build UC metadata from selections — tables take priority
   useEffect(() => {
-    const parts = [
-      ...selectedCatalogs,
-      ...selectedSchemas,
-      ...manualTables.split(',').map((t) => t.trim()).filter(Boolean),
-    ];
-    setParams((p) => ({ ...p, '01_uc_metadata': parts.join(',') }));
-  }, [selectedCatalogs, selectedSchemas, manualTables]);
+    let metadata;
+    if (selectedTables.length > 0) {
+      // When tables are selected, ALWAYS send tables as comma-separated full paths
+      metadata = selectedTables.join(',');
+    } else {
+      // Fall back to catalogs/schemas if no tables selected
+      const parts = [
+        ...selectedCatalogs,
+        ...selectedSchemas,
+      ];
+      metadata = parts.join(',');
+    }
+    setParams((p) => ({ ...p, '01_uc_metadata': metadata }));
+  }, [selectedCatalogs, selectedSchemas, selectedTables]);
 
-  // Load catalogs
+  // Load catalogs (try even without explicit token — Databricks Apps forward auth)
   useEffect(() => {
-    if (!token) return;
     setLoadingCatalogs(true);
     apiFetch('/api/catalogs')
       .then((data) => setCatalogs(data.catalogs || []))
       .catch(() => {})
       .finally(() => setLoadingCatalogs(false));
-  }, [token, apiFetch]);
+  }, [apiFetch]);
 
   // Load schemas when catalogs change
   useEffect(() => {
@@ -148,26 +170,64 @@ export default function LaunchPage({ settings, update, onLaunched }) {
       .finally(() => setLoadingSchemas(false));
   }, [selectedCatalogs, apiFetch]);
 
+  // Load tables when selectedSchemas changes
+  useEffect(() => {
+    if (selectedSchemas.length === 0) { setTables([]); return; }
+    setLoadingTables(true);
+    Promise.all(
+      selectedSchemas.map((schemaFullName) => {
+        const parts = schemaFullName.split('.');
+        const catalog = parts[0];
+        const schema = parts[1];
+        return apiFetch(`/api/tables/${encodeURIComponent(catalog)}/${encodeURIComponent(schema)}`)
+          .then((d) => (d.tables || []).map((t) => ({
+            ...t,
+            full_name: t.full_name || `${catalog}.${schema}.${t.name}`,
+          })))
+          .catch(() => []);
+      })
+    )
+      .then((r) => {
+        const allTables = r.flat();
+        setTables(allTables);
+        // Remove selected tables that are no longer in available tables
+        const availableNames = new Set(allTables.map((t) => t.full_name));
+        setSelectedTables((prev) => prev.filter((t) => availableNames.has(t)));
+      })
+      .finally(() => setLoadingTables(false));
+  }, [selectedSchemas, apiFetch]);
+
+  // Auto-populate inspire database when first catalog is selected
+  useEffect(() => {
+    if (selectedCatalogs.length === 1 && !params['02_inspire_database']) {
+      const autoVal = `${selectedCatalogs[0]}._inspire`;
+      setParams((p) => ({ ...p, '02_inspire_database': autoVal }));
+      update('inspireDatabase', autoVal);
+    }
+  }, [selectedCatalogs]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const updateParam = (key, val) => {
     setParams((p) => ({ ...p, [key]: val }));
-    if (key === '02_inspire_database') update('inspireDatabase', val);
+    if (key === '02_inspire_database') {
+      update('inspireDatabase', val);
+    }
   };
 
   // Launch
   const handleLaunch = async () => {
     if (!params['00_business_name'])
       return setLaunchError('Business name is required.');
-    if (!params['02_inspire_database'])
-      return setLaunchError('Inspire Database is required.');
+    if (!params['02_inspire_database'] && !inspireDatabase)
+      return setLaunchError('Inspire Database is required. Set it in Settings.');
     if (params['03_operation'] === 'Discover Usecases' && !params['01_uc_metadata'])
-      return setLaunchError('Select at least one catalog or schema for UC Metadata.');
+      return setLaunchError('Select at least one catalog, schema, or table for UC Metadata.');
 
     setLaunching(true);
     setLaunchError('');
     const finalParams = { ...params };
-    if (!finalParams['14_session_id'])
-      finalParams['14_session_id'] =
-        String(Date.now()) + String(Math.floor(Math.random() * 1e6));
+    // Always auto-generate session ID
+    finalParams['14_session_id'] =
+      String(Date.now()) + String(Math.floor(Math.random() * 1e6));
 
     try {
       const data = await apiFetch('/api/run', {
@@ -193,16 +253,31 @@ export default function LaunchPage({ settings, update, onLaunched }) {
   const filteredSchemas = schemas.filter(
     (s) => !schemaSearch || s.full_name.toLowerCase().includes(schemaSearch.toLowerCase())
   );
+  const filteredTables = tables.filter(
+    (t) => !tableSearch || t.full_name.toLowerCase().includes(tableSearch.toLowerCase())
+  );
   const isDiscover = params['03_operation'] === 'Discover Usecases';
   const needsLanguage = params['09_generation_options'].includes('PDF') || params['09_generation_options'].includes('Presentation');
 
+  // Table select all / deselect all
+  const allTablesSelected = filteredTables.length > 0 && filteredTables.every((t) => selectedTables.includes(t.full_name));
+  const toggleAllTables = () => {
+    if (allTablesSelected) {
+      const filteredNames = new Set(filteredTables.map((t) => t.full_name));
+      setSelectedTables((prev) => prev.filter((t) => !filteredNames.has(t)));
+    } else {
+      const newNames = filteredTables.map((t) => t.full_name);
+      setSelectedTables((prev) => [...new Set([...prev, ...newNames])]);
+    }
+  };
+
   // Validation state
-  const canLaunch = params['00_business_name'] && params['02_inspire_database'] &&
+  const canLaunch = params['00_business_name'] && (params['02_inspire_database'] || inspireDatabase) &&
     (!isDiscover || params['01_uc_metadata']);
 
   return (
     <div className="max-w-5xl mx-auto px-6 py-8">
-      {/* ═══ Page Header ═══ */}
+      {/* Page Header */}
       <div className="mb-8">
         <div className="flex items-center gap-3 mb-2">
           <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-db-red to-db-red-hover flex items-center justify-center shadow-sm">
@@ -228,7 +303,7 @@ export default function LaunchPage({ settings, update, onLaunched }) {
       <div className="space-y-6">
 
         {/* ═══════════════════════════════════════════════
-            SECTION 1: ESSENTIALS (Required Fields)
+            SECTION 1: ESSENTIALS
            ═══════════════════════════════════════════════ */}
         <section className="bg-surface border border-border rounded-xl overflow-hidden shadow-sm">
           <div className="flex items-center gap-3 px-6 py-4 border-b border-border bg-gradient-to-r from-db-red-50 to-surface">
@@ -245,7 +320,7 @@ export default function LaunchPage({ settings, update, onLaunched }) {
           </div>
 
           <div className="px-6 py-6 space-y-6">
-            {/* Row 1: Business Name */}
+            {/* Business Name */}
             <Field label="Business Name" required icon={Building2} hint="The company or business unit to analyze">
               <input
                 type="text"
@@ -256,10 +331,10 @@ export default function LaunchPage({ settings, update, onLaunched }) {
               />
             </Field>
 
-            {/* Row 2: UC Metadata — Catalog/Schema pickers */}
+            {/* UC Metadata — Catalog/Schema/Table pickers */}
             {isDiscover && (
-              <Field label="Unity Catalog Metadata" required icon={Database} hint="Select the catalogs and schemas to analyze">
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              <Field label="Unity Catalog Metadata" required icon={Database} hint="Navigate catalogs and schemas to select tables">
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
                   {/* Catalogs */}
                   <div>
                     <div className="flex items-center gap-1.5 mb-2">
@@ -273,6 +348,7 @@ export default function LaunchPage({ settings, update, onLaunched }) {
                         if (selectedCatalogs.includes(name)) {
                           setSelectedCatalogs((p) => p.filter((x) => x !== name));
                           setSelectedSchemas((p) => p.filter((x) => !x.startsWith(name + '.')));
+                          setSelectedTables((p) => p.filter((x) => !x.startsWith(name + '.')));
                         } else {
                           setSelectedCatalogs((p) => [...p, name]);
                         }
@@ -284,22 +360,29 @@ export default function LaunchPage({ settings, update, onLaunched }) {
                       searchPlaceholder="Search catalogs..."
                       emptyText={loadingCatalogs ? 'Loading...' : 'No catalogs found'}
                     />
-                    <ChipList items={selectedCatalogs} onRemove={(c) => setSelectedCatalogs((p) => p.filter((x) => x !== c))} icon={Database} />
+                    <ChipList items={selectedCatalogs} onRemove={(c) => {
+                      setSelectedCatalogs((p) => p.filter((x) => x !== c));
+                      setSelectedSchemas((p) => p.filter((x) => !x.startsWith(c + '.')));
+                      setSelectedTables((p) => p.filter((x) => !x.startsWith(c + '.')));
+                    }} icon={Database} />
                   </div>
 
                   {/* Schemas */}
                   <div>
                     <div className="flex items-center gap-1.5 mb-2">
                       <span className="text-[11px] font-semibold text-text-secondary">Schemas</span>
-                      <span className="text-[10px] text-text-tertiary">optional — narrow scope</span>
                       {loadingSchemas && <Loader2 size={10} className="animate-spin text-text-tertiary" />}
                     </div>
                     <PickerList
                       items={filteredSchemas}
                       selected={selectedSchemas}
                       onToggle={(name) => {
-                        if (selectedSchemas.includes(name)) setSelectedSchemas((p) => p.filter((x) => x !== name));
-                        else setSelectedSchemas((p) => [...p, name]);
+                        if (selectedSchemas.includes(name)) {
+                          setSelectedSchemas((p) => p.filter((x) => x !== name));
+                          setSelectedTables((p) => p.filter((x) => !x.startsWith(name + '.')));
+                        } else {
+                          setSelectedSchemas((p) => [...p, name]);
+                        }
                       }}
                       getKey={(s) => s.full_name}
                       getLabel={(s) => s.full_name}
@@ -308,23 +391,45 @@ export default function LaunchPage({ settings, update, onLaunched }) {
                       searchPlaceholder="Search schemas..."
                       emptyText={selectedCatalogs.length === 0 ? 'Select catalogs first' : loadingSchemas ? 'Loading...' : 'No schemas found'}
                     />
-                    <ChipList items={selectedSchemas} onRemove={(s) => setSelectedSchemas((p) => p.filter((x) => x !== s))} />
+                    <ChipList items={selectedSchemas} onRemove={(s) => {
+                      setSelectedSchemas((p) => p.filter((x) => x !== s));
+                      setSelectedTables((p) => p.filter((x) => !x.startsWith(s + '.')));
+                    }} />
                   </div>
-                </div>
 
-                {/* Additional tables */}
-                <div className="mt-3">
-                  <div className="flex items-center gap-1.5 mb-2">
-                    <span className="text-[11px] font-semibold text-text-secondary">Additional Tables</span>
-                    <span className="text-[10px] text-text-tertiary">catalog.schema.table, comma-separated</span>
+                  {/* Tables */}
+                  <div>
+                    <div className="flex items-center gap-1.5 mb-2">
+                      <span className="text-[11px] font-semibold text-text-secondary">Tables</span>
+                      <span className="text-[10px] text-text-tertiary">primary selection</span>
+                      {loadingTables && <Loader2 size={10} className="animate-spin text-text-tertiary" />}
+                    </div>
+                    {/* Select All / Deselect All toggle */}
+                    {filteredTables.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={toggleAllTables}
+                        className="mb-1.5 px-2.5 py-1 rounded-md text-[10px] font-semibold transition-smooth border border-border hover:border-border-strong text-text-secondary hover:text-db-red"
+                      >
+                        {allTablesSelected ? 'Deselect All' : 'Select All'}
+                      </button>
+                    )}
+                    <PickerList
+                      items={filteredTables}
+                      selected={selectedTables}
+                      onToggle={(name) => {
+                        if (selectedTables.includes(name)) setSelectedTables((p) => p.filter((x) => x !== name));
+                        else setSelectedTables((p) => [...p, name]);
+                      }}
+                      getKey={(t) => t.full_name}
+                      getLabel={(t) => t.full_name.split('.').pop()}
+                      searchValue={tableSearch}
+                      onSearch={setTableSearch}
+                      searchPlaceholder="Search tables..."
+                      emptyText={selectedSchemas.length === 0 ? 'Select schemas first' : loadingTables ? 'Loading...' : 'No tables found'}
+                    />
+                    <ChipList items={selectedTables} onRemove={(t) => setSelectedTables((p) => p.filter((x) => x !== t))} icon={Table2} />
                   </div>
-                  <input
-                    type="text"
-                    placeholder="my_catalog.sales.orders, my_catalog.marketing.campaigns"
-                    value={manualTables}
-                    onChange={(e) => setManualTables(e.target.value)}
-                    className="w-full px-4 py-2 text-sm border border-border rounded-lg bg-surface text-text-primary placeholder:text-text-tertiary glow-focus transition-smooth font-mono"
-                  />
                 </div>
 
                 {/* UC Metadata preview */}
@@ -340,75 +445,6 @@ export default function LaunchPage({ settings, update, onLaunched }) {
               </Field>
             )}
 
-            {/* Row 3: Generation Options */}
-            <Field label="Generation Options" required icon={Layers} hint="What should Inspire AI produce?">
-              <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5">
-                {GENERATION_OPTIONS.map((opt) => {
-                  const Icon = opt.icon;
-                  const active = !!genChecks[opt.key];
-                  return (
-                    <button
-                      key={opt.key}
-                      type="button"
-                      onClick={() => setGenChecks((p) => ({ ...p, [opt.key]: !p[opt.key] }))}
-                      className={`relative p-3.5 rounded-xl text-left transition-smooth border group ${
-                        active
-                          ? 'border-db-red/30 bg-db-red-50 shadow-sm'
-                          : 'border-border hover:border-border-strong hover:shadow-sm'
-                      }`}
-                    >
-                      <div className="flex items-center gap-2 mb-1.5">
-                        <div className={`w-7 h-7 rounded-lg flex items-center justify-center ${
-                          active ? 'bg-db-red/10' : 'bg-bg-subtle group-hover:bg-bg'
-                        }`}>
-                          <Icon size={14} className={active ? 'text-db-red' : 'text-text-tertiary'} />
-                        </div>
-                      </div>
-                      <span className={`text-xs font-semibold block ${active ? 'text-db-red' : 'text-text-primary'}`}>
-                        {opt.key}
-                      </span>
-                      <p className="text-[10px] text-text-tertiary leading-snug mt-0.5">{opt.desc}</p>
-                      {active && (
-                        <CheckCircle2 size={14} className="absolute top-2.5 right-2.5 text-db-red" />
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-            </Field>
-
-            {/* Row 4: Inspire Database */}
-            <Field label="Inspire Database" required icon={Database} hint="catalog.schema — where Inspire stores sessions and results">
-              <input
-                type="text"
-                placeholder="my_catalog.my_schema"
-                value={params['02_inspire_database']}
-                onChange={(e) => updateParam('02_inspire_database', e.target.value)}
-                className="w-full pl-10 pr-4 py-2.5 text-sm border border-border rounded-lg bg-surface text-text-primary placeholder:text-text-tertiary glow-focus transition-smooth font-mono"
-              />
-            </Field>
-
-            {/* Row 5: Generation Path + Languages side by side */}
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-              <Field label="Generation Path" required icon={FileText} hint="Where to write output artifacts">
-                <input
-                  type="text"
-                  value={params['11_generation_path']}
-                  onChange={(e) => updateParam('11_generation_path', e.target.value)}
-                  className="w-full pl-10 pr-4 py-2.5 text-sm border border-border rounded-lg bg-surface text-text-primary glow-focus transition-smooth font-mono"
-                />
-              </Field>
-
-              <Field label="Document Languages" required={needsLanguage} icon={Globe2} hint={needsLanguage ? 'Required for PDF/Presentation' : 'Comma-separated'}>
-                <input
-                  type="text"
-                  placeholder="English, French, Arabic"
-                  value={params['12_documents_languages']}
-                  onChange={(e) => updateParam('12_documents_languages', e.target.value)}
-                  className="w-full pl-10 pr-4 py-2.5 text-sm border border-border rounded-lg bg-surface text-text-primary placeholder:text-text-tertiary glow-focus transition-smooth"
-                />
-              </Field>
-            </div>
           </div>
         </section>
 
@@ -427,7 +463,7 @@ export default function LaunchPage({ settings, update, onLaunched }) {
             <div className="flex-1">
               <h2 className="text-sm font-bold text-text-primary">Advanced Settings</h2>
               <p className="text-xs text-text-secondary">
-                Fine-tune operation mode, quality, priorities, and more
+                Generation options, operation mode, quality, and more
               </p>
             </div>
             <div className={`transition-transform duration-200 ${showAdvanced ? 'rotate-90' : ''}`}>
@@ -437,6 +473,129 @@ export default function LaunchPage({ settings, update, onLaunched }) {
 
           {showAdvanced && (
             <div className="px-6 pb-6 pt-2 border-t border-border space-y-6">
+
+              {/* Business Priorities */}
+              <FieldSection label="Business Priorities" hint="Select what matters most">
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
+                  {BUSINESS_PRIORITIES.map((bp) => {
+                    const active = !!priorityChecks[bp.key];
+                    return (
+                      <button
+                        key={bp.key}
+                        type="button"
+                        onClick={() => setPriorityChecks((p) => ({ ...p, [bp.key]: !p[bp.key] }))}
+                        className={`relative px-3 py-2 rounded-lg text-xs font-medium text-left transition-smooth border ${
+                          active
+                            ? 'border-db-red/30 bg-db-red-50 text-db-red'
+                            : 'border-border text-text-secondary hover:border-border-strong'
+                        }`}
+                      >
+                        <span className="flex items-center gap-1.5">
+                          <span className="text-sm">{bp.icon}</span>
+                          <span className="truncate">{bp.key}</span>
+                        </span>
+                        {active && <CheckCircle2 size={12} className="absolute top-1.5 right-1.5 text-db-red" />}
+                      </button>
+                    );
+                  })}
+                </div>
+              </FieldSection>
+
+              {/* Strategic Goals */}
+              <FieldSection label="Strategic Goals" hint="Highest priority influence on use case generation">
+                <div className="relative">
+                  <Target size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-tertiary" />
+                  <input
+                    type="text"
+                    placeholder="Increase market share, Reduce operational costs, Improve customer retention..."
+                    value={params['08_strategic_goals']}
+                    onChange={(e) => updateParam('08_strategic_goals', e.target.value)}
+                    className="w-full pl-9 pr-4 py-2.5 text-sm border border-border rounded-lg bg-surface text-text-primary placeholder:text-text-tertiary glow-focus transition-smooth"
+                  />
+                </div>
+              </FieldSection>
+
+              {/* Business Domains */}
+              <FieldSection label="Business Domains" hint="Leave empty to auto-infer from data">
+                <div className="relative">
+                  <Layers size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-tertiary" />
+                  <input
+                    type="text"
+                    placeholder="Sales, Marketing, Finance, Operations, Supply Chain..."
+                    value={params['06_business_domains']}
+                    onChange={(e) => updateParam('06_business_domains', e.target.value)}
+                    className="w-full pl-9 pr-4 py-2.5 text-sm border border-border rounded-lg bg-surface text-text-primary placeholder:text-text-tertiary glow-focus transition-smooth"
+                  />
+                </div>
+              </FieldSection>
+
+              {/* Generation Options */}
+              <Field label="Generation Options" icon={Layers} hint="What should Inspire AI produce?">
+                <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5">
+                  {GENERATION_OPTIONS.map((opt) => {
+                    const Icon = opt.icon;
+                    const active = !!genChecks[opt.key];
+                    return (
+                      <button
+                        key={opt.key}
+                        type="button"
+                        onClick={() => setGenChecks((p) => ({ ...p, [opt.key]: !p[opt.key] }))}
+                        className={`relative p-3.5 rounded-xl text-left transition-smooth border group ${
+                          active
+                            ? 'border-db-red/30 bg-db-red-50 shadow-sm'
+                            : 'border-border hover:border-border-strong hover:shadow-sm'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2 mb-1.5">
+                          <div className={`w-7 h-7 rounded-lg flex items-center justify-center ${
+                            active ? 'bg-db-red/10' : 'bg-bg-subtle group-hover:bg-bg'
+                          }`}>
+                            <Icon size={14} className={active ? 'text-db-red' : 'text-text-tertiary'} />
+                          </div>
+                        </div>
+                        <span className={`text-xs font-semibold block ${active ? 'text-db-red' : 'text-text-primary'}`}>
+                          {opt.key}
+                        </span>
+                        <p className="text-[10px] text-text-tertiary leading-snug mt-0.5">{opt.desc}</p>
+                        {active && (
+                          <CheckCircle2 size={14} className="absolute top-2.5 right-2.5 text-db-red" />
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              </Field>
+
+              {/* Generation Path + Languages side by side */}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+                <Field label="Generation Path" icon={FileText} hint="Where to write output artifacts">
+                  <input
+                    type="text"
+                    value={params['11_generation_path']}
+                    onChange={(e) => updateParam('11_generation_path', e.target.value)}
+                    className="w-full pl-10 pr-4 py-2.5 text-sm border border-border rounded-lg bg-surface text-text-primary glow-focus transition-smooth font-mono"
+                  />
+                </Field>
+
+                <Field label="Document Languages" required={needsLanguage} icon={Globe2} hint={needsLanguage ? 'Required for PDF/Presentation' : 'Comma-separated'}>
+                  <input
+                    type="text"
+                    placeholder="English, French, Arabic"
+                    value={params['12_documents_languages']}
+                    onChange={(e) => updateParam('12_documents_languages', e.target.value)}
+                    className="w-full pl-10 pr-4 py-2.5 text-sm border border-border rounded-lg bg-surface text-text-primary placeholder:text-text-tertiary glow-focus transition-smooth"
+                  />
+                </Field>
+              </div>
+
+              {/* SQL per Domain */}
+              <FieldSection label="SQL per Domain" hint="Queries per domain (default: 3)">
+                <GlowSelect
+                  value={params['10_sql_generation_per_domain']}
+                  onChange={(v) => updateParam('10_sql_generation_per_domain', v)}
+                  options={SQL_PER_DOMAIN}
+                />
+              </FieldSection>
 
               {/* Row: Operation + Table Election + Quality */}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
@@ -480,99 +639,37 @@ export default function LaunchPage({ settings, update, onLaunched }) {
                 </FieldSection>
               </div>
 
-              {/* Row: Strategic Goals */}
-              <FieldSection label="Strategic Goals" hint="Highest priority influence on use case generation">
-                <div className="relative">
-                  <Target size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-tertiary" />
-                  <input
-                    type="text"
-                    placeholder="Increase market share, Reduce operational costs, Improve customer retention..."
-                    value={params['08_strategic_goals']}
-                    onChange={(e) => updateParam('08_strategic_goals', e.target.value)}
-                    className="w-full pl-9 pr-4 py-2.5 text-sm border border-border rounded-lg bg-surface text-text-primary placeholder:text-text-tertiary glow-focus transition-smooth"
-                  />
-                </div>
+              {/* Technical Exclusion Strategy */}
+              <FieldSection label="Technical Exclusion Strategy" hint="Filter out technical/system tables">
+                <GlowSelect
+                  value={params['15_tech_exclusion'] || 'None'}
+                  onChange={(v) => updateParam('15_tech_exclusion', v)}
+                  options={TECH_EXCLUSION_OPTIONS}
+                />
               </FieldSection>
-
-              {/* Row: Business Domains */}
-              <FieldSection label="Business Domains" hint="Leave empty to auto-infer from data">
-                <div className="relative">
-                  <Layers size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-tertiary" />
-                  <input
-                    type="text"
-                    placeholder="Sales, Marketing, Finance, Operations, Supply Chain..."
-                    value={params['06_business_domains']}
-                    onChange={(e) => updateParam('06_business_domains', e.target.value)}
-                    className="w-full pl-9 pr-4 py-2.5 text-sm border border-border rounded-lg bg-surface text-text-primary placeholder:text-text-tertiary glow-focus transition-smooth"
-                  />
-                </div>
-              </FieldSection>
-
-              {/* Row: Business Priorities */}
-              <FieldSection label="Business Priorities" hint="Select what matters most">
-                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
-                  {BUSINESS_PRIORITIES.map((bp) => {
-                    const active = !!priorityChecks[bp.key];
-                    return (
-                      <button
-                        key={bp.key}
-                        type="button"
-                        onClick={() => setPriorityChecks((p) => ({ ...p, [bp.key]: !p[bp.key] }))}
-                        className={`relative px-3 py-2 rounded-lg text-xs font-medium text-left transition-smooth border ${
-                          active
-                            ? 'border-db-red/30 bg-db-red-50 text-db-red'
-                            : 'border-border text-text-secondary hover:border-border-strong'
-                        }`}
-                      >
-                        <span className="flex items-center gap-1.5">
-                          <span className="text-sm">{bp.icon}</span>
-                          <span className="truncate">{bp.key}</span>
-                        </span>
-                        {active && <CheckCircle2 size={12} className="absolute top-1.5 right-1.5 text-db-red" />}
-                      </button>
-                    );
-                  })}
-                </div>
-              </FieldSection>
-
-              {/* Row: SQL per Domain + Session ID */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-                <FieldSection label="SQL per Domain" hint="Queries per domain">
-                  <GlowSelect
-                    value={params['10_sql_generation_per_domain']}
-                    onChange={(v) => updateParam('10_sql_generation_per_domain', v)}
-                    options={SQL_PER_DOMAIN}
-                  />
-                </FieldSection>
-
-                <FieldSection label="Session ID" hint="Auto-generated if empty">
-                  <input
-                    type="text"
-                    placeholder="Leave empty for auto"
-                    value={params['14_session_id']}
-                    onChange={(e) => updateParam('14_session_id', e.target.value)}
-                    className="w-full px-4 py-2.5 text-sm border border-border rounded-lg bg-surface text-text-primary placeholder:text-text-tertiary glow-focus transition-smooth font-mono"
-                  />
-                </FieldSection>
-              </div>
             </div>
           )}
         </section>
       </div>
 
-      {/* ═══ Launch Footer ═══ */}
+      {/* Launch Footer */}
       <div className="mt-8 pt-6 border-t border-border">
         {/* Summary chips */}
         {canLaunch && (
           <div className="flex flex-wrap items-center gap-2 mb-5">
             <Chip icon={<Building2 size={10} />}>{params['00_business_name']}</Chip>
             <Chip icon={<Database size={10} />}>{params['02_inspire_database']}</Chip>
-            {selectedCatalogs.length > 0 && (
+            {selectedTables.length > 0 && (
+              <Chip icon={<Table2 size={10} />}>
+                {selectedTables.length} table{selectedTables.length > 1 ? 's' : ''}
+              </Chip>
+            )}
+            {selectedTables.length === 0 && selectedCatalogs.length > 0 && (
               <Chip icon={<Database size={10} />}>
                 {selectedCatalogs.length} catalog{selectedCatalogs.length > 1 ? 's' : ''}
               </Chip>
             )}
-            {selectedSchemas.length > 0 && (
+            {selectedTables.length === 0 && selectedSchemas.length > 0 && (
               <Chip icon={<Layers size={10} />}>
                 {selectedSchemas.length} schema{selectedSchemas.length > 1 ? 's' : ''}
               </Chip>

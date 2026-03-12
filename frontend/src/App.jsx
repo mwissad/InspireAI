@@ -87,10 +87,43 @@ export default function App() {
   const nav = (p) => setPage(p);
 
   // Navigation guards
-  const canConfigure = Boolean(settings.token);
-  const canLaunch = Boolean(settings.token && settings.notebookPath && settings.warehouseId);
+  const canLaunch = true;
   const canMonitor = Boolean(sessionId || runId);
   const canResults = true;
+
+  // ── Auto-configure on mount (silent) ──
+  useEffect(() => {
+    (async () => {
+      try {
+        const headers = { 'Content-Type': 'application/json' };
+        if (settings.token) {
+          headers['Authorization'] = `Bearer ${settings.token}`;
+          headers['X-DB-PAT-Token'] = settings.token;
+        }
+        if (settings.databricksHost) headers['X-Databricks-Host'] = settings.databricksHost;
+
+        // 1. Auto-select first running warehouse if none set
+        if (!settings.warehouseId) {
+          const whResp = await fetch('/api/warehouses', { headers });
+          if (whResp.ok) {
+            const whData = await whResp.json();
+            const running = (whData.warehouses || []).find((w) => w.state === 'RUNNING');
+            const first = running || (whData.warehouses || [])[0];
+            if (first) update('warehouseId', first.id);
+          }
+        }
+
+        // 2. Auto-publish notebook (backend handles location seamlessly)
+        if (!settings.notebookPath) {
+          const nbResp = await fetch('/api/notebook', { headers });
+          if (nbResp.ok) {
+            const nbData = await nbResp.json();
+            if (nbData.path) update('notebookPath', nbData.path);
+          }
+        }
+      } catch { /* silent — user can configure manually via Settings */ }
+    })();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div className="min-h-screen bg-bg text-text-primary">
@@ -100,7 +133,6 @@ export default function App() {
           page={page}
           setPage={nav}
           onSettingsClick={() => setShowSettings(!showSettings)}
-          canConfigure={canConfigure}
           canLaunch={canLaunch}
           canMonitor={canMonitor}
           canResults={canResults}
@@ -109,17 +141,7 @@ export default function App() {
 
       {/* Main content */}
       <main>
-        {page === 'landing' && <LandingPage onStart={() => nav('config')} />}
-
-        {page === 'config' && (
-          <div className="max-w-4xl mx-auto px-6 py-8">
-            <ConfigPage
-              settings={settings}
-              update={update}
-              onConfigured={() => nav('launch')}
-            />
-          </div>
-        )}
+        {page === 'landing' && <LandingPage onStart={() => nav('launch')} />}
 
         {page === 'launch' && (
           <LaunchPage

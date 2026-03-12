@@ -2,24 +2,21 @@ import { Settings } from 'lucide-react';
 import DatabricksLogo from './DatabricksLogo';
 
 const NAV = [
-  { id: 'config',  label: 'Configure', step: 1 },
-  { id: 'launch',  label: 'Launch',    step: 2 },
-  { id: 'monitor', label: 'Monitor',   step: 3 },
-  { id: 'results', label: 'Results',   step: 4 },
+  { id: 'launch',  label: 'Launch',  step: 1 },
+  { id: 'monitor', label: 'Monitor', step: 2 },
+  { id: 'results', label: 'Results', step: 3 },
 ];
 
 export default function Header({
   page,
   setPage,
   onSettingsClick,
-  canConfigure,
   canLaunch,
   canMonitor,
   canResults,
 }) {
   const enabled = {
-    config: true,
-    launch: canLaunch || canConfigure,
+    launch: true,
     monitor: canMonitor,
     results: canResults || true,
   };

@@ -235,8 +235,14 @@ export default function MonitorPage({ settings, sessionId, runId, onComplete }) 
   const hasActiveFilters = statusFilter !== 'all' || stageFilter !== 'all' || searchQuery;
 
   const toggleStage = (name) => {
-    setCollapsedStages((prev) => ({ ...prev, [name]: !prev[name] }));
+    setCollapsedStages((prev) => ({ ...prev, [name]: prev[name] === false ? true : false }));
   };
+
+  // Latest activity — most recent step by timestamp
+  const latestStep = useMemo(() => {
+    if (steps.length === 0) return null;
+    return steps.reduce((a, b) => ((a.last_updated || '') > (b.last_updated || '') ? a : b));
+  }, [steps]);
 
   return (
     <div className="max-w-6xl mx-auto px-6 py-8">
@@ -332,7 +338,21 @@ export default function MonitorPage({ settings, sessionId, runId, onComplete }) 
           />
         </div>
 
-        {runInfo?.run_name && (
+        {/* Latest activity line */}
+        {latestStep && isRunning && (
+          <div className="mt-3 flex items-center gap-2">
+            <Activity size={11} className="text-db-red shrink-0 animate-pulse" />
+            <p className="text-[11px] text-text-secondary font-mono truncate">
+              <span className="text-text-tertiary">{latestStep.stage_name}</span>
+              {' → '}
+              <span className="text-text-primary font-medium">{latestStep.step_name}</span>
+              {latestStep.sub_step_name && (
+                <span className="text-text-tertiary">: {latestStep.sub_step_name}</span>
+              )}
+            </p>
+          </div>
+        )}
+        {runInfo?.run_name && !latestStep && (
           <p className="text-[11px] text-text-tertiary mt-3 font-mono">{runInfo.run_name}</p>
         )}
       </div>
@@ -350,8 +370,32 @@ export default function MonitorPage({ settings, sessionId, runId, onComplete }) 
         </div>
       )}
 
-      {/* ═══ Two-Column Layout: Stage Sidebar + Steps ═══ */}
+      {/* ═══ Detailed Steps (Collapsible Advanced) ═══ */}
       {totalCount > 0 ? (
+        <section className="bg-surface border border-border rounded-xl overflow-hidden shadow-sm mb-6">
+          <button
+            type="button"
+            onClick={() => setShowFilters(!showFilters)}
+            className="w-full flex items-center gap-3 px-5 py-4 text-left hover:bg-bg-subtle/50 transition-smooth"
+          >
+            <div className="w-8 h-8 rounded-lg bg-bg-subtle flex items-center justify-center">
+              <Layers size={16} className="text-text-secondary" />
+            </div>
+            <div className="flex-1">
+              <h2 className="text-sm font-bold text-text-primary">Detailed Steps</h2>
+              <p className="text-xs text-text-secondary">
+                {stageNames.length} stage{stageNames.length !== 1 ? 's' : ''} &middot; {totalCount} step{totalCount !== 1 ? 's' : ''}
+                {statusCounts.running > 0 && <> &middot; <span className="text-info font-medium">{statusCounts.running} in progress</span></>}
+                {statusCounts.error > 0 && <> &middot; <span className="text-error font-medium">{statusCounts.error} error{statusCounts.error > 1 ? 's' : ''}</span></>}
+              </p>
+            </div>
+            <div className={`transition-transform duration-200 ${showFilters ? 'rotate-90' : ''}`}>
+              <ChevronRight size={18} className="text-text-tertiary" />
+            </div>
+          </button>
+
+          {showFilters && (
+            <div className="border-t border-border px-5 py-4">
         <div className="flex gap-4">
           {/* ── Left Sidebar: Stages ── */}
           <div className="w-56 shrink-0">
@@ -559,7 +603,7 @@ export default function MonitorPage({ settings, sessionId, runId, onComplete }) 
             {Object.keys(stages).length > 0 ? (
               <div className="space-y-3">
                 {Object.entries(stages).map(([stageName, stageSteps]) => {
-                  const collapsed = collapsedStages[stageName];
+                  const collapsed = collapsedStages[stageName] !== false;
                   const doneCount = stageSteps.filter((s) => isStepDone(s.status)).length;
                   const errorCount = stageSteps.filter((s) => getStatusCategory(s.status) === 'error').length;
                   const runningCount = stageSteps.filter((s) => getStatusCategory(s.status) === 'running').length;
@@ -626,6 +670,9 @@ export default function MonitorPage({ settings, sessionId, runId, onComplete }) 
             )}
           </div>
         </div>
+        </div>
+          )}
+        </section>
       ) : isRunning || isPending ? (
         <div className="bg-surface border border-border rounded-xl p-10 text-center shadow-sm">
           <Loader2 size={24} className="animate-spin text-db-red mx-auto mb-3" />
@@ -800,17 +847,152 @@ function StepRow({ step, searchQuery }) {
             </p>
           )}
           {step.result_json && Object.keys(step.result_json).length > 0 && (
-            <details className="text-xs">
-              <summary className="text-text-tertiary cursor-pointer hover:text-text-secondary">Result JSON</summary>
-              <pre className="text-[10px] text-text-secondary bg-bg-subtle rounded-lg p-2.5 mt-1 overflow-x-auto max-h-32 font-mono">
-                {JSON.stringify(step.result_json, null, 2)}
-              </pre>
-            </details>
+            <ResultJsonDisplay resultJson={step.result_json} />
           )}
         </div>
       )}
     </div>
   );
+}
+
+function ResultJsonDisplay({ resultJson }) {
+  if (!resultJson || typeof resultJson !== 'object') return null;
+  const rj = resultJson;
+  const prompt = rj.prompt_name || '';
+
+  // Error display
+  if (rj.error) {
+    return (
+      <div className="text-xs bg-error-bg/50 rounded-lg p-2.5 border border-error/10">
+        <span className="text-error font-semibold">Error:</span>{' '}
+        <span className="text-text-secondary">{rj.error}</span>
+      </div>
+    );
+  }
+
+  // Use Case Generation
+  if (prompt.endsWith('_USE_CASE_GEN_PROMPT') && Array.isArray(rj.use_cases)) {
+    return (
+      <div className="text-xs space-y-1.5">
+        <div className="flex items-center gap-2">
+          <span className="px-1.5 py-0.5 rounded bg-success-bg text-success font-semibold text-[10px]">
+            {rj.use_cases_count || rj.use_cases.length} use cases
+          </span>
+          {rj.is_truncated && <span className="px-1.5 py-0.5 rounded bg-warning-bg text-warning text-[10px]">truncated</span>}
+        </div>
+        <div className="flex flex-wrap gap-1">
+          {rj.use_cases.slice(0, 10).map((uc, i) => (
+            <span key={i} className="px-2 py-0.5 rounded-full bg-bg-subtle text-text-secondary text-[10px] border border-border">
+              {uc.name || uc.Name || `#${uc.id}`}
+            </span>
+          ))}
+          {rj.use_cases.length > 10 && (
+            <span className="px-2 py-0.5 rounded-full bg-bg-subtle text-text-tertiary text-[10px]">
+              +{rj.use_cases.length - 10} more
+            </span>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // Scoring
+  if (prompt === 'COMBINED_VALUE_QUALITY_SCORE_PROMPT' && Array.isArray(rj.scored_use_cases)) {
+    return (
+      <div className="text-xs space-y-1.5">
+        <span className="px-1.5 py-0.5 rounded bg-info-bg text-info font-semibold text-[10px]">
+          {rj.scored_count || rj.scored_use_cases.length} scored
+        </span>
+        <div className="grid grid-cols-1 gap-0.5 max-h-28 overflow-y-auto">
+          {rj.scored_use_cases.slice(0, 8).map((sc, i) => (
+            <div key={i} className="flex items-center gap-2 text-[10px] py-0.5">
+              <span className="text-text-primary font-medium truncate flex-1">{sc.name || `#${sc.id}`}</span>
+              <span className={`px-1.5 py-0.5 rounded font-semibold ${
+                ['Ultra High', 'Very High', 'High'].includes(sc.priority) ? 'bg-db-red-50 text-db-red' : 'bg-bg-subtle text-text-secondary'
+              }`}>{sc.priority}</span>
+              <span className="text-text-tertiary">Q: {sc.quality}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  // Domain Clustering
+  if (prompt === 'DOMAIN_FINDER_PROMPT' && Array.isArray(rj.domains)) {
+    return (
+      <div className="text-xs space-y-1.5">
+        <span className="px-1.5 py-0.5 rounded bg-info-bg text-info font-semibold text-[10px]">
+          {rj.domains_count || rj.domains.length} domains
+        </span>
+        <div className="flex flex-wrap gap-1">
+          {rj.domains.map((d, i) => (
+            <span key={i} className="px-2 py-0.5 rounded-full bg-bg-subtle text-text-secondary text-[10px] border border-border">
+              {d.domain_name} ({(d.use_case_ids || []).length})
+            </span>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  // SQL Generation
+  if (prompt === 'USE_CASE_SQL_GEN_PROMPT' && rj.sql_preview) {
+    return (
+      <div className="text-xs space-y-1">
+        <span className="px-1.5 py-0.5 rounded bg-info-bg text-info font-semibold text-[10px]">SQL Generated</span>
+        <pre className="text-[10px] text-text-secondary bg-bg-subtle rounded p-2 font-mono max-h-20 overflow-hidden">
+          {rj.sql_preview.slice(0, 200)}{rj.sql_preview.length > 200 ? '...' : ''}
+        </pre>
+      </div>
+    );
+  }
+
+  // Summary
+  if (prompt === 'SUMMARY_GEN_PROMPT') {
+    return (
+      <div className="flex items-center gap-2 text-xs">
+        <span className="px-1.5 py-0.5 rounded bg-success-bg text-success font-semibold text-[10px]">Summary generated</span>
+        {rj.response_chars && <span className="text-text-tertiary text-[10px]">{rj.response_chars.toLocaleString()} chars</span>}
+      </div>
+    );
+  }
+
+  // Business Context
+  if (prompt === 'BUSINESS_CONTEXT_WORKER_PROMPT' && rj.json) {
+    const ctx = rj.json;
+    return (
+      <div className="text-xs space-y-1">
+        {ctx.business_context && (
+          <p className="text-text-secondary text-[10px] line-clamp-2">{ctx.business_context.slice(0, 200)}</p>
+        )}
+        {Array.isArray(ctx.strategic_goals) && ctx.strategic_goals.length > 0 && (
+          <div className="flex flex-wrap gap-1">
+            {ctx.strategic_goals.map((g, i) => (
+              <span key={i} className="px-1.5 py-0.5 rounded bg-bg-subtle text-text-secondary text-[10px]">{g}</span>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // Default: show key metrics as badges
+  const metricKeys = ['response_chars', 'rows_count', 'use_cases_count', 'scored_count', 'domains_count', 'batch_rows'];
+  const badges = metricKeys.filter((k) => rj[k] != null).map((k) => ({ key: k, val: rj[k] }));
+  if (badges.length > 0) {
+    return (
+      <div className="flex flex-wrap gap-1.5">
+        {badges.map((b) => (
+          <span key={b.key} className="px-1.5 py-0.5 rounded bg-bg-subtle text-text-tertiary text-[10px] font-mono">
+            {b.key.replace(/_/g, ' ')}: {typeof b.val === 'number' ? b.val.toLocaleString() : b.val}
+          </span>
+        ))}
+      </div>
+    );
+  }
+
+  return null;
 }
 
 function formatDuration(ms) {

@@ -204,6 +204,91 @@ function sqlResultToObjects(result) {
 }
 
 // ═══════════════════════════════════════════════════
+//  Auto-publish — seamless notebook deployment
+// ═══════════════════════════════════════════════════
+
+const NOTEBOOK_DEST = '/Shared/inspire_ai';
+let cachedNotebookPath = DEFAULT_NOTEBOOK_PATH || '';
+
+async function ensureNotebookPublished(host, token) {
+  // 1. If we already know the notebook path, verify it still exists
+  if (cachedNotebookPath) {
+    try {
+      const check = await dbFetch(host, token, `/api/2.0/workspace/get-status?path=${encodeURIComponent(cachedNotebookPath)}`);
+      if (check.ok) return cachedNotebookPath;
+    } catch (_) {}
+    // Path gone — re-publish
+    cachedNotebookPath = '';
+  }
+
+  // 2. Check if notebook already exists at the destination
+  try {
+    const check = await dbFetch(host, token, `/api/2.0/workspace/get-status?path=${encodeURIComponent(NOTEBOOK_DEST)}`);
+    if (check.ok) {
+      const data = await check.json();
+      if (data.object_type === 'NOTEBOOK') {
+        cachedNotebookPath = NOTEBOOK_DEST;
+        console.log(`📓 Notebook already exists: ${cachedNotebookPath}`);
+        return cachedNotebookPath;
+      }
+      if (data.object_type === 'DIRECTORY') {
+        const listResp = await dbFetch(host, token, `/api/2.0/workspace/list?path=${encodeURIComponent(NOTEBOOK_DEST)}`);
+        if (listResp.ok) {
+          const listData = await listResp.json();
+          const nb = (listData.objects || []).find(o => o.object_type === 'NOTEBOOK');
+          if (nb) {
+            cachedNotebookPath = nb.path;
+            console.log(`📓 Notebook found in folder: ${cachedNotebookPath}`);
+            return cachedNotebookPath;
+          }
+        }
+      }
+    }
+  } catch (_) {}
+
+  // 3. Publish the bundled DBC
+  if (!BUNDLED_DBC_PATH || !fs.existsSync(BUNDLED_DBC_PATH)) {
+    throw new Error('No bundled DBC file available to publish.');
+  }
+
+  console.log(`📦 Auto-publishing notebook to ${NOTEBOOK_DEST}...`);
+  const fileBuffer = fs.readFileSync(BUNDLED_DBC_PATH);
+  const base64Content = fileBuffer.toString('base64');
+
+  // Delete old if exists
+  try {
+    await dbFetch(host, token, '/api/2.0/workspace/delete', {
+      method: 'POST',
+      body: JSON.stringify({ path: NOTEBOOK_DEST, recursive: true }),
+    });
+  } catch (_) {}
+
+  const resp = await dbFetch(host, token, '/api/2.0/workspace/import', {
+    method: 'POST',
+    body: JSON.stringify({ path: NOTEBOOK_DEST, format: 'DBC', content: base64Content }),
+  });
+
+  if (!resp.ok) {
+    const err = await resp.text();
+    throw new Error(`Publish failed: ${err}`);
+  }
+
+  // Find the notebook inside the imported folder
+  cachedNotebookPath = NOTEBOOK_DEST;
+  try {
+    const listResp = await dbFetch(host, token, `/api/2.0/workspace/list?path=${encodeURIComponent(NOTEBOOK_DEST)}`);
+    if (listResp.ok) {
+      const listData = await listResp.json();
+      const nb = (listData.objects || []).find(o => o.object_type === 'NOTEBOOK');
+      if (nb) cachedNotebookPath = nb.path;
+    }
+  } catch (_) {}
+
+  console.log(`✅ Notebook published: ${cachedNotebookPath}`);
+  return cachedNotebookPath;
+}
+
+// ═══════════════════════════════════════════════════
 //  Basic endpoints
 // ═══════════════════════════════════════════════════
 
@@ -220,6 +305,16 @@ app.get('/api/health', (req, res) => {
     isDatabricksApp: hasForwardedToken || !!DATABRICKS_HOST,
     hasUserToken: hasForwardedToken,
   });
+});
+
+// Auto-publish and return the notebook path
+app.get('/api/notebook', requireToken, async (req, res) => {
+  try {
+    const nbPath = await ensureNotebookPublished(req.dbHost, req.dbToken);
+    res.json({ path: nbPath });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.get('/api/me', requireToken, async (req, res) => {
@@ -508,7 +603,12 @@ app.post('/api/run', requireToken, async (req, res) => {
 
     let resolvedPath = notebook_path || DEFAULT_NOTEBOOK_PATH;
     if (!resolvedPath) {
-      return res.status(400).json({ error: 'Notebook path is required. Publish the notebook first.' });
+      // Auto-publish seamlessly
+      try {
+        resolvedPath = await ensureNotebookPublished(req.dbHost, req.dbToken);
+      } catch (pubErr) {
+        return res.status(400).json({ error: `Could not auto-publish notebook: ${pubErr.message}` });
+      }
     }
 
     // Verify path points to a NOTEBOOK (DBC imports create folders)
@@ -747,6 +847,205 @@ app.get('/api/inspire/steps', requireToken, async (req, res) => {
   } catch (err) {
     if (err.message.includes('TABLE_OR_VIEW_NOT_FOUND') || err.message.includes('does not exist')) {
       return res.json({ steps: [], count: 0, message: 'Step table not yet created.' });
+    }
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Build progressive results from __inspire_step result_json (no need to wait for final results_json)
+app.get('/api/inspire/step-results', requireToken, async (req, res) => {
+  try {
+    const { inspire_database, warehouse_id, session_id } = req.query;
+    if (!inspire_database || !warehouse_id || !session_id) {
+      return res.status(400).json({ error: 'inspire_database, warehouse_id, and session_id required.' });
+    }
+
+    const [catalog, schema] = inspire_database.split('.');
+    const stepTable = `\`${catalog}\`.\`${schema}\`.\`__inspire_step\``;
+
+    // Fetch all ended_success steps that carry payload data
+    const sql = `SELECT step_id, stage_name, step_name, status, result_json FROM ${stepTable} WHERE session_id = ${session_id} AND status IN ('ended_success', 'ended_warning') ORDER BY last_updated, step_id`;
+
+    const result = await executeSql(req.dbHost, req.dbToken, warehouse_id, sql);
+    const steps = sqlResultToObjects(result);
+
+    // Parse result_json for each step
+    for (const step of steps) {
+      try {
+        if (step.result_json && typeof step.result_json === 'string') {
+          step.result_json = JSON.parse(step.result_json);
+        }
+      } catch { step.result_json = null; }
+    }
+
+    // ── Assemble progressive results from step payloads ──
+    // Use cases keyed by id to allow merging across phases
+    const ucMap = new Map();       // id → use case object
+    const domainsList = [];        // { domain_name, use_case_ids }
+    let executiveSummary = '';
+    let businessContext = null;
+
+    for (const step of steps) {
+      const rj = step.result_json;
+      if (!rj) continue;
+      const prompt = rj.prompt_name || '';
+
+      // 1) Use Case Generation (BASE, AI, STATS, UNSTRUCTURED)
+      if (prompt.endsWith('_USE_CASE_GEN_PROMPT') && Array.isArray(rj.use_cases)) {
+        for (const uc of rj.use_cases) {
+          if (!uc.id) continue;
+          const existing = ucMap.get(uc.id) || {};
+          ucMap.set(uc.id, {
+            ...existing,
+            No: uc.id,
+            Name: uc.name || existing.Name || '',
+            'Business Domain': uc.business_domain || existing['Business Domain'] || '',
+            Subdomain: uc.subdomain || existing.Subdomain || '',
+            type: uc.type || existing.type || '',
+            _source_prompt: prompt,
+          });
+        }
+      }
+
+      // 2) Domain Clustering
+      if (prompt === 'DOMAIN_FINDER_PROMPT' && Array.isArray(rj.domains)) {
+        for (const d of rj.domains) {
+          domainsList.push({
+            domain_name: d.domain_name || '',
+            use_case_ids: d.use_case_ids || [],
+          });
+        }
+      }
+
+      // 3) Scoring (COMBINED_VALUE_QUALITY_SCORE_PROMPT)
+      if (prompt === 'COMBINED_VALUE_QUALITY_SCORE_PROMPT' && Array.isArray(rj.scored_use_cases)) {
+        for (const sc of rj.scored_use_cases) {
+          if (!sc.id) continue;
+          const existing = ucMap.get(sc.id) || {};
+          ucMap.set(sc.id, {
+            ...existing,
+            No: sc.id,
+            Name: sc.name || existing.Name || '',
+            Priority: sc.priority || existing.Priority || '',
+            Quality: sc.quality || existing.Quality || '',
+            _value: sc.value || existing._value || '',
+            _feasibility: sc.feasibility || existing._feasibility || '',
+          });
+        }
+      }
+
+      // 4) Review / dedup (REVIEW_USE_CASES_PROMPT) — may contain full use case rows
+      if (prompt === 'REVIEW_USE_CASES_PROMPT' && Array.isArray(rj.rows)) {
+        for (const row of rj.rows) {
+          if (!row.No && !row.id) continue;
+          const id = String(row.No || row.id);
+          const existing = ucMap.get(id) || {};
+          ucMap.set(id, { ...existing, ...row, No: id });
+        }
+      }
+
+      // 5) SQL Generation
+      if (prompt === 'USE_CASE_SQL_GEN_PROMPT' && rj.sql_preview) {
+        // entity_id format: USE_CASE_SQL_GEN_PROMPT:SQL_Gen:uc_42
+        const ucIdMatch = (rj.entity_id || '').match(/uc_(\d+)/);
+        if (ucIdMatch) {
+          const id = ucIdMatch[1];
+          const existing = ucMap.get(id) || {};
+          ucMap.set(id, { ...existing, No: id, SQL: rj.sql_preview });
+        }
+      }
+
+      // 6) Summary
+      if (prompt === 'SUMMARY_GEN_PROMPT' && rj.response_chars) {
+        executiveSummary = rj.summary || executiveSummary;
+      }
+
+      // 7) Business Context
+      if (prompt === 'BUSINESS_CONTEXT_WORKER_PROMPT' && rj.json) {
+        businessContext = rj.json;
+      }
+
+      // 8) Translation rows — may carry full use case objects
+      if (prompt === 'USE_CASE_TRANSLATE_PROMPT' && Array.isArray(rj.rows)) {
+        for (const row of rj.rows) {
+          if (!row.No) continue;
+          const id = String(row.No);
+          const existing = ucMap.get(id) || {};
+          ucMap.set(id, { ...existing, ...row, No: id });
+        }
+      }
+    }
+
+    // ── Build domain → use_cases structure ──
+    const allUcs = Array.from(ucMap.values());
+
+    // Assign domains to use cases based on clustering
+    if (domainsList.length > 0) {
+      const idToDomain = {};
+      for (const d of domainsList) {
+        for (const ucId of d.use_case_ids) {
+          idToDomain[String(ucId)] = d.domain_name;
+        }
+      }
+      for (const uc of allUcs) {
+        if (!uc['Business Domain'] && idToDomain[String(uc.No)]) {
+          uc['Business Domain'] = idToDomain[String(uc.No)];
+        }
+      }
+    }
+
+    // Group use cases by domain
+    const domainMap = new Map();
+    for (const uc of allUcs) {
+      const dName = uc['Business Domain'] || 'Uncategorized';
+      if (!domainMap.has(dName)) domainMap.set(dName, []);
+      domainMap.get(dName).push(uc);
+    }
+
+    const domains = Array.from(domainMap.entries()).map(([domain_name, use_cases]) => ({
+      domain_name,
+      use_cases,
+    }));
+
+    const progressiveResults = {
+      title: businessContext ? `${businessContext.business_context || ''} Use Cases Catalog` : 'Use Cases Catalog (In Progress)',
+      executive_summary: executiveSummary || '',
+      domains_summary: domains.map(d => `${d.domain_name}: ${d.use_cases.length} use cases`).join(', '),
+      domains,
+      table_registry: {},
+      column_registry: {},
+      _progressive: true,
+      _use_case_count: allUcs.length,
+      _step_count: steps.length,
+    };
+
+    console.log(`   📊 step-results: ${allUcs.length} use cases from ${steps.length} steps, ${domains.length} domains`);
+    res.json({ results: progressiveResults, session_id });
+  } catch (err) {
+    if (err.message.includes('TABLE_OR_VIEW_NOT_FOUND') || err.message.includes('does not exist')) {
+      return res.json({ results: null, message: 'Step table not yet created.' });
+    }
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get use cases from __inspire_usecases table (final polished data)
+app.get('/api/inspire/usecases', requireToken, async (req, res) => {
+  try {
+    const { inspire_database, warehouse_id, session_id } = req.query;
+    if (!inspire_database || !warehouse_id || !session_id) {
+      return res.status(400).json({ error: 'inspire_database, warehouse_id, and session_id required.' });
+    }
+    const [catalog, schema] = inspire_database.split('.');
+    const table = `\`${catalog}\`.\`${schema}\`.\`__inspire_usecases\``;
+    const sql = `SELECT * FROM ${table} WHERE session_id = ${session_id} ORDER BY No`;
+    const result = await executeSql(req.dbHost, req.dbToken, warehouse_id, sql);
+    const rows = sqlResultToObjects(result);
+    console.log(`   📋 usecases: ${rows.length} rows for session ${session_id}`);
+    res.json({ usecases: rows, count: rows.length });
+  } catch (err) {
+    if (err.message.includes('TABLE_OR_VIEW_NOT_FOUND') || err.message.includes('does not exist')) {
+      return res.json({ usecases: [], count: 0, message: 'Usecases table not found.' });
     }
     res.status(500).json({ error: err.message });
   }
