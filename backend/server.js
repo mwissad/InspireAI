@@ -289,6 +289,148 @@ async function ensureNotebookPublished(host, token) {
 }
 
 // ═══════════════════════════════════════════════════
+//  Service Principal OAuth2 Token
+// ═══════════════════════════════════════════════════
+
+app.post('/api/auth/sp-token', async (req, res) => {
+  try {
+    const { client_id, client_secret, tenant_id, databricks_host } = req.body;
+    if (!client_id || !client_secret || !tenant_id || !databricks_host) {
+      return res.status(400).json({ error: 'client_id, client_secret, tenant_id, and databricks_host required.' });
+    }
+
+    // Azure AD OAuth2 client credentials flow
+    const tokenUrl = `https://login.microsoftonline.com/${tenant_id}/oauth2/v2.0/token`;
+    // The scope for Databricks is the host + /.default
+    const scope = `${databricks_host.replace(/\/$/, '')}/.default`;
+
+    const body = new URLSearchParams({
+      grant_type: 'client_credentials',
+      client_id,
+      client_secret,
+      scope,
+    });
+
+    const resp = await fetch(tokenUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body.toString(),
+    });
+
+    if (!resp.ok) {
+      const errText = await resp.text();
+      console.error(`SP token failed (${resp.status}): ${errText.substring(0, 200)}`);
+      return res.status(resp.status).json({ error: `Azure AD token request failed: ${errText}` });
+    }
+
+    const data = await resp.json();
+    console.log('✅ SP token obtained successfully');
+    res.json({ access_token: data.access_token, expires_in: data.expires_in });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════
+//  Workspace File Operations (list & download artifacts)
+// ═══════════════════════════════════════════════════
+
+app.get('/api/workspace/list', requireToken, async (req, res) => {
+  try {
+    const wsPath = req.query.path;
+    if (!wsPath) return res.status(400).json({ error: 'path query param required.' });
+
+    // Handle Volumes paths via Files API
+    if (wsPath.startsWith('/Volumes/')) {
+      const response = await dbFetch(req.dbHost, req.dbToken, `/api/2.0/fs/directories${wsPath}`);
+      if (!response.ok) {
+        const err = await response.text();
+        return res.status(response.status).json({ error: err });
+      }
+      const data = await response.json();
+      const contents = (data.contents || []).map(f => ({
+        path: f.path,
+        name: f.name || f.path.split('/').pop(),
+        is_directory: f.is_directory || false,
+        file_size: f.file_size || 0,
+      }));
+      return res.json({ files: contents });
+    }
+
+    // Workspace paths
+    const response = await dbFetch(req.dbHost, req.dbToken, `/api/2.0/workspace/list?path=${encodeURIComponent(wsPath)}`);
+    if (!response.ok) {
+      const err = await response.text();
+      return res.status(response.status).json({ error: err });
+    }
+    const data = await response.json();
+    const files = (data.objects || []).map(o => ({
+      path: o.path,
+      name: o.path.split('/').pop(),
+      is_directory: o.object_type === 'DIRECTORY',
+      object_type: o.object_type,
+      file_size: o.size || 0,
+    }));
+    res.json({ files });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/workspace/export', requireToken, async (req, res) => {
+  try {
+    const wsPath = req.query.path;
+    if (!wsPath) return res.status(400).json({ error: 'path query param required.' });
+
+    // Handle Volumes paths via Files API (direct download)
+    if (wsPath.startsWith('/Volumes/')) {
+      const response = await dbFetch(req.dbHost, req.dbToken, `/api/2.0/fs/files${wsPath}`);
+      if (!response.ok) {
+        const err = await response.text();
+        return res.status(response.status).json({ error: err });
+      }
+      const fileName = wsPath.split('/').pop();
+      res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+      const buffer = Buffer.from(await response.arrayBuffer());
+      return res.send(buffer);
+    }
+
+    // Workspace paths — try export with format=AUTO (base64 JSON response)
+    const fileName = wsPath.split('/').pop();
+
+    // First try: JSON export with base64 content
+    const resp1 = await dbFetch(req.dbHost, req.dbToken, `/api/2.0/workspace/export?path=${encodeURIComponent(wsPath)}&format=AUTO`);
+    if (resp1.ok) {
+      const contentType = resp1.headers.get('content-type') || '';
+      if (contentType.includes('application/json')) {
+        const data = await resp1.json();
+        if (data.content) {
+          const buffer = Buffer.from(data.content, 'base64');
+          res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+          return res.send(buffer);
+        }
+      }
+      // If direct_download returned raw bytes
+      const buffer = Buffer.from(await resp1.arrayBuffer());
+      res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+      return res.send(buffer);
+    }
+
+    // Second try: direct_download=true
+    const resp2 = await dbFetch(req.dbHost, req.dbToken, `/api/2.0/workspace/export?path=${encodeURIComponent(wsPath)}&direct_download=true`);
+    if (!resp2.ok) {
+      const err = await resp2.text();
+      return res.status(resp2.status).json({ error: err });
+    }
+    res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+    const buffer = Buffer.from(await resp2.arrayBuffer());
+    res.send(buffer);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════
 //  Basic endpoints
 // ═══════════════════════════════════════════════════
 
@@ -1130,7 +1272,7 @@ app.get('/api/inspire/sessions', requireToken, async (req, res) => {
 
     const [catalog, schema] = inspire_database.split('.');
     const table = `\`${catalog}\`.\`${schema}\`.\`__inspire_session\``;
-    const sql = `SELECT session_id, processing_status, completed_percent, create_at, completed_on, business_name, inspire_database_name, operation_mode FROM ${table} ORDER BY create_at DESC LIMIT 20`;
+    const sql = `SELECT session_id, processing_status, completed_percent, create_at, completed_on, business_name, inspire_database_name, operation_mode, generation_path FROM ${table} ORDER BY create_at DESC LIMIT 20`;
 
     const result = await executeSql(req.dbHost, req.dbToken, warehouse_id, sql);
     const sessions = sqlResultToObjects(result);
@@ -1139,8 +1281,10 @@ app.get('/api/inspire/sessions', requireToken, async (req, res) => {
       // Reconstruct minimal widget_values for frontend compatibility
       s.widget_values = {
         business: s.business_name || '',
+        '00_business_name': s.business_name || '',
         inspire_database: s.inspire_database_name || '',
         operation_mode: s.operation_mode || '',
+        generation_path: s.generation_path || '',
       };
       s.completed_percent = parseFloat(s.completed_percent) || 0;
     }

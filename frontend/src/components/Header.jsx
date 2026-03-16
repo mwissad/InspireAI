@@ -31,7 +31,7 @@ export default function Header({
             className="flex items-center gap-2.5 group"
           >
             <DatabricksLogo className="w-7 h-7" />
-            <span className="text-text-primary font-semibold text-[15px] tracking-tight">
+            <span className="text-text-primary font-bold text-xl tracking-tight">
               Inspire AI
             </span>
             <span className="text-[10px] font-medium text-text-tertiary border border-border rounded px-1.5 py-0.5 ml-0.5">

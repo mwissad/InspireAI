@@ -58,6 +58,10 @@ export default function App() {
     notebookPath: localStorage.getItem('db_notebook_path') || '',
     warehouseId: localStorage.getItem('db_warehouse_id') || '',
     inspireDatabase: localStorage.getItem('db_inspire_database') || '',
+    authMode: localStorage.getItem('db_auth_mode') || 'pat',
+    spClientId: localStorage.getItem('db_sp_client_id') || '',
+    spClientSecret: localStorage.getItem('db_sp_client_secret') || '',
+    spTenantId: localStorage.getItem('db_sp_tenant_id') || '',
   }));
 
   // Session tracking
@@ -82,7 +86,34 @@ export default function App() {
     localStorage.setItem('db_notebook_path', settings.notebookPath);
     localStorage.setItem('db_warehouse_id', settings.warehouseId);
     localStorage.setItem('db_inspire_database', settings.inspireDatabase);
+    localStorage.setItem('db_auth_mode', settings.authMode);
+    localStorage.setItem('db_sp_client_id', settings.spClientId);
+    localStorage.setItem('db_sp_client_secret', settings.spClientSecret);
+    localStorage.setItem('db_sp_tenant_id', settings.spTenantId);
   }, [settings]);
+
+  // Auto-fetch SP token when in SP mode
+  useEffect(() => {
+    if (settings.authMode !== 'sp' || !settings.spClientId || !settings.spClientSecret || !settings.spTenantId || !settings.databricksHost) return;
+    (async () => {
+      try {
+        const resp = await fetch('/api/auth/sp-token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            client_id: settings.spClientId,
+            client_secret: settings.spClientSecret,
+            tenant_id: settings.spTenantId,
+            databricks_host: settings.databricksHost,
+          }),
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          if (data.access_token) update('token', data.access_token);
+        }
+      } catch { /* silent */ }
+    })();
+  }, [settings.authMode, settings.spClientId, settings.spClientSecret, settings.spTenantId, settings.databricksHost]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const nav = (p) => setPage(p);
 

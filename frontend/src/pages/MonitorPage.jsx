@@ -17,6 +17,8 @@ import {
   Eye,
   EyeOff,
   Layers,
+  Target,
+  Building2,
 } from 'lucide-react';
 
 // Run lifecycle phases
@@ -55,6 +57,10 @@ export default function MonitorPage({ settings, sessionId, runId, onComplete }) 
   const [showFilters, setShowFilters] = useState(false);
   const [autoScroll, setAutoScroll] = useState(true);
   const stepsEndRef = useRef(null);
+
+  // Results preview state
+  const [previewResults, setPreviewResults] = useState(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
 
   const apiFetch = useCallback(
     async (url, opts = {}) => {
@@ -176,6 +182,20 @@ export default function MonitorPage({ settings, sessionId, runId, onComplete }) 
   else if (runPhase === PHASE_TERMINATED && runInfo?.result_state === 'SUCCESS' && !session?.completed_on) { statusLabel = 'Finalizing'; statusDetail = 'Run completed, waiting for results...'; }
 
   const elapsed = runInfo?.execution_duration ? formatDuration(runInfo.execution_duration) : null;
+
+  // Fetch results preview when pipeline completes
+  useEffect(() => {
+    if (!isComplete || !warehouseId || !inspireDatabase || !sessionId) return;
+    if (previewResults) return; // already loaded
+    setPreviewLoading(true);
+    const q = new URLSearchParams({ inspire_database: inspireDatabase, warehouse_id: warehouseId, session_id: String(sessionId) });
+    apiFetch(`/api/inspire/usecases?${q}`)
+      .then((data) => {
+        if (data.usecases?.length > 0) setPreviewResults(data.usecases);
+      })
+      .catch(() => {})
+      .finally(() => setPreviewLoading(false));
+  }, [isComplete, warehouseId, inspireDatabase, sessionId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Group steps by stage, applying filters
   const { stages, stageNames, filteredCount, totalCount, statusCounts } = useMemo(() => {
@@ -714,27 +734,86 @@ export default function MonitorPage({ settings, sessionId, runId, onComplete }) 
 
       {/* ═══ Complete Action ═══ */}
       {isComplete && (
-        <div className="mt-6 bg-success-bg border border-success/20 rounded-xl p-5 flex items-center justify-between shadow-sm">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-success/10 flex items-center justify-center">
-              <CheckCircle2 size={22} className="text-success" />
+        <div className="mt-6 space-y-4">
+          <div className="bg-success-bg border border-success/20 rounded-xl p-5 flex items-center justify-between shadow-sm">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-success/10 flex items-center justify-center">
+                <CheckCircle2 size={22} className="text-success" />
+              </div>
+              <div>
+                <p className="text-sm font-bold text-text-primary">Pipeline completed successfully</p>
+                <p className="text-xs text-text-secondary mt-0.5">
+                  Results are ready for review.
+                  {elapsed && ` Total execution time: ${elapsed}.`}
+                  {totalCount > 0 && ` ${totalCount} steps processed.`}
+                </p>
+              </div>
             </div>
-            <div>
-              <p className="text-sm font-bold text-text-primary">Pipeline completed successfully</p>
-              <p className="text-xs text-text-secondary mt-0.5">
-                Results are ready for review.
-                {elapsed && ` Total execution time: ${elapsed}.`}
-                {totalCount > 0 && ` ${totalCount} steps processed.`}
-              </p>
-            </div>
+            <button
+              onClick={onComplete}
+              className="inline-flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-db-red to-db-red-hover text-white text-sm font-bold rounded-xl hover:shadow-md transition-smooth"
+            >
+              View Results
+              <ArrowRight size={14} />
+            </button>
           </div>
-          <button
-            onClick={onComplete}
-            className="inline-flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-db-red to-db-red-hover text-white text-sm font-bold rounded-xl hover:shadow-md transition-smooth"
-          >
-            View Results
-            <ArrowRight size={14} />
-          </button>
+
+          {/* Results Preview */}
+          {previewLoading && (
+            <div className="bg-surface border border-border rounded-xl p-6 text-center">
+              <Loader2 size={16} className="animate-spin text-text-tertiary mx-auto mb-2" />
+              <p className="text-xs text-text-secondary">Loading results preview...</p>
+            </div>
+          )}
+          {previewResults && previewResults.length > 0 && (
+            <div className="bg-surface border border-border rounded-xl overflow-hidden shadow-sm">
+              <div className="px-4 py-3 border-b border-border bg-gradient-to-r from-db-red-50 to-surface flex items-center gap-2">
+                <Target size={14} className="text-db-red" />
+                <span className="text-xs font-bold text-text-primary">Results Preview</span>
+                <span className="text-[10px] text-text-tertiary ml-auto">
+                  {previewResults.length} use cases &middot; {[...new Set(previewResults.map(uc => uc['Business Domain'] || uc.domain).filter(Boolean))].length} domains
+                </span>
+              </div>
+              <div className="max-h-72 overflow-y-auto divide-y divide-border">
+                {previewResults.slice(0, 10).map((uc, i) => {
+                  const name = uc.Name || uc.use_case_name || uc.name || `Use Case ${i + 1}`;
+                  const domain = uc['Business Domain'] || uc.domain || '';
+                  const priority = uc.Priority || uc.priority || '';
+                  const priorityLower = priority.toLowerCase();
+                  const priBadge = priorityLower.includes('ultra') || priorityLower.includes('very high')
+                    ? 'text-db-red bg-db-red-50'
+                    : priorityLower.includes('high')
+                      ? 'text-error bg-error-bg'
+                      : priorityLower.includes('medium')
+                        ? 'text-warning bg-warning-bg'
+                        : 'text-text-secondary bg-bg';
+                  return (
+                    <div key={uc.No || i} className="flex items-center gap-3 px-4 py-2.5">
+                      <span className="text-[10px] font-mono text-text-tertiary w-5 shrink-0">#{uc.No || i + 1}</span>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-xs font-medium text-text-primary truncate">{name}</p>
+                        {domain && (
+                          <p className="text-[10px] text-text-tertiary flex items-center gap-1 mt-0.5">
+                            <Building2 size={8} /> {domain}
+                          </p>
+                        )}
+                      </div>
+                      {priority && (
+                        <span className={`text-[9px] font-semibold px-2 py-0.5 rounded-full shrink-0 ${priBadge}`}>
+                          {priority}
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+              {previewResults.length > 10 && (
+                <div className="px-4 py-2 bg-bg border-t border-border text-center">
+                  <span className="text-[10px] text-text-tertiary font-medium">+{previewResults.length - 10} more use cases</span>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
     </div>

@@ -33,12 +33,12 @@ const CAPABILITIES = [
 
 export default function LandingPage({ onStart }) {
   return (
-    <div className="min-h-screen bg-[#fafafa] flex flex-col overflow-hidden">
+    <div className="h-screen bg-[#fafafa] flex flex-col overflow-hidden">
       {/* Top bar */}
       <div className="relative z-20 border-b border-black/5 bg-white/80 backdrop-blur-md px-6 py-3">
         <div className="max-w-6xl mx-auto flex items-center gap-2.5">
           <DatabricksLogo className="w-7 h-7" />
-          <span className="font-bold text-[15px] text-gray-900 tracking-tight">
+          <span className="font-bold text-xl text-gray-900 tracking-tight">
             Inspire AI
           </span>
           <span className="text-[10px] font-semibold text-[#FF3621] border border-[#FF3621]/20 bg-[#FF3621]/5 rounded px-1.5 py-0.5">
@@ -48,7 +48,7 @@ export default function LandingPage({ onStart }) {
       </div>
 
       {/* ═══ Hero Section with 3D Scene ═══ */}
-      <div className="relative flex-1 flex items-center justify-center min-h-[520px]">
+      <div className="relative flex-1 flex items-center justify-center">
         {/* 3D Scene Background */}
         <Suspense fallback={null}>
           <HeroScene3D className="absolute inset-0 z-0" />
@@ -61,7 +61,7 @@ export default function LandingPage({ onStart }) {
         {/* Hero Content */}
         <div className="relative z-10 max-w-2xl text-center px-6">
           {/* Badge */}
-          <div className="inline-flex items-center gap-2 px-4 py-1.5 bg-white/90 backdrop-blur-sm border border-[#FF3621]/15 rounded-full mb-6 shadow-sm">
+          <div className="inline-flex items-center gap-2 px-4 py-1.5 bg-white/90 backdrop-blur-sm border border-[#FF3621]/15 rounded-full mb-4 shadow-sm">
             <span className="relative flex h-2 w-2">
               <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#FF3621] opacity-60" />
               <span className="relative inline-flex rounded-full h-2 w-2 bg-[#FF3621]" />
@@ -72,21 +72,24 @@ export default function LandingPage({ onStart }) {
           </div>
 
           {/* Title */}
-          <h1 className="text-5xl font-extrabold text-gray-900 leading-[1.1] mb-5 tracking-tight">
-            Discover analytics
+          <h1 className="text-5xl font-extrabold text-gray-900 leading-[1.1] mb-4 tracking-tight">
+            Discover{' '}
+            <span className="bg-gradient-to-r from-[#FF3621] to-[#FF6B50] bg-clip-text text-transparent">
+              AI
+            </span>{' '}
+            analytics
+            <br />
+            use cases from your
             <br />
             <span className="bg-gradient-to-r from-[#FF3621] to-[#FF6B50] bg-clip-text text-transparent">
-              use cases
-            </span>{' '}
-            from your
-            <br />
-            data catalog
+              Databricks Unity Catalog
+            </span>
           </h1>
 
           {/* Subtitle */}
-          <p className="text-lg text-gray-500 mb-8 max-w-lg mx-auto leading-relaxed font-medium drop-shadow-[0_1px_2px_rgba(255,255,255,0.8)]">
-            Leverage AI to analyze your Unity Catalog metadata and generate
-            prioritized, implementation-ready analytics use cases.
+          <p className="text-lg text-gray-500 mb-6 max-w-lg mx-auto leading-relaxed font-medium drop-shadow-[0_1px_2px_rgba(255,255,255,0.8)]">
+            AI-powered discovery and prioritization of analytics use cases
+            from your Unity Catalog metadata — implementation-ready.
           </p>
 
           {/* CTA + Capability pills */}
@@ -116,29 +119,29 @@ export default function LandingPage({ onStart }) {
 
       {/* ═══ Features ═══ */}
       <div className="relative z-10 border-t border-gray-200/60 bg-white">
-        <div className="max-w-5xl mx-auto px-6 py-14">
-          <div className="text-center mb-10">
-            <h2 className="text-sm font-bold text-[#FF3621] uppercase tracking-widest mb-2">
+        <div className="max-w-5xl mx-auto px-6 py-4">
+          <div className="text-center mb-3">
+            <h2 className="text-[10px] font-bold text-[#FF3621] uppercase tracking-widest mb-1">
               Capabilities
             </h2>
-            <p className="text-2xl font-bold text-gray-900">
+            <p className="text-lg font-bold text-gray-900">
               Everything you need to unlock data value
             </p>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             {FEATURES.map((f) => (
               <div
                 key={f.title}
-                className="group relative bg-gradient-to-br from-gray-50 to-white border border-gray-200/60 rounded-2xl p-6 hover:border-[#FF3621]/20 hover:shadow-lg hover:shadow-[#FF3621]/5 transition-all duration-300"
+                className="group relative bg-gradient-to-br from-gray-50 to-white border border-gray-200/60 rounded-xl p-4 hover:border-[#FF3621]/20 hover:shadow-lg hover:shadow-[#FF3621]/5 transition-all duration-300"
               >
-                <div className="inline-flex items-center justify-center w-11 h-11 rounded-xl bg-gradient-to-br from-[#FF3621]/10 to-[#FF3621]/5 mb-4 group-hover:from-[#FF3621]/15 group-hover:to-[#FF3621]/10 transition-all">
-                  <f.icon size={20} className="text-[#FF3621]" />
+                <div className="inline-flex items-center justify-center w-9 h-9 rounded-lg bg-gradient-to-br from-[#FF3621]/10 to-[#FF3621]/5 mb-2 group-hover:from-[#FF3621]/15 group-hover:to-[#FF3621]/10 transition-all">
+                  <f.icon size={16} className="text-[#FF3621]" />
                 </div>
-                <h3 className="text-sm font-bold text-gray-900 mb-2">
+                <h3 className="text-xs font-bold text-gray-900 mb-1">
                   {f.title}
                 </h3>
-                <p className="text-sm text-gray-500 leading-relaxed">
+                <p className="text-xs text-gray-500 leading-relaxed">
                   {f.desc}
                 </p>
               </div>
@@ -148,7 +151,7 @@ export default function LandingPage({ onStart }) {
       </div>
 
       {/* Footer */}
-      <div className="relative z-10 border-t border-gray-200/60 bg-gray-50 px-6 py-4">
+      <div className="relative z-10 border-t border-gray-200/60 bg-gray-50 px-6 py-2">
         <div className="max-w-5xl mx-auto flex items-center justify-between">
           <span className="text-[11px] text-gray-400 font-medium">
             Powered by Databricks

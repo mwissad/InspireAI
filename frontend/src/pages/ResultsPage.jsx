@@ -4,6 +4,7 @@ import {
   AlertCircle,
   Search,
   ChevronDown,
+  ChevronRight,
   FileText,
   BarChart3,
   Target,
@@ -20,6 +21,7 @@ import {
   CheckCircle2,
   Copy,
   Check,
+  FolderOpen,
 } from 'lucide-react';
 
 /* ── Priority sort order ── */
@@ -40,6 +42,17 @@ const TYPE_ICONS = {
   Problem: '🔍',
   Improvement: '📈',
 };
+
+/* ── Date formatter for session display ── */
+function formatSessionDate(dateStr) {
+  if (!dateStr) return '';
+  try {
+    const d = new Date(dateStr);
+    if (isNaN(d.getTime())) return dateStr.slice(0, 16);
+    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) +
+      ' ' + d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+  } catch { return dateStr.slice(0, 16); }
+}
 
 /* ── Pipeline stages for execution summary ── */
 const PIPELINE_STAGES = [
@@ -73,9 +86,24 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
   // Filters & sort
   const [searchQuery, setSearchQuery] = useState('');
   const [filterDomain, setFilterDomain] = useState('all');
+  const [filterSubdomain, setFilterSubdomain] = useState('all');
   const [filterPriority, setFilterPriority] = useState('all');
   const [filterType, setFilterType] = useState('all');
+  const [filterTechnique, setFilterTechnique] = useState('all');
+  const [filterAlignment, setFilterAlignment] = useState('all');
+  const [filterGoalsAlignment, setFilterGoalsAlignment] = useState('all');
+  const [filterQuality, setFilterQuality] = useState('all');
   const [sortBy, setSortBy] = useState('priority');
+
+  // Subdomain expansion state
+  const [expandedDomains, setExpandedDomains] = useState({});
+
+  // Artifacts state — tree-based with expandable folders
+  const [artifactTree, setArtifactTree] = useState({}); // { [path]: { files: [], loading, error } }
+  const [artifactsRootFiles, setArtifactsRootFiles] = useState(null);
+  const [artifactsLoading, setArtifactsLoading] = useState(false);
+  const [artifactsExpanded, setArtifactsExpanded] = useState(false);
+  const [expandedFolders, setExpandedFolders] = useState({});
 
   // Only one card expanded at a time
   const [expandedUseCase, setExpandedUseCase] = useState(null);
@@ -228,9 +256,14 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
       .filter((uc) => {
         if (!uc || typeof uc !== 'object') return false;
         if (filterDomain !== 'all' && uc._domain !== filterDomain) return false;
+        if (filterSubdomain !== 'all' && String(uc.Subdomain || '') !== filterSubdomain) return false;
         if (filterPriority !== 'all' && uc.Priority !== filterPriority)
           return false;
         if (filterType !== 'all' && uc.type !== filterType) return false;
+        if (filterTechnique !== 'all' && String(uc['Analytics Technique'] || '') !== filterTechnique) return false;
+        if (filterAlignment !== 'all' && String(uc['Business Priority Alignment'] || '') !== filterAlignment) return false;
+        if (filterGoalsAlignment !== 'all' && String(uc['Strategic Goals Alignment'] || '') !== filterGoalsAlignment) return false;
+        if (filterQuality !== 'all' && String(uc.Quality || '') !== filterQuality) return false;
         if (searchQuery) {
           const q = searchQuery.toLowerCase();
           return (
@@ -267,6 +300,28 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
   const types = [
     ...new Set(allUseCases.map((uc) => uc?.type).filter(Boolean)),
   ];
+  const techniques = [
+    ...new Set(allUseCases.map((uc) => uc?.['Analytics Technique']).filter(Boolean)),
+  ];
+  const alignments = [
+    ...new Set(allUseCases.map((uc) => uc?.['Business Priority Alignment']).filter(Boolean)),
+  ];
+  const goalsAlignments = [
+    ...new Set(allUseCases.map((uc) => uc?.['Strategic Goals Alignment']).filter(Boolean)),
+  ];
+  const qualities = [
+    ...new Set(allUseCases.map((uc) => uc?.Quality).filter(Boolean)),
+  ];
+
+  // Compute subdomain counts by domain
+  const subdomainsByDomain = {};
+  for (const uc of allUseCases) {
+    const d = uc?._domain || 'Unknown';
+    const sd = String(uc?.Subdomain || '');
+    if (!sd) continue;
+    if (!subdomainsByDomain[d]) subdomainsByDomain[d] = {};
+    subdomainsByDomain[d][sd] = (subdomainsByDomain[d][sd] || 0) + 1;
+  }
 
   // ── Export to JSON ──
   const handleExport = () => {
@@ -288,7 +343,98 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
     domainCounts[d] = (domainCounts[d] || 0) + 1;
   }
 
-  const hasActiveFilters = searchQuery || filterDomain !== 'all' || filterPriority !== 'all' || filterType !== 'all';
+  const hasActiveFilters = searchQuery || filterDomain !== 'all' || filterSubdomain !== 'all' || filterPriority !== 'all' || filterType !== 'all' || filterTechnique !== 'all' || filterAlignment !== 'all' || filterGoalsAlignment !== 'all' || filterQuality !== 'all';
+
+  const clearAllFilters = () => {
+    setSearchQuery(''); setFilterDomain('all'); setFilterSubdomain('all');
+    setFilterPriority('all'); setFilterType('all'); setFilterTechnique('all');
+    setFilterAlignment('all'); setFilterGoalsAlignment('all'); setFilterQuality('all');
+  };
+
+  // Load generation artifacts — tries multiple path variations
+  const artifactHeaders = useCallback(() => {
+    const h = { Authorization: `Bearer ${token}`, 'X-DB-PAT-Token': token };
+    if (databricksHost) h['X-Databricks-Host'] = databricksHost;
+    return h;
+  }, [token, databricksHost]);
+
+  const loadArtifacts = useCallback(async (genPath) => {
+    if (!genPath || !token) return;
+    setArtifactsLoading(true);
+    setArtifactsRootFiles(null);
+    const headers = artifactHeaders();
+
+    // Build candidate paths: original, absolute workspace, Volumes
+    const candidates = [genPath];
+    if (!genPath.startsWith('/')) {
+      candidates.push(`/Workspace/${genPath.replace(/^\.\//, '')}`);
+      candidates.push(`/Shared/${genPath.replace(/^\.\//, '')}`);
+    }
+
+    for (const path of candidates) {
+      try {
+        const resp = await fetch(`/api/workspace/list?path=${encodeURIComponent(path)}`, { headers });
+        if (resp.ok) {
+          const data = await resp.json();
+          if (data.files && data.files.length > 0) {
+            setArtifactsRootFiles(data.files);
+            setArtifactsLoading(false);
+            return;
+          }
+        }
+      } catch { /* try next */ }
+    }
+    setArtifactsRootFiles([]);
+    setArtifactsLoading(false);
+  }, [token, databricksHost, artifactHeaders]);
+
+  const loadFolder = useCallback(async (folderPath) => {
+    if (!folderPath || !token) return;
+    setArtifactTree(prev => ({ ...prev, [folderPath]: { files: [], loading: true, error: null } }));
+    const headers = artifactHeaders();
+    try {
+      const resp = await fetch(`/api/workspace/list?path=${encodeURIComponent(folderPath)}`, { headers });
+      if (resp.ok) {
+        const data = await resp.json();
+        setArtifactTree(prev => ({ ...prev, [folderPath]: { files: data.files || [], loading: false, error: null } }));
+      } else {
+        setArtifactTree(prev => ({ ...prev, [folderPath]: { files: [], loading: false, error: 'Could not list folder' } }));
+      }
+    } catch {
+      setArtifactTree(prev => ({ ...prev, [folderPath]: { files: [], loading: false, error: 'Network error' } }));
+    }
+  }, [token, artifactHeaders]);
+
+  const toggleFolder = useCallback((folderPath) => {
+    setExpandedFolders(prev => {
+      const next = { ...prev, [folderPath]: !prev[folderPath] };
+      // Load folder contents if expanding and not yet loaded
+      if (next[folderPath] && !artifactTree[folderPath]) {
+        loadFolder(folderPath);
+      }
+      return next;
+    });
+  }, [artifactTree, loadFolder]);
+
+  const downloadFile = useCallback((filePath, fileName) => {
+    const headers = artifactHeaders();
+    fetch(`/api/workspace/export?path=${encodeURIComponent(filePath)}`, { headers })
+      .then(resp => {
+        if (!resp.ok) throw new Error('Download failed');
+        return resp.blob();
+      })
+      .then(blob => {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = fileName; a.click();
+        URL.revokeObjectURL(url);
+      })
+      .catch(() => { /* silent */ });
+  }, [artifactHeaders]);
+
+  // Find generation path from selected session
+  const selectedSession = sessions.find(s => String(s.session_id) === String(selectedSessionId));
+  const generationPath = selectedSession?.generation_path || selectedSession?.widget_values?.generation_path || '';
 
   const highPriorityCount = allUseCases.filter((uc) => ['Ultra High', 'Very High', 'High'].includes(String(uc?.Priority || ''))).length;
 
@@ -468,16 +614,12 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
                         <span className="text-sm font-semibold text-text-primary">
                           {s.widget_values?.['00_business_name'] ||
                             s.widget_values?.business ||
-                            'Session'}{' '}
-                          — {s.session_id}
+                            'Session'}
                         </span>
                         <div className="text-[10px] text-text-tertiary flex items-center gap-3 mt-1">
                           <span className="flex items-center gap-1">
                             <Calendar size={9} />{' '}
-                            {s.create_at?.slice(0, 19) || 'Unknown'}
-                          </span>
-                          <span>
-                            Progress: {Math.round(s.completed_percent)}%
+                            {formatSessionDate(s.create_at)}
                           </span>
                         </div>
                       </div>
@@ -619,6 +761,149 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
             </div>
           )}
 
+          {/* Artifacts Panel (feature 7) */}
+          {!isProgressive && generationPath && (() => {
+            // Recursive file tree renderer
+            const renderFileTree = (files, depth = 0) => (
+              <div className={depth > 0 ? 'ml-4 border-l border-border/50 pl-2' : ''}>
+                {files.map((f) => {
+                  const isDir = f.is_directory;
+                  const isOpen = expandedFolders[f.path];
+                  const folderData = artifactTree[f.path];
+                  return (
+                    <div key={f.path}>
+                      <div
+                        className={`flex items-center gap-2 py-1.5 px-2 rounded-md hover:bg-bg-subtle transition-smooth ${isDir ? 'cursor-pointer' : ''}`}
+                        onClick={isDir ? () => toggleFolder(f.path) : undefined}
+                      >
+                        {isDir ? (
+                          <>
+                            <ChevronRight size={10} className={`text-text-tertiary transition-transform duration-200 shrink-0 ${isOpen ? 'rotate-90' : ''}`} />
+                            <FolderOpen size={12} className="text-warning shrink-0" />
+                          </>
+                        ) : (
+                          <>
+                            <span className="w-[10px]" />
+                            <FileText size={12} className="text-text-tertiary shrink-0" />
+                          </>
+                        )}
+                        <span className="text-xs text-text-primary font-mono truncate flex-1">{f.name}</span>
+                        {f.file_size > 0 && (
+                          <span className="text-[9px] text-text-tertiary">
+                            {f.file_size >= 1024 * 1024
+                              ? `${(f.file_size / (1024 * 1024)).toFixed(1)}MB`
+                              : `${(f.file_size / 1024).toFixed(0)}KB`}
+                          </span>
+                        )}
+                        {!isDir && (
+                          <button
+                            type="button"
+                            className="text-[10px] text-db-red hover:underline font-medium flex items-center gap-0.5 shrink-0"
+                            onClick={(e) => { e.stopPropagation(); downloadFile(f.path, f.name); }}
+                          >
+                            <Download size={10} /> Download
+                          </button>
+                        )}
+                        {isDir && (
+                          <button
+                            type="button"
+                            className="text-[10px] text-info hover:underline font-medium flex items-center gap-0.5 shrink-0"
+                            onClick={(e) => { e.stopPropagation(); downloadFile(f.path, `${f.name}.zip`); }}
+                            title="Download folder"
+                          >
+                            <Download size={10} />
+                          </button>
+                        )}
+                      </div>
+                      {isDir && isOpen && (
+                        <div>
+                          {folderData?.loading && (
+                            <div className="flex items-center gap-2 py-2 ml-6">
+                              <Loader2 size={10} className="animate-spin text-text-tertiary" />
+                              <span className="text-[10px] text-text-secondary">Loading...</span>
+                            </div>
+                          )}
+                          {folderData?.error && (
+                            <div className="ml-6 py-1">
+                              <span className="text-[10px] text-text-tertiary">{folderData.error}</span>
+                              <button type="button" onClick={(e) => { e.stopPropagation(); loadFolder(f.path); }} className="ml-2 text-[10px] text-db-red hover:underline">Retry</button>
+                            </div>
+                          )}
+                          {folderData && !folderData.loading && !folderData.error && folderData.files.length === 0 && (
+                            <div className="ml-6 py-1">
+                              <span className="text-[10px] text-text-tertiary italic">Empty folder</span>
+                            </div>
+                          )}
+                          {folderData && !folderData.loading && folderData.files.length > 0 && renderFileTree(folderData.files, depth + 1)}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            );
+
+            return (
+              <div className="bg-surface border border-border rounded-xl overflow-hidden mb-6 shadow-sm">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const next = !artifactsExpanded;
+                    setArtifactsExpanded(next);
+                    if (next && !artifactsRootFiles && !artifactsLoading) loadArtifacts(generationPath);
+                  }}
+                  className="w-full flex items-center gap-3 px-5 py-3 text-left hover:bg-bg-subtle/50 transition-smooth"
+                >
+                  <div className="w-7 h-7 rounded-lg bg-info/10 flex items-center justify-center">
+                    <FolderOpen size={14} className="text-info" />
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="text-xs font-bold text-text-primary">Generated Artifacts</h3>
+                    <p className="text-[10px] text-text-tertiary font-mono">{generationPath}</p>
+                  </div>
+                  {artifactsRootFiles && artifactsRootFiles.length > 0 && (
+                    <span className="text-[10px] text-info font-semibold bg-info-bg px-2 py-0.5 rounded-full">
+                      {artifactsRootFiles.length} item{artifactsRootFiles.length > 1 ? 's' : ''}
+                    </span>
+                  )}
+                  <div className={`transition-transform duration-200 ${artifactsExpanded ? 'rotate-90' : ''}`}>
+                    <ChevronRight size={14} className="text-text-tertiary" />
+                  </div>
+                </button>
+                {artifactsExpanded && (
+                  <div className="border-t border-border px-5 py-3">
+                    {artifactsLoading && (
+                      <div className="flex items-center gap-2 py-4 justify-center">
+                        <Loader2 size={14} className="animate-spin text-text-tertiary" />
+                        <span className="text-xs text-text-secondary">Loading files...</span>
+                      </div>
+                    )}
+                    {!artifactsLoading && artifactsRootFiles && artifactsRootFiles.length === 0 && (
+                      <div className="text-center py-4">
+                        <p className="text-xs text-text-tertiary">No files found at this path.</p>
+                        <p className="text-[10px] text-text-tertiary mt-1">
+                          The generation path <span className="font-mono">{generationPath}</span> may be relative to the notebook workspace.
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => loadArtifacts(generationPath)}
+                          className="mt-2 text-[10px] text-db-red hover:underline font-medium"
+                        >
+                          Retry
+                        </button>
+                      </div>
+                    )}
+                    {artifactsRootFiles && artifactsRootFiles.length > 0 && (
+                      <div className="max-h-80 overflow-y-auto">
+                        {renderFileTree(artifactsRootFiles)}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+
           {/* Stats */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
             <StatCard label="Domains" value={results.domains?.length || domains.length} icon={Building2} />
@@ -677,43 +962,82 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
                     </span>
                   </button>
 
-                  {/* Individual domains */}
+                  {/* Individual domains with expandable subdomains */}
                   {domains.map((d) => {
                     const count = domainCounts[d] || 0;
                     const active = filterDomain === d;
                     const highPriCount = allUseCases.filter(
                       (uc) => uc._domain === d && ['Ultra High', 'Very High', 'High'].includes(String(uc?.Priority || ''))
                     ).length;
+                    const subs = subdomainsByDomain[d] || {};
+                    const hasSubs = Object.keys(subs).length > 0;
+                    const isExpanded = !!expandedDomains[d];
 
                     return (
-                      <button
-                        key={d}
-                        onClick={() => setFilterDomain(active ? 'all' : d)}
-                        className={`w-full flex items-start gap-2.5 px-3 py-2.5 rounded-lg text-left transition-smooth ${
-                          active
-                            ? 'bg-db-red-50 border border-db-red/20'
-                            : 'hover:bg-bg-subtle border border-transparent'
-                        }`}
-                      >
-                        <div className={`w-5 h-5 rounded-full flex items-center justify-center shrink-0 mt-0.5 ${
-                          active ? 'bg-db-red/10' : 'bg-bg-subtle'
-                        }`}>
-                          <Building2 size={10} className={active ? 'text-db-red' : 'text-text-tertiary'} />
+                      <div key={d}>
+                        <div className="flex items-center">
+                          {hasSubs && (
+                            <button
+                              onClick={(e) => { e.stopPropagation(); setExpandedDomains(prev => ({ ...prev, [d]: !prev[d] })); }}
+                              className="p-0.5 mr-0.5 rounded hover:bg-bg-subtle transition-smooth"
+                            >
+                              <ChevronRight size={10} className={`text-text-tertiary transition-transform duration-200 ${isExpanded ? 'rotate-90' : ''}`} />
+                            </button>
+                          )}
+                          <button
+                            onClick={() => { setFilterDomain(active ? 'all' : d); setFilterSubdomain('all'); }}
+                            className={`flex-1 flex items-start gap-2 px-2 py-2 rounded-lg text-left transition-smooth ${
+                              active
+                                ? 'bg-db-red-50 border border-db-red/20'
+                                : 'hover:bg-bg-subtle border border-transparent'
+                            }`}
+                          >
+                            <div className={`w-5 h-5 rounded-full flex items-center justify-center shrink-0 mt-0.5 ${
+                              active ? 'bg-db-red/10' : 'bg-bg-subtle'
+                            }`}>
+                              <Building2 size={10} className={active ? 'text-db-red' : 'text-text-tertiary'} />
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <span className={`text-[11px] font-semibold block truncate ${
+                                active ? 'text-db-red' : 'text-text-primary'
+                              }`}>
+                                {d}
+                              </span>
+                              <div className="flex items-center gap-2 mt-1">
+                                <span className="text-[9px] text-text-tertiary font-mono">{count} use case{count !== 1 ? 's' : ''}</span>
+                                {highPriCount > 0 && (
+                                  <span className="text-[9px] text-db-red font-medium">{highPriCount} high pri</span>
+                                )}
+                              </div>
+                            </div>
+                          </button>
                         </div>
-                        <div className="flex-1 min-w-0">
-                          <span className={`text-[11px] font-semibold block truncate ${
-                            active ? 'text-db-red' : 'text-text-primary'
-                          }`}>
-                            {d}
-                          </span>
-                          <div className="flex items-center gap-2 mt-1">
-                            <span className="text-[9px] text-text-tertiary font-mono">{count} use case{count !== 1 ? 's' : ''}</span>
-                            {highPriCount > 0 && (
-                              <span className="text-[9px] text-db-red font-medium">{highPriCount} high pri</span>
-                            )}
+                        {/* Subdomain list */}
+                        {isExpanded && hasSubs && (
+                          <div className="ml-7 mt-0.5 space-y-0.5">
+                            {Object.entries(subs).map(([sd, sdCount]) => {
+                              const sdActive = filterSubdomain === sd && filterDomain === d;
+                              return (
+                                <button
+                                  key={sd}
+                                  onClick={() => {
+                                    setFilterDomain(d);
+                                    setFilterSubdomain(sdActive ? 'all' : sd);
+                                  }}
+                                  className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-left transition-smooth ${
+                                    sdActive
+                                      ? 'bg-db-red-50/70 text-db-red'
+                                      : 'text-text-secondary hover:bg-bg-subtle'
+                                  }`}
+                                >
+                                  <span className={`text-[10px] font-medium truncate flex-1 ${sdActive ? 'text-db-red' : ''}`}>{sd}</span>
+                                  <span className={`text-[9px] font-mono ${sdActive ? 'text-db-red' : 'text-text-tertiary'}`}>{sdCount}</span>
+                                </button>
+                              );
+                            })}
                           </div>
-                        </div>
-                      </button>
+                        )}
+                      </div>
                     );
                   })}
                 </div>
@@ -724,7 +1048,7 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
             <div className="flex-1 min-w-0">
               {/* Filter toolbar */}
               <div className="bg-surface border border-border rounded-xl mb-4 shadow-sm overflow-hidden">
-                <div className="flex items-center gap-3 px-4 py-3">
+                <div className="flex items-center gap-3 px-4 py-3 flex-wrap">
                   {/* Search */}
                   <div className="relative flex-1">
                     <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-tertiary" />
@@ -775,6 +1099,62 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
                     </select>
                   )}
 
+                  {/* Technique filter */}
+                  {techniques.length > 0 && (
+                    <select
+                      value={filterTechnique}
+                      onChange={(e) => setFilterTechnique(e.target.value)}
+                      className="px-2 py-1.5 text-[11px] border border-border rounded-lg bg-bg text-text-primary focus:outline-none focus:border-db-red/30 transition-smooth"
+                    >
+                      <option value="all">All Techniques</option>
+                      {techniques.map((t) => (
+                        <option key={t} value={t}>{t}</option>
+                      ))}
+                    </select>
+                  )}
+
+                  {/* Quality filter */}
+                  {qualities.length > 0 && (
+                    <select
+                      value={filterQuality}
+                      onChange={(e) => setFilterQuality(e.target.value)}
+                      className="px-2 py-1.5 text-[11px] border border-border rounded-lg bg-bg text-text-primary focus:outline-none focus:border-db-red/30 transition-smooth"
+                    >
+                      <option value="all">All Quality</option>
+                      {qualities.map((q) => (
+                        <option key={q} value={q}>{q}</option>
+                      ))}
+                    </select>
+                  )}
+
+                  {/* Alignment filter */}
+                  {alignments.length > 0 && (
+                    <select
+                      value={filterAlignment}
+                      onChange={(e) => setFilterAlignment(e.target.value)}
+                      className="px-2 py-1.5 text-[11px] border border-border rounded-lg bg-bg text-text-primary focus:outline-none focus:border-db-red/30 transition-smooth"
+                    >
+                      <option value="all">All Alignments</option>
+                      {alignments.map((a) => (
+                        <option key={a} value={a}>{a}</option>
+                      ))}
+                    </select>
+                  )}
+
+                  {/* Goals Alignment filter */}
+                  {goalsAlignments.length > 0 && (
+                    <select
+                      value={filterGoalsAlignment}
+                      onChange={(e) => setFilterGoalsAlignment(e.target.value)}
+                      className="px-2 py-1.5 text-[11px] border border-border rounded-lg bg-bg text-text-primary focus:outline-none focus:border-db-red/30 transition-smooth"
+                    >
+                      <option value="all">All Goals</option>
+                      {goalsAlignments.map((g) => (
+                        <option key={g} value={g}>{g}</option>
+                      ))}
+                    </select>
+                  )}
+
                   {/* Sort */}
                   <select
                     value={sortBy}
@@ -788,7 +1168,7 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
 
                   {hasActiveFilters && (
                     <button
-                      onClick={() => { setSearchQuery(''); setFilterDomain('all'); setFilterPriority('all'); setFilterType('all'); }}
+                      onClick={clearAllFilters}
                       className="text-[11px] text-db-red hover:underline font-medium shrink-0"
                     >
                       Clear
@@ -807,7 +1187,13 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
                     {filterDomain !== 'all' && (
                       <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-db-red-50 text-db-red text-[10px] font-medium border border-db-red/20">
                         {filterDomain}
-                        <button onClick={() => setFilterDomain('all')} className="hover:text-db-red-hover">&times;</button>
+                        <button onClick={() => { setFilterDomain('all'); setFilterSubdomain('all'); }} className="hover:text-db-red-hover">&times;</button>
+                      </span>
+                    )}
+                    {filterSubdomain !== 'all' && (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-db-red-50 text-db-red text-[10px] font-medium border border-db-red/20">
+                        Sub: {filterSubdomain}
+                        <button onClick={() => setFilterSubdomain('all')} className="hover:text-db-red-hover">&times;</button>
                       </span>
                     )}
                     {filterPriority !== 'all' && (
@@ -820,6 +1206,30 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
                       <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-db-red-50 text-db-red text-[10px] font-medium border border-db-red/20">
                         {filterType}
                         <button onClick={() => setFilterType('all')} className="hover:text-db-red-hover">&times;</button>
+                      </span>
+                    )}
+                    {filterTechnique !== 'all' && (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-db-red-50 text-db-red text-[10px] font-medium border border-db-red/20">
+                        {filterTechnique}
+                        <button onClick={() => setFilterTechnique('all')} className="hover:text-db-red-hover">&times;</button>
+                      </span>
+                    )}
+                    {filterQuality !== 'all' && (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-db-red-50 text-db-red text-[10px] font-medium border border-db-red/20">
+                        Q: {filterQuality}
+                        <button onClick={() => setFilterQuality('all')} className="hover:text-db-red-hover">&times;</button>
+                      </span>
+                    )}
+                    {filterAlignment !== 'all' && (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-db-red-50 text-db-red text-[10px] font-medium border border-db-red/20">
+                        {filterAlignment}
+                        <button onClick={() => setFilterAlignment('all')} className="hover:text-db-red-hover">&times;</button>
+                      </span>
+                    )}
+                    {filterGoalsAlignment !== 'all' && (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-db-red-50 text-db-red text-[10px] font-medium border border-db-red/20">
+                        {filterGoalsAlignment}
+                        <button onClick={() => setFilterGoalsAlignment('all')} className="hover:text-db-red-hover">&times;</button>
                       </span>
                     )}
                     {searchQuery && (
@@ -853,7 +1263,7 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
                   <Search size={20} className="text-text-tertiary mx-auto mb-3" />
                   <p className="text-sm text-text-secondary">No use cases match your filters.</p>
                   <button
-                    onClick={() => { setSearchQuery(''); setFilterDomain('all'); setFilterPriority('all'); setFilterType('all'); }}
+                    onClick={clearAllFilters}
                     className="text-xs text-db-red hover:underline mt-2 font-medium"
                   >
                     Clear all filters
@@ -1109,18 +1519,6 @@ function UseCaseCard({ uc, index, expanded, onToggle, resolveTable }) {
               </div>
             ))}
           </div>
-
-          {/* Technical Design */}
-          {technicalDesign && (
-            <div>
-              <h4 className="text-[10px] font-bold text-text-secondary uppercase tracking-wider mb-1">
-                Technical Design
-              </h4>
-              <p className="text-[11px] text-text-secondary bg-bg p-3 rounded-lg border border-border font-mono whitespace-pre-wrap leading-relaxed">
-                {technicalDesign}
-              </p>
-            </div>
-          )}
 
           {/* SQL */}
           {sql && !sql.startsWith('--') && (

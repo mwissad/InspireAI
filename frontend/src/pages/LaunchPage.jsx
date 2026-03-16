@@ -18,6 +18,8 @@ import {
   Settings2,
   Zap,
   Table2,
+  ShoppingCart,
+  X,
 } from 'lucide-react';
 
 /* ─── Constants (v43 notebook widget options) ─── */
@@ -86,6 +88,10 @@ export default function LaunchPage({ settings, update, onLaunched }) {
   const [launching, setLaunching] = useState(false);
   const [launchError, setLaunchError] = useState('');
   const [showAdvanced, setShowAdvanced] = useState(false);
+
+  // ── Metadata picker state ──
+  const [pickerExpanded, setPickerExpanded] = useState(true);
+  const [metadataPreviewExpanded, setMetadataPreviewExpanded] = useState(false);
 
   // ── Multiselects ──
   const [genChecks, setGenChecks] = useState({ 'PDF Catalog': true });
@@ -331,115 +337,178 @@ export default function LaunchPage({ settings, update, onLaunched }) {
               />
             </Field>
 
-            {/* UC Metadata — Catalog/Schema/Table pickers */}
+            {/* UC Metadata — Catalog/Schema/Table pickers with shopping basket */}
             {isDiscover && (
               <Field label="Unity Catalog Metadata" required icon={Database} hint="Navigate catalogs and schemas to select tables">
-                <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-                  {/* Catalogs */}
-                  <div>
-                    <div className="flex items-center gap-1.5 mb-2">
-                      <span className="text-[11px] font-semibold text-text-secondary">Catalogs</span>
-                      {loadingCatalogs && <Loader2 size={10} className="animate-spin text-text-tertiary" />}
+                {/* Selected Metadata Basket — always visible */}
+                {(selectedCatalogs.length > 0 || selectedSchemas.length > 0 || selectedTables.length > 0) && (
+                  <div className="mb-3 rounded-lg border border-db-red/20 bg-db-red-50/50 p-3">
+                    <div className="flex items-center gap-2 mb-2">
+                      <ShoppingCart size={12} className="text-db-red" />
+                      <span className="text-[11px] font-bold text-db-red">Selected Metadata</span>
+                      <span className="text-[10px] text-text-tertiary ml-auto">
+                        {selectedTables.length > 0 && `${selectedTables.length} table${selectedTables.length > 1 ? 's' : ''}`}
+                        {selectedTables.length > 0 && selectedSchemas.length > 0 && ', '}
+                        {selectedSchemas.length > 0 && `${selectedSchemas.length} schema${selectedSchemas.length > 1 ? 's' : ''}`}
+                        {(selectedTables.length > 0 || selectedSchemas.length > 0) && selectedCatalogs.length > 0 && ', '}
+                        {selectedCatalogs.length > 0 && `${selectedCatalogs.length} catalog${selectedCatalogs.length > 1 ? 's' : ''}`}
+                      </span>
                     </div>
-                    <PickerList
-                      items={filteredCatalogs}
-                      selected={selectedCatalogs}
-                      onToggle={(name) => {
-                        if (selectedCatalogs.includes(name)) {
-                          setSelectedCatalogs((p) => p.filter((x) => x !== name));
-                          setSelectedSchemas((p) => p.filter((x) => !x.startsWith(name + '.')));
-                          setSelectedTables((p) => p.filter((x) => !x.startsWith(name + '.')));
-                        } else {
-                          setSelectedCatalogs((p) => [...p, name]);
-                        }
-                      }}
-                      getKey={(c) => c.name}
-                      getLabel={(c) => c.name}
-                      searchValue={catalogSearch}
-                      onSearch={setCatalogSearch}
-                      searchPlaceholder="Search catalogs..."
-                      emptyText={loadingCatalogs ? 'Loading...' : 'No catalogs found'}
-                    />
-                    <ChipList items={selectedCatalogs} onRemove={(c) => {
-                      setSelectedCatalogs((p) => p.filter((x) => x !== c));
-                      setSelectedSchemas((p) => p.filter((x) => !x.startsWith(c + '.')));
-                      setSelectedTables((p) => p.filter((x) => !x.startsWith(c + '.')));
-                    }} icon={Database} />
-                  </div>
-
-                  {/* Schemas */}
-                  <div>
-                    <div className="flex items-center gap-1.5 mb-2">
-                      <span className="text-[11px] font-semibold text-text-secondary">Schemas</span>
-                      {loadingSchemas && <Loader2 size={10} className="animate-spin text-text-tertiary" />}
+                    <div className="max-h-32 overflow-y-auto flex flex-wrap gap-1">
+                      {selectedTables.map((t) => (
+                        <span key={t} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-white text-db-red text-[10px] font-medium border border-db-red/20">
+                          <Table2 size={9} />
+                          {t.split('.').pop()}
+                          <button onClick={() => setSelectedTables((p) => p.filter((x) => x !== t))} className="hover:text-db-red-hover ml-0.5"><X size={8} /></button>
+                        </span>
+                      ))}
+                      {selectedSchemas.map((s) => (
+                        <span key={s} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-white text-text-secondary text-[10px] font-medium border border-border">
+                          {s}
+                          <button onClick={() => { setSelectedSchemas((p) => p.filter((x) => x !== s)); setSelectedTables((p) => p.filter((x) => !x.startsWith(s + '.'))); }} className="hover:text-db-red ml-0.5"><X size={8} /></button>
+                        </span>
+                      ))}
+                      {selectedCatalogs.map((c) => (
+                        <span key={c} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-white text-text-secondary text-[10px] font-medium border border-border">
+                          <Database size={9} />
+                          {c}
+                          <button onClick={() => { setSelectedCatalogs((p) => p.filter((x) => x !== c)); setSelectedSchemas((p) => p.filter((x) => !x.startsWith(c + '.'))); setSelectedTables((p) => p.filter((x) => !x.startsWith(c + '.'))); }} className="hover:text-db-red ml-0.5"><X size={8} /></button>
+                        </span>
+                      ))}
                     </div>
-                    <PickerList
-                      items={filteredSchemas}
-                      selected={selectedSchemas}
-                      onToggle={(name) => {
-                        if (selectedSchemas.includes(name)) {
-                          setSelectedSchemas((p) => p.filter((x) => x !== name));
-                          setSelectedTables((p) => p.filter((x) => !x.startsWith(name + '.')));
-                        } else {
-                          setSelectedSchemas((p) => [...p, name]);
-                        }
-                      }}
-                      getKey={(s) => s.full_name}
-                      getLabel={(s) => s.full_name}
-                      searchValue={schemaSearch}
-                      onSearch={setSchemaSearch}
-                      searchPlaceholder="Search schemas..."
-                      emptyText={selectedCatalogs.length === 0 ? 'Select catalogs first' : loadingSchemas ? 'Loading...' : 'No schemas found'}
-                    />
-                    <ChipList items={selectedSchemas} onRemove={(s) => {
-                      setSelectedSchemas((p) => p.filter((x) => x !== s));
-                      setSelectedTables((p) => p.filter((x) => !x.startsWith(s + '.')));
-                    }} />
                   </div>
+                )}
 
-                  {/* Tables */}
-                  <div>
-                    <div className="flex items-center gap-1.5 mb-2">
-                      <span className="text-[11px] font-semibold text-text-secondary">Tables</span>
-                      <span className="text-[10px] text-text-tertiary">primary selection</span>
-                      {loadingTables && <Loader2 size={10} className="animate-spin text-text-tertiary" />}
-                    </div>
-                    {/* Select All / Deselect All toggle */}
-                    {filteredTables.length > 0 && (
-                      <button
-                        type="button"
-                        onClick={toggleAllTables}
-                        className="mb-1.5 px-2.5 py-1 rounded-md text-[10px] font-semibold transition-smooth border border-border hover:border-border-strong text-text-secondary hover:text-db-red"
-                      >
-                        {allTablesSelected ? 'Deselect All' : 'Select All'}
-                      </button>
-                    )}
-                    <PickerList
-                      items={filteredTables}
-                      selected={selectedTables}
-                      onToggle={(name) => {
-                        if (selectedTables.includes(name)) setSelectedTables((p) => p.filter((x) => x !== name));
-                        else setSelectedTables((p) => [...p, name]);
-                      }}
-                      getKey={(t) => t.full_name}
-                      getLabel={(t) => t.full_name.split('.').pop()}
-                      searchValue={tableSearch}
-                      onSearch={setTableSearch}
-                      searchPlaceholder="Search tables..."
-                      emptyText={selectedSchemas.length === 0 ? 'Select schemas first' : loadingTables ? 'Loading...' : 'No tables found'}
-                    />
-                    <ChipList items={selectedTables} onRemove={(t) => setSelectedTables((p) => p.filter((x) => x !== t))} icon={Table2} />
+                {/* Collapsible picker toggle */}
+                <button
+                  type="button"
+                  onClick={() => setPickerExpanded(!pickerExpanded)}
+                  className="flex items-center gap-2 mb-2 text-xs font-semibold text-text-secondary hover:text-text-primary transition-smooth"
+                >
+                  <div className={`transition-transform duration-200 ${pickerExpanded ? 'rotate-90' : ''}`}>
+                    <ChevronRight size={14} />
                   </div>
-                </div>
+                  {pickerExpanded ? 'Hide catalog browser' : 'Browse catalogs'}
+                  {!pickerExpanded && (selectedCatalogs.length + selectedSchemas.length + selectedTables.length > 0) && (
+                    <span className="text-[10px] text-db-red font-medium ml-1">
+                      ({selectedTables.length > 0 ? `${selectedTables.length} tables` : selectedSchemas.length > 0 ? `${selectedSchemas.length} schemas` : `${selectedCatalogs.length} catalogs`} selected)
+                    </span>
+                  )}
+                </button>
 
-                {/* UC Metadata preview */}
-                {params['01_uc_metadata'] && (
-                  <div className="mt-3 rounded-lg border border-success/20 bg-success-bg px-4 py-2.5 flex items-start gap-2">
-                    <CheckCircle2 size={14} className="text-success shrink-0 mt-0.5" />
+                {pickerExpanded && (
+                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                    {/* Catalogs */}
                     <div>
-                      <p className="text-[10px] text-success font-semibold uppercase tracking-wider mb-0.5">Metadata Selected</p>
-                      <p className="text-xs text-text-primary font-mono break-all leading-relaxed">{params['01_uc_metadata']}</p>
+                      <div className="flex items-center gap-1.5 mb-2">
+                        <span className="text-[11px] font-semibold text-text-secondary">Catalogs</span>
+                        {loadingCatalogs && <Loader2 size={10} className="animate-spin text-text-tertiary" />}
+                      </div>
+                      <PickerList
+                        items={filteredCatalogs}
+                        selected={selectedCatalogs}
+                        onToggle={(name) => {
+                          if (selectedCatalogs.includes(name)) {
+                            setSelectedCatalogs((p) => p.filter((x) => x !== name));
+                            setSelectedSchemas((p) => p.filter((x) => !x.startsWith(name + '.')));
+                            setSelectedTables((p) => p.filter((x) => !x.startsWith(name + '.')));
+                          } else {
+                            setSelectedCatalogs((p) => [...p, name]);
+                          }
+                        }}
+                        getKey={(c) => c.name}
+                        getLabel={(c) => c.name}
+                        searchValue={catalogSearch}
+                        onSearch={setCatalogSearch}
+                        searchPlaceholder="Search catalogs..."
+                        emptyText={loadingCatalogs ? 'Loading...' : 'No catalogs found'}
+                      />
                     </div>
+
+                    {/* Schemas */}
+                    <div>
+                      <div className="flex items-center gap-1.5 mb-2">
+                        <span className="text-[11px] font-semibold text-text-secondary">Schemas</span>
+                        {loadingSchemas && <Loader2 size={10} className="animate-spin text-text-tertiary" />}
+                      </div>
+                      <PickerList
+                        items={filteredSchemas}
+                        selected={selectedSchemas}
+                        onToggle={(name) => {
+                          if (selectedSchemas.includes(name)) {
+                            setSelectedSchemas((p) => p.filter((x) => x !== name));
+                            setSelectedTables((p) => p.filter((x) => !x.startsWith(name + '.')));
+                          } else {
+                            setSelectedSchemas((p) => [...p, name]);
+                          }
+                        }}
+                        getKey={(s) => s.full_name}
+                        getLabel={(s) => s.full_name}
+                        searchValue={schemaSearch}
+                        onSearch={setSchemaSearch}
+                        searchPlaceholder="Search schemas..."
+                        emptyText={selectedCatalogs.length === 0 ? 'Select catalogs first' : loadingSchemas ? 'Loading...' : 'No schemas found'}
+                      />
+                    </div>
+
+                    {/* Tables */}
+                    <div>
+                      <div className="flex items-center gap-1.5 mb-2">
+                        <span className="text-[11px] font-semibold text-text-secondary">Tables</span>
+                        <span className="text-[10px] text-text-tertiary">primary selection</span>
+                        {loadingTables && <Loader2 size={10} className="animate-spin text-text-tertiary" />}
+                      </div>
+                      {filteredTables.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={toggleAllTables}
+                          className="mb-1.5 px-2.5 py-1 rounded-md text-[10px] font-semibold transition-smooth border border-border hover:border-border-strong text-text-secondary hover:text-db-red"
+                        >
+                          {allTablesSelected ? 'Deselect All' : 'Select All'}
+                        </button>
+                      )}
+                      <PickerList
+                        items={filteredTables}
+                        selected={selectedTables}
+                        onToggle={(name) => {
+                          if (selectedTables.includes(name)) setSelectedTables((p) => p.filter((x) => x !== name));
+                          else {
+                            setSelectedTables((p) => [...p, name]);
+                            // Auto-collapse picker after first table selection
+                            if (selectedTables.length === 0) setPickerExpanded(false);
+                          }
+                        }}
+                        getKey={(t) => t.full_name}
+                        getLabel={(t) => t.full_name.split('.').pop()}
+                        searchValue={tableSearch}
+                        onSearch={setTableSearch}
+                        searchPlaceholder="Search tables..."
+                        emptyText={selectedSchemas.length === 0 ? 'Select schemas first' : loadingTables ? 'Loading...' : 'No tables found'}
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {/* UC Metadata preview — collapsible & scrollable */}
+                {params['01_uc_metadata'] && (
+                  <div className="mt-3 rounded-lg border border-success/20 bg-success-bg overflow-hidden">
+                    <button
+                      type="button"
+                      onClick={() => setMetadataPreviewExpanded(!metadataPreviewExpanded)}
+                      className="w-full flex items-center gap-2 px-4 py-2.5 text-left hover:bg-success/5 transition-smooth"
+                    >
+                      <CheckCircle2 size={14} className="text-success shrink-0" />
+                      <p className="text-[10px] text-success font-semibold uppercase tracking-wider flex-1">Metadata Selected</p>
+                      <span className="text-[10px] text-success/70 font-mono">
+                        {params['01_uc_metadata'].split(',').length} item{params['01_uc_metadata'].split(',').length > 1 ? 's' : ''}
+                      </span>
+                      <ChevronRight size={12} className={`text-success transition-transform duration-200 ${metadataPreviewExpanded ? 'rotate-90' : ''}`} />
+                    </button>
+                    {metadataPreviewExpanded && (
+                      <div className="px-4 pb-3 max-h-32 overflow-y-auto">
+                        <p className="text-xs text-text-primary font-mono break-all leading-relaxed">{params['01_uc_metadata']}</p>
+                      </div>
+                    )}
                   </div>
                 )}
               </Field>
