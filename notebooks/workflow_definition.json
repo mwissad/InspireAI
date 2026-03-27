@@ -8,7 +8,8 @@
       "notebook_task": {
         "notebook_path": "{{BASE_PATH}}/01_init_validate",
         "source": "WORKSPACE"
-      }
+      },
+      "timeout_seconds": 300
     },
     {
       "task_key": "02_business_context",
@@ -24,7 +25,8 @@
           "inspire_database": "{{INSPIRE_DATABASE}}"
         },
         "source": "WORKSPACE"
-      }
+      },
+      "timeout_seconds": 600
     },
     {
       "task_key": "03_schema_discovery",
@@ -40,7 +42,8 @@
           "inspire_database": "{{INSPIRE_DATABASE}}"
         },
         "source": "WORKSPACE"
-      }
+      },
+      "timeout_seconds": 1800
     },
     {
       "task_key": "04_use_case_gen",
@@ -56,7 +59,8 @@
           "inspire_database": "{{INSPIRE_DATABASE}}"
         },
         "source": "WORKSPACE"
-      }
+      },
+      "timeout_seconds": 7200
     },
     {
       "task_key": "05_scoring_quality",
@@ -72,7 +76,8 @@
           "inspire_database": "{{INSPIRE_DATABASE}}"
         },
         "source": "WORKSPACE"
-      }
+      },
+      "timeout_seconds": 3600
     },
     {
       "task_key": "06_sql_notebooks",
@@ -88,7 +93,8 @@
           "inspire_database": "{{INSPIRE_DATABASE}}"
         },
         "source": "WORKSPACE"
-      }
+      },
+      "timeout_seconds": 7200
     },
     {
       "task_key": "07_documentation",
@@ -104,7 +110,8 @@
           "inspire_database": "{{INSPIRE_DATABASE}}"
         },
         "source": "WORKSPACE"
-      }
+      },
+      "timeout_seconds": 3600
     },
     {
       "task_key": "08_samples_finalize",
@@ -120,7 +127,8 @@
           "inspire_database": "{{INSPIRE_DATABASE}}"
         },
         "source": "WORKSPACE"
-      }
+      },
+      "timeout_seconds": 7200
     }
   ]
 }

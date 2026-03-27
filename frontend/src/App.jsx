@@ -1,268 +1,220 @@
-import { useState, useCallback } from 'react';
-import { Settings, Rocket, Activity, Home, Sparkles } from 'lucide-react';
-import DatabricksLogo from './components/DatabricksLogo';
+import { useState, useEffect, useCallback, Component } from 'react';
+import Header from './components/Header';
+import SettingsPanel from './components/SettingsPanel';
 import LandingPage from './pages/LandingPage';
 import ConfigPage from './pages/ConfigPage';
 import LaunchPage from './pages/LaunchPage';
 import MonitorPage from './pages/MonitorPage';
 import ResultsPage from './pages/ResultsPage';
 
-function apiHeaders(token) {
-  return {
-    'Content-Type': 'application/json',
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
-  };
+// Error Boundary to catch rendering crashes and display useful info
+class ErrorBoundary extends Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, error: null, info: null };
+  }
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error };
+  }
+  componentDidCatch(error, info) {
+    console.error('ErrorBoundary caught:', error, info);
+    this.setState({ info });
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{ padding: 32, fontFamily: 'monospace' }}>
+          <h2 style={{ color: '#DC2626' }}>Component Crash</h2>
+          <pre style={{ whiteSpace: 'pre-wrap', background: '#FEF2F2', padding: 16, borderRadius: 8 }}>
+            {this.state.error?.toString()}
+          </pre>
+          <details>
+            <summary>Stack trace</summary>
+            <pre style={{ whiteSpace: 'pre-wrap', fontSize: 11 }}>
+              {this.state.info?.componentStack}
+            </pre>
+          </details>
+          <button
+            onClick={() => this.setState({ hasError: false, error: null, info: null })}
+            style={{ marginTop: 12, padding: '8px 16px', cursor: 'pointer' }}
+          >
+            Retry
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
 }
-
-const PAGES = [
-  { id: 'config',  label: 'Config',  icon: Settings },
-  { id: 'launch',  label: 'Launch',  icon: Rocket },
-  { id: 'monitor', label: 'Monitor', icon: Activity },
-  { id: 'results', label: 'Results', icon: Sparkles },
-];
 
 export default function App() {
   const [page, setPage] = useState('landing');
-  const [settings, setSettings] = useState({
-    databricksToken: '',
-    notebookPath: '',
-    pipelineBasePath: '',
-    notebookPublished: false,
-    pipelinePublished: false,
-    clusterId: '',
-    runMode: 'pipeline', // 'single' or 'pipeline'
-  });
+  const [showSettings, setShowSettings] = useState(false);
+
+  // Persisted settings
+  const [settings, setSettings] = useState(() => ({
+    databricksHost: localStorage.getItem('db_databricks_host') || '',
+    token: localStorage.getItem('db_token') || '',
+    notebookPath: localStorage.getItem('db_notebook_path') || '',
+    warehouseId: localStorage.getItem('db_warehouse_id') || '',
+    inspireDatabase: localStorage.getItem('db_inspire_database') || '',
+    authMode: localStorage.getItem('db_auth_mode') || 'pat',
+    spClientId: localStorage.getItem('db_sp_client_id') || '',
+    spClientSecret: localStorage.getItem('db_sp_client_secret') || '',
+    spTenantId: localStorage.getItem('db_sp_tenant_id') || '',
+  }));
+
+  // Session tracking
+  const [sessionId, setSessionId] = useState(null);
   const [runId, setRunId] = useState(null);
-  const [runMode, setRunMode] = useState(null); // tracks how the current run was submitted
-  const [lastJobParams, setLastJobParams] = useState(null);
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [submitError, setSubmitError] = useState(null);
 
-  const isConnected = !!settings.databricksToken;
-  const isReady = isConnected && (
-    settings.runMode === 'pipeline'
-      ? !!settings.pipelineBasePath
-      : !!settings.notebookPath
-  );
+  const update = useCallback((key, val) => {
+    setSettings((prev) => {
+      const next = { ...prev, [key]: val };
+      localStorage.setItem(
+        `db_${key.replace(/([A-Z])/g, '_$1').toLowerCase()}`,
+        val
+      );
+      return next;
+    });
+  }, []);
 
-  const apiFetch = useCallback(
-    (url, options = {}) =>
-      fetch(url, {
-        ...options,
-        headers: {
-          ...apiHeaders(settings.databricksToken),
-          ...options.headers,
-        },
-      }),
-    [settings.databricksToken]
-  );
+  // Persist all settings
+  useEffect(() => {
+    localStorage.setItem('db_databricks_host', settings.databricksHost);
+    localStorage.setItem('db_token', settings.token);
+    localStorage.setItem('db_notebook_path', settings.notebookPath);
+    localStorage.setItem('db_warehouse_id', settings.warehouseId);
+    localStorage.setItem('db_inspire_database', settings.inspireDatabase);
+    localStorage.setItem('db_auth_mode', settings.authMode);
+    localStorage.setItem('db_sp_client_id', settings.spClientId);
+    localStorage.setItem('db_sp_client_secret', settings.spClientSecret);
+    localStorage.setItem('db_sp_tenant_id', settings.spTenantId);
+  }, [settings]);
 
-  const handleSubmit = async (params) => {
-    setIsSubmitting(true);
-    setSubmitError(null);
-    try {
-      let res;
-      if (settings.runMode === 'pipeline' && settings.pipelineBasePath) {
-        // Submit as multi-task pipeline
-        res = await apiFetch('/api/run/pipeline', {
-          method: 'POST',
-          body: JSON.stringify({
-            params,
-            cluster_id: settings.clusterId || undefined,
-            notebook_base_path: settings.pipelineBasePath,
-            inspire_database: params['02_inspire_database'] || '',
-          }),
-        });
-      } else {
-        // Submit as single notebook
-        res = await apiFetch('/api/run', {
-          method: 'POST',
-          body: JSON.stringify({
-            params,
-            cluster_id: settings.clusterId || undefined,
-            notebook_path: settings.notebookPath || undefined,
-          }),
-        });
-      }
-      let data;
+  // Auto-fetch SP token when in SP mode
+  useEffect(() => {
+    if (settings.authMode !== 'sp' || !settings.spClientId || !settings.spClientSecret || !settings.spTenantId || !settings.databricksHost) return;
+    (async () => {
       try {
-        data = await res.json();
-      } catch {
-        throw new Error(`Server returned invalid response (HTTP ${res.status}). Is the backend running?`);
-      }
-      if (!res.ok) throw new Error(data.error || `Failed to submit (HTTP ${res.status})`);
-      setRunId(data.run_id);
-      setRunMode(data.mode || 'single');
-      setLastJobParams(params);
-      setPage('monitor');
-    } catch (err) {
-      const msg = err.message === 'Failed to fetch'
-        ? 'Could not connect to backend. Make sure it is running on port 3001.'
-        : err.message;
-      setSubmitError(msg);
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
+        const resp = await fetch('/api/auth/sp-token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            client_id: settings.spClientId,
+            client_secret: settings.spClientSecret,
+            tenant_id: settings.spTenantId,
+            databricks_host: settings.databricksHost,
+          }),
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          if (data.access_token) update('token', data.access_token);
+        }
+      } catch { /* silent */ }
+    })();
+  }, [settings.authMode, settings.spClientId, settings.spClientSecret, settings.spTenantId, settings.databricksHost]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const handleNewRun = () => {
-    setRunId(null);
-    setLastJobParams(null);
-    setSubmitError(null);
-    setPage('launch');
-  };
+  const nav = (p) => setPage(p);
 
-  // Determine which pages are accessible
-  const canLaunch = isReady;
-  const canMonitor = !!runId;
+  // Navigation guards
+  const canLaunch = true;
+  const canMonitor = Boolean(sessionId || runId);
+  const canResults = true;
 
-  // ─── Landing page (full-screen, no nav) ───
-  if (page === 'landing') {
-    return <LandingPage onGetStarted={() => setPage('config')} />;
-  }
+  // ── Auto-configure on mount (silent) ──
+  useEffect(() => {
+    (async () => {
+      try {
+        const headers = { 'Content-Type': 'application/json' };
+        if (settings.token) {
+          headers['Authorization'] = `Bearer ${settings.token}`;
+          headers['X-DB-PAT-Token'] = settings.token;
+        }
+        if (settings.databricksHost) headers['X-Databricks-Host'] = settings.databricksHost;
+
+        // 1. Auto-select first running warehouse if none set
+        if (!settings.warehouseId) {
+          const whResp = await fetch('/api/warehouses', { headers });
+          if (whResp.ok) {
+            const whData = await whResp.json();
+            const running = (whData.warehouses || []).find((w) => w.state === 'RUNNING');
+            const first = running || (whData.warehouses || [])[0];
+            if (first) update('warehouseId', first.id);
+          }
+        }
+
+        // 2. Auto-publish notebook (backend handles location seamlessly)
+        if (!settings.notebookPath) {
+          const nbResp = await fetch('/api/notebook', { headers });
+          if (nbResp.ok) {
+            const nbData = await nbResp.json();
+            if (nbData.path) update('notebookPath', nbData.path);
+          }
+        }
+      } catch { /* silent — user can configure manually via Settings */ }
+    })();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
-    <div className="min-h-screen bg-db-darkest">
-      {/* Ambient background */}
-      <div className="fixed inset-0 overflow-hidden pointer-events-none">
-        <div className="absolute top-0 left-1/4 w-[500px] h-[500px] bg-db-red/4 rounded-full blur-[120px]" />
-        <div className="absolute bottom-0 right-1/4 w-[400px] h-[400px] bg-db-orange/3 rounded-full blur-[100px]" />
-        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] bg-db-navy/20 rounded-full blur-[150px]" />
-      </div>
+    <div className="min-h-screen bg-bg text-text-primary">
+      {/* Header (hidden on landing) */}
+      {page !== 'landing' && (
+        <Header
+          page={page}
+          setPage={nav}
+          onSettingsClick={() => setShowSettings(!showSettings)}
+          canLaunch={canLaunch}
+          canMonitor={canMonitor}
+          canResults={canResults}
+        />
+      )}
 
-      <div className="relative z-10">
-        {/* ─── Top navigation bar ─── */}
-        <nav className="sticky top-0 z-50 backdrop-blur-xl bg-db-darkest/80 border-b border-white/5">
-          <div className="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8">
-            <div className="flex items-center h-14 gap-4">
-              {/* Logo — click to go home */}
-              <button
-                onClick={() => setPage('landing')}
-                className="flex items-center gap-2.5 mr-4 hover:opacity-80 transition-opacity"
-                title="Back to Home"
-              >
-                <DatabricksLogo className="w-6 h-6" />
-                <span className="text-sm font-bold text-white tracking-tight">
-                  Inspire <span className="text-db-red">AI</span>
-                </span>
-              </button>
+      {/* Main content */}
+      <main>
+        {page === 'landing' && <LandingPage onStart={() => nav('launch')} />}
 
-              {/* Page tabs */}
-              <div className="flex items-center gap-1 flex-1">
-                <button
-                  onClick={() => setPage('landing')}
-                  className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-all text-slate-400 hover:text-white hover:bg-white/5`}
-                >
-                  <Home className="w-3.5 h-3.5" />
-                  Home
-                </button>
-                {PAGES.map((p) => {
-                  const Icon = p.icon;
-                  const active = page === p.id;
-                  const disabled = (p.id === 'launch' && !canLaunch) || (p.id === 'monitor' && !canMonitor) || (p.id === 'results' && !isConnected);
-                  return (
-                    <button
-                      key={p.id}
-                      onClick={() => !disabled && setPage(p.id)}
-                      disabled={disabled}
-                      className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-all ${
-                        active
-                          ? 'bg-db-red/15 text-db-red-light border border-db-red/30'
-                          : disabled
-                          ? 'text-slate-600 cursor-not-allowed'
-                          : 'text-slate-400 hover:text-white hover:bg-white/5'
-                      }`}
-                    >
-                      <Icon className="w-3.5 h-3.5" />
-                      {p.label}
-                      {p.id === 'monitor' && runId && (
-                        <span className="w-1.5 h-1.5 rounded-full bg-db-orange animate-pulse" />
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
+        {page === 'launch' && (
+          <LaunchPage
+            settings={settings}
+            update={update}
+            onLaunched={(sid, rid) => {
+              setSessionId(sid);
+              setRunId(rid);
+              nav('monitor');
+            }}
+          />
+        )}
 
-              {/* Status indicator */}
-              <div className="flex items-center gap-2">
-                {isReady && (
-                  <span className="flex items-center gap-1.5 text-[10px] text-db-teal font-medium">
-                    <span className="w-1.5 h-1.5 rounded-full bg-db-teal" />
-                    Connected
-                  </span>
-                )}
-              </div>
-            </div>
-          </div>
-        </nav>
-
-        {/* ─── Page content ─── */}
-        <main className="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8 py-8 pb-16">
-          {page === 'config' && (
-            <ConfigPage
-              settings={settings}
-              onChange={setSettings}
-              apiFetch={isConnected ? apiFetch : null}
-              onReady={() => setPage('launch')}
-            />
-          )}
-
-          {page === 'launch' && canLaunch && (
-            <LaunchPage
-              onSubmit={handleSubmit}
-              isSubmitting={isSubmitting}
-              submitError={submitError}
-              apiFetch={apiFetch}
-            />
-          )}
-
-          {page === 'monitor' && canMonitor && (
+        {page === 'monitor' && (
+          <div className="max-w-7xl mx-auto px-6 py-8">
             <MonitorPage
+              settings={settings}
+              update={update}
+              sessionId={sessionId}
               runId={runId}
-              runMode={runMode}
-              inspireDatabase={lastJobParams?.['02_inspire_database'] || ''}
-              generationOptions={lastJobParams?.['08_generation_options']?.split(',') || []}
-              onNewRun={handleNewRun}
-              onBack={handleNewRun}
-              apiFetch={apiFetch}
+              onComplete={() => nav('results')}
             />
-          )}
+          </div>
+        )}
 
-          {page === 'results' && isConnected && (
-            <ResultsPage
-              apiFetch={apiFetch}
-              inspireDatabase={lastJobParams?.['02_inspire_database'] || ''}
-            />
-          )}
-
-          {/* Redirect if page not available */}
-          {page === 'launch' && !canLaunch && (
-            <div className="text-center py-12">
-              <Settings className="w-10 h-10 text-slate-600 mx-auto mb-3" />
-              <p className="text-slate-400 text-sm">Complete the configuration first.</p>
-              <button onClick={() => setPage('config')} className="mt-3 text-db-red-light text-sm font-medium hover:text-db-red transition-colors">
-                Go to Config →
-              </button>
+        {page === 'results' && (
+          <ErrorBoundary key="results">
+            <div className="max-w-6xl mx-auto px-6 py-8">
+              <ResultsPage settings={settings} update={update} sessionId={sessionId} />
             </div>
-          )}
+          </ErrorBoundary>
+        )}
+      </main>
 
-          {page === 'monitor' && !canMonitor && (
-            <div className="text-center py-12">
-              <Activity className="w-10 h-10 text-slate-600 mx-auto mb-3" />
-              <p className="text-slate-400 text-sm">No active run to monitor.</p>
-              <button onClick={() => setPage(canLaunch ? 'launch' : 'config')} className="mt-3 text-db-red-light text-sm font-medium hover:text-db-red transition-colors">
-                {canLaunch ? 'Launch a job →' : 'Go to Config →'}
-        </button>
-            </div>
-          )}
-
-          {/* Footer */}
-          <footer className="mt-16 pt-6 border-t border-white/5 flex items-center justify-center gap-2 text-[11px] text-slate-600">
-            <DatabricksLogo className="w-3.5 h-3.5 opacity-30" />
-            <span>Powered by Databricks Inspire AI</span>
-          </footer>
-        </main>
-      </div>
+      {/* Settings panel */}
+      {showSettings && (
+        <SettingsPanel
+          settings={settings}
+          update={update}
+          onClose={() => setShowSettings(false)}
+        />
+      )}
     </div>
   );
 }

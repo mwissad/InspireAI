@@ -1,38 +1,85 @@
-import { Settings, CircleCheck } from 'lucide-react';
+import { Settings } from 'lucide-react';
 import DatabricksLogo from './DatabricksLogo';
 
-export default function Header({ showSettings, onToggleSettings, isConnected }) {
+const NAV = [
+  { id: 'launch',  label: 'Launch',  step: 1 },
+  { id: 'monitor', label: 'Monitor', step: 2 },
+  { id: 'results', label: 'Results', step: 3 },
+];
+
+export default function Header({
+  page,
+  setPage,
+  onSettingsClick,
+  canLaunch,
+  canMonitor,
+  canResults,
+}) {
+  const enabled = {
+    launch: true,
+    monitor: canMonitor,
+    results: canResults || true,
+  };
+
   return (
-    <header className="border-b border-white/10 backdrop-blur-md bg-db-darkest/80 sticky top-0 z-50">
-      <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-3.5 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <DatabricksLogo className="w-9 h-9" />
-          <div>
-            <h1 className="text-lg font-bold text-white tracking-tight flex items-center gap-2">
-              Inspire AI
-            </h1>
-            <p className="text-[11px] text-slate-500 -mt-0.5">
-              Powered by <span className="text-db-red font-semibold">Databricks</span>
-            </p>
-          </div>
-        </div>
-        <div className="flex items-center gap-3">
-          {isConnected && (
-            <div className="flex items-center gap-1.5 text-xs text-db-teal">
-              <CircleCheck className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Connected</span>
-            </div>
-          )}
+    <header className="bg-surface/80 backdrop-blur-xl border-b border-border sticky top-0 z-40">
+      <div className="max-w-screen-xl mx-auto px-6">
+        <div className="flex items-center justify-between h-14">
+          {/* Brand */}
           <button
-            onClick={onToggleSettings}
-            className={`p-2 rounded-lg transition-all duration-200 ${
-              showSettings
-                ? 'bg-db-red/15 text-db-red-light ring-1 ring-db-red/30'
-                : 'text-slate-400 hover:text-white hover:bg-white/10'
-            }`}
-            title="Connection Settings"
+            onClick={() => setPage('landing')}
+            className="flex items-center gap-2.5 group"
           >
-            <Settings className="w-4.5 h-4.5" />
+            <DatabricksLogo className="w-7 h-7" />
+            <span className="text-text-primary font-bold text-xl tracking-tight">
+              Inspire AI
+            </span>
+            <span className="text-[10px] font-semibold text-db-red border border-db-red/30 bg-db-red-50 rounded-full px-2 py-0.5 ml-0.5">
+              v4.5
+            </span>
+          </button>
+
+          {/* Navigation */}
+          <nav className="flex items-center gap-0.5">
+            {NAV.map((item) => {
+              const active = page === item.id;
+              const can = enabled[item.id];
+              return (
+                <button
+                  key={item.id}
+                  onClick={() => can && setPage(item.id)}
+                  disabled={!can}
+                  className={`
+                    relative px-4 py-2 text-sm font-medium rounded-md transition-smooth
+                    ${active
+                      ? 'text-db-red bg-db-red-50'
+                      : can
+                        ? 'text-text-secondary hover:text-text-primary hover:bg-bg-subtle'
+                        : 'text-text-disabled cursor-not-allowed'
+                    }
+                  `}
+                >
+                  <span className="flex items-center gap-1.5">
+                    <span className={`text-xs font-mono ${active ? 'text-db-red' : 'opacity-50'}`}>
+                      {String(item.step).padStart(2, '0')}
+                    </span>
+                    {item.label}
+                  </span>
+                  {active && (
+                    <span className="absolute bottom-0 left-3 right-3 h-0.5 bg-db-red rounded-full" />
+                  )}
+                </button>
+              );
+            })}
+          </nav>
+
+          {/* Settings */}
+          <button
+            onClick={onSettingsClick}
+            className="p-2 rounded-md text-text-secondary hover:text-db-red hover:bg-db-red-50 transition-smooth"
+            title="Settings"
+          >
+            <Settings size={18} />
           </button>
         </div>
       </div>

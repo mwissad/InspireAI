@@ -1,321 +1,279 @@
-# 🚀 Inspire AI — Databricks Use Case Generation Platform
+# Inspire AI v4.3 — Data Strategy Copilot
 
-**Inspire AI** is a full-stack application that orchestrates an AI-powered pipeline on Databricks to automatically discover, generate, score, and document data & analytics use cases from your Unity Catalog metadata.
+> **Turn your data catalog into an actionable analytics strategy — powered by AI and Databricks.**
 
-Point it at your Databricks workspace, provide business context, and Inspire AI will analyze your data assets, generate hundreds of actionable use cases with SQL, assemble runnable notebooks, and produce executive-ready documentation — all from a sleek local UI.
+Inspire AI scans your Unity Catalog tables, understands their structure and relationships, and generates a comprehensive data strategy with prioritized use cases, SQL implementations, and business impact assessments — all in minutes, not months.
 
 ---
 
-## 📐 Architecture Overview
+## App Preview
+
+### Landing Page — 3D animated hero with Databricks branding
+![Landing Page](docs/screenshots/01_landing.png)
+
+### Launch — Simplified essentials (Business Name + Unity Catalog)
+![Launch](docs/screenshots/02_launch.png)
+
+### Settings — Live warehouse selector with status badges
+![Settings](docs/screenshots/03_settings.png)
+
+### Advanced Settings — Generation options, operation mode, and more
+![Advanced Settings](docs/screenshots/04_advanced.png)
+
+### Results — Explore generated use cases with domain filtering
+![Results](docs/screenshots/05_results.png)
+
+---
+
+## What's New in v4.3
+
+| Change | Details |
+|--------|---------|
+| **Simplified Launch Page** | Only Business Name and Unity Catalog Metadata are required upfront — everything else moved to Advanced Settings |
+| **Live Warehouse Selector** | Settings panel now shows a dropdown with real-time warehouse status (RUNNING/STOPPED/STARTING) and color-coded badges |
+| **Seamless Notebook Publishing** | Notebook auto-publishes to `/Shared/inspire_ai` — no manual configuration needed |
+| **Collapsible Pipeline Monitor** | Detailed steps view is now an expandable "Advanced" accordion, collapsed by default |
+| **Databricks App Deployment** | Deploy as `inspire-ai-v43` with one command — ready for customer demos |
+| **Removed Features** | Unstructured data + dashboards features removed; AI model widget removed; model cascade uses (type, size) pairs |
+
+---
+
+## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                     Local Machine                           │
-│                                                             │
-│  ┌──────────────────┐       ┌──────────────────────────┐    │
-│  │  React Frontend  │──────▶│   Node.js Backend        │    │
-│  │  (Vite + Tailwind│  API  │   (Express, port 3001)   │    │
-│  │   port 5173)     │◀──────│                          │    │
-│  └──────────────────┘       └────────────┬─────────────┘    │
-│                                          │                  │
-└──────────────────────────────────────────┼──────────────────┘
-                                           │ Databricks REST APIs
-                                           │ (Jobs, Clusters, Unity Catalog,
-                                           │  SQL Statement Execution, Workspace)
-                                           ▼
-                  ┌──────────────────────────────────────────┐
-                  │          Databricks Workspace            │
-                  │                                          │
-                  │  ┌────────────────────────────────────┐  │
-                  │  │   Multi-Task Pipeline (9 notebooks) │  │
-                  │  │                                      │  │
-                  │  │  01_init_validate                    │  │
-                  │  │       ▼                              │  │
-                  │  │  02_business_context                 │  │
-                  │  │       ▼                              │  │
-                  │  │  03_schema_discovery                 │  │
-                  │  │       ▼                              │  │
-                  │  │  04_use_case_gen                     │  │
-                  │  │       ▼                              │  │
-                  │  │  05_scoring_quality                  │  │
-                  │  │       ▼                              │  │
-                  │  │  06_sql_notebooks                    │  │
-                  │  │       ▼                              │  │
-                  │  │  07_documentation                    │  │
-                  │  │       ▼                              │  │
-                  │  │  08_samples_finalize                 │  │
-                  │  └────────────────────────────────────┘  │
-                  │                                          │
-                  │  ┌────────────────────────────────────┐  │
-                  │  │  Unity Catalog (Delta Tables)       │  │
-                  │  │  └─ <catalog>.<schema>              │  │
-                  │  │     ├─ _pipeline_state              │  │
-                  │  │     ├─ _pipeline_use_cases_raw      │  │
-                  │  │     ├─ _pipeline_use_cases_scored   │  │
-                  │  │     ├─ _pipeline_use_cases_final    │  │
-                  │  │     ├─ _pipeline_business_schema    │  │
-                  │  │     └─ __inspire_usecases           │  │
-                  │  └────────────────────────────────────┘  │
-                  └──────────────────────────────────────────┘
+┌─────────────────────────────────────────────────┐
+│  Frontend  (React 19 · Vite · Tailwind CSS v4)  │
+│  Glow UI — Databricks brand design system       │
+├────────────────────┬────────────────────────────┤
+│  Static assets     │  Backend (Express 5 · Node) │
+│  served by backend │  • Databricks REST API proxy │
+│  in production     │  • SQL Statement API bridge  │
+│                    │  • Auto notebook publish      │
+└────────────────────┴──────────┬─────────────────┘
+                                │
+                   ┌────────────▼────────────┐
+                   │    Databricks Workspace   │
+                   │  • Unity Catalog metadata │
+                   │  • SQL Warehouse (compute) │
+                   │  • /Shared/inspire_ai      │
+                   │  • _inspire session tables  │
+                   └────────────────────────────┘
 ```
 
 ---
 
-## 🧩 Components
+## Deploy as a Databricks App
 
-### Frontend (`frontend/`)
-
-| Tech | Purpose |
-|------|---------|
-| React 19 | UI framework |
-| Vite 7 | Dev server & bundler |
-| Tailwind CSS 4 | Styling |
-| Lucide React | Icons |
-
-**Pages:**
-
-| Page | Description |
-|------|-------------|
-| **Landing** | Welcome screen with branding |
-| **Config** | Connect to Databricks (token, cluster, notebook paths), publish notebooks |
-| **Launch** | Configure pipeline parameters (catalog, schema, business context, AI model) and submit |
-| **Monitor** | Real-time job tracking with per-task status, logs, and progress |
-| **Results** | Browse generated use cases — filterable cards with scores, SQL, and metadata |
-
-### Backend (`backend/`)
-
-| Tech | Purpose |
-|------|---------|
-| Express 5 | HTTP server |
-| Multer | File upload handling (DBC import) |
-| dotenv | Environment config |
-
-**Key API Endpoints:**
-
-| Endpoint | Description |
-|----------|-------------|
-| `POST /api/run/pipeline` | Submit the 9-step multi-task pipeline as a Databricks job |
-| `POST /api/run` | Submit a single notebook run |
-| `GET /api/run/:id/status` | Poll job/task status |
-| `GET /api/run/:id/output` | Retrieve notebook output |
-| `GET /api/catalogs` | List Unity Catalog catalogs |
-| `GET /api/catalogs/:name/schemas` | List schemas in a catalog |
-| `GET /api/warehouses` | List SQL warehouses |
-| `GET /api/clusters` | List available clusters |
-| `POST /api/publish/pipeline` | Upload notebooks to Databricks workspace |
-| `GET /api/results/tables` | List pipeline output tables in a schema |
-| `GET /api/results/use-cases` | Fetch generated use cases from Delta tables |
-| `GET /api/results/pipeline-state` | Fetch pipeline execution state |
-
-### Notebooks (`notebooks/`)
-
-The AI pipeline is composed of 9 Databricks notebooks plus a shared commons library:
-
-| Notebook | Description |
-|----------|-------------|
-| `00_inspire_commons.py` | Shared library — `DatabricksInspire` class, `PipelineState`, utilities, LLM orchestration |
-| `01_init_validate.py` | Validate inputs, check catalog/schema existence, initialize pipeline state |
-| `02_business_context.py` | Extract business context from documents & user input using LLM |
-| `03_schema_discovery.py` | Discover Unity Catalog metadata — tables, columns, comments, relationships |
-| `04_use_case_gen.py` | Generate use cases via 2-pass LLM ensemble with table coverage retries |
-| `05_scoring_quality.py` | Cluster, deduplicate, score, and quality-filter use cases |
-| `06_sql_notebooks.py` | Generate SQL for each use case, validate it, assemble domain notebooks |
-| `07_documentation.py` | Generate PDF, PPTX, and Excel catalogs |
-| `08_samples_finalize.py` | Execute sample queries and finalize the pipeline |
-
-State between notebooks is persisted via Delta tables using the `PipelineState` class.
-
----
-
-## ⚡ Quick Start
-
-### Prerequisites
-
-- **Node.js** ≥ 18
-- **npm** ≥ 9
-- A **Databricks workspace** with:
-  - A Personal Access Token (PAT)
-  - Access to Unity Catalog
-  - A SQL Warehouse or All-Purpose Cluster
-  - (Optional) Serverless compute enabled
-
-### 1. Clone the repository
+### Quick Start
 
 ```bash
+# 1. Clone & checkout
 git clone https://github.com/mwissad/InspireApp.git
 cd InspireApp
+git checkout v43_newfeatures_fix
+
+# 2. Build frontend
+cd frontend && npm install && npx vite build && cd ..
+
+# 3. Authenticate Databricks CLI
+databricks auth login \
+  --host "https://<your-workspace>.azuredatabricks.net" \
+  --profile inspire-deploy
+
+# 4. Create the app (first time only)
+databricks apps create inspire-ai-v43 \
+  --description "Inspire AI v4.3 - Data Strategy Copilot" \
+  -p inspire-deploy
+
+# 5. Sync files to workspace (excludes node_modules automatically)
+databricks sync . "/Workspace/Users/<your-email>/inspire-ai-v43" \
+  --exclude node_modules \
+  --exclude .venv \
+  --exclude __pycache__ \
+  --exclude .git \
+  --exclude "frontend/src" \
+  --exclude "frontend/public" \
+  -p inspire-deploy
+
+# 6. Upload built frontend
+databricks workspace import-dir frontend/dist \
+  "/Workspace/Users/<your-email>/inspire-ai-v43/frontend/dist" \
+  --overwrite \
+  -p inspire-deploy
+
+# 7. Deploy
+databricks apps deploy inspire-ai-v43 \
+  --source-code-path "/Workspace/Users/<your-email>/inspire-ai-v43" \
+  -p inspire-deploy
 ```
 
-### 2. Install dependencies
+Your app will be available at: `https://inspire-ai-v43-<workspace-id>.<region>.databricksapps.com`
+
+> For a full step-by-step guide with troubleshooting, see **[DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md)**.
+
+### Run Locally (Development)
 
 ```bash
-npm run install:all
+# 1. Install dependencies
+cd frontend && npm install && cd ../backend && npm install && cd ..
+
+# 2. Configure backend env
+cat > backend/.env << 'EOF'
+DATABRICKS_HOST=https://<your-workspace>.azuredatabricks.net
+DATABRICKS_TOKEN=dapi...
+PORT=8080
+EOF
+
+# 3. Start backend
+cd backend && node server.js &
+
+# 4. Start frontend (with proxy to backend)
+cd frontend && npx vite
 ```
 
-This installs both frontend and backend dependencies in one command.
-
-### 3. Configure environment
-
-```bash
-cp backend/.env.example backend/.env
-```
-
-Edit `backend/.env`:
-
-```env
-DATABRICKS_HOST=https://your-workspace.azuredatabricks.net
-```
-
-> **Note:** The Databricks PAT token is entered in the UI (Config page), not stored in `.env`.
-
-### 4. Start the application
-
-```bash
-npm run dev
-```
-
-This starts both servers concurrently:
-- **Frontend:** [http://localhost:5173](http://localhost:5173)
-- **Backend:** [http://localhost:3001](http://localhost:3001)
-
-Or start them separately:
-
-```bash
-# Terminal 1 — Backend
-cd backend && npm start
-
-# Terminal 2 — Frontend
-cd frontend && npm run dev
-```
-
-### 5. Use the app
-
-1. Open [http://localhost:5173](http://localhost:5173)
-2. **Config page:** Enter your Databricks PAT token, select a cluster, and publish the pipeline notebooks
-3. **Launch page:** Configure parameters (catalog to analyze, business context, AI model) and submit
-4. **Monitor page:** Watch real-time progress of all 8 pipeline tasks
-5. **Results page:** Browse, search, and filter the generated use cases
+- **Frontend** -> [http://localhost:5173](http://localhost:5173) (proxies `/api` to backend)
+- **Backend** -> [http://localhost:8080](http://localhost:8080)
 
 ---
 
-## 📁 Project Structure
+## How to Use
+
+### Step 1: Launch
+1. Click **Get Started** on the landing page
+2. Enter the **Business Name** (e.g. "Acme Corp")
+3. Browse **Unity Catalog** — select catalogs, schemas, and tables to analyze
+4. (Optional) Expand **Advanced Settings** to configure generation options, priorities, domains, etc.
+5. Click **Launch Inspire AI**
+
+> The notebook is auto-published to `/Shared/inspire_ai` — no manual setup needed.
+
+### Step 2: Configure (Settings Panel)
+Click the **Settings** gear icon in the header to:
+- Set the **Databricks Host URL** and **Access Token** for the target workspace
+- Select a **SQL Warehouse** from the live dropdown (shows RUNNING/STOPPED status)
+- Set the **Inspire Database** (e.g. `catalog._inspire`) for session tracking
+
+### Step 3: Monitor
+- Watch real-time pipeline progress with the summary bar (stages, steps, errors)
+- Expand the **Advanced** accordion to see detailed step-by-step execution with stage filtering and search
+
+### Step 4: Results
+- Browse generated use cases by **domain**, **priority**, and **type**
+- Expand cards for problem statements, solutions, SQL, and business value
+- **Export JSON** for downstream use
+
+> **First run note**: If upgrading from v41, drop existing tables first:
+> ```sql
+> DROP TABLE IF EXISTS <catalog>.<schema>.__inspire_session;
+> DROP TABLE IF EXISTS <catalog>.<schema>.__inspire_step;
+> ```
+
+---
+
+## Features
+
+| Feature | Description |
+|---------|-------------|
+| **3D Landing Page** | Three.js animated hero with Databricks red cubes and particles |
+| **Simplified Launch** | Only Business Name + Unity Catalog required — everything else in Advanced Settings |
+| **Live Warehouse Selector** | Dropdown with real-time status badges (RUNNING, STOPPED, STARTING) |
+| **Seamless Notebook Publish** | Auto-publishes to `/Shared/inspire_ai` on first run — zero configuration |
+| **Collapsible Monitor** | Pipeline details in an expandable accordion — clean overview by default |
+| **Multi-workspace** | Connect to any customer workspace via PAT — no redeployment needed |
+| **Real-time Monitoring** | Live step tracking with stage sidebar, status pills, and search |
+| **Domain Filtering** | Left sidebar for domain-based filtering on Monitor and Results pages |
+| **Priority Sorting** | Filter and sort use cases by Ultra High, Very High, High, Medium, Low |
+| **SQL Implementation** | Generated SQL queries with syntax highlighting and table resolution |
+| **JSON Export** | Download filtered results for reporting or integration |
+| **Databricks App Ready** | Deploy with `app.yaml` + `start.sh` — runs on Databricks Apps platform |
+
+---
+
+## Configuration
+
+All configuration is done through the UI (Settings panel) or environment variables:
+
+| Setting | Where | Description |
+|---------|-------|-------------|
+| Databricks Host | Settings panel + env `DATABRICKS_HOST` | Target workspace URL |
+| Access Token | Settings panel (passed via `X-DB-PAT-Token` header) | Workspace PAT token |
+| SQL Warehouse | Settings panel (live dropdown) | For query execution |
+| Inspire Database | Settings panel | `catalog.schema` for session tracking |
+| Notebook Path | Auto-managed (`/Shared/inspire_ai`) | Where Inspire notebook is published |
+
+---
+
+## Project Structure
 
 ```
 InspireApp/
-├── package.json                  # Root: dev scripts (concurrent start)
-├── README.md
-├── .gitignore
-│
+├── app.yaml                     # Databricks App manifest
+├── start.sh                     # Production startup script
+├── DEPLOYMENT_GUIDE.md          # Full deployment & troubleshooting guide
+├── package.json                 # Root scripts (dev, build, start)
+├── databricks_inspire_v43.dbc   # Original DBC notebook file (v4.3)
 ├── backend/
-│   ├── package.json              # Express server dependencies
-│   ├── server.js                 # All API routes & Databricks integration
-│   └── .env.example              # Environment template
-│
+│   ├── server.js                # Express API — Databricks proxy, SQL bridge, auto notebook publish
+│   ├── dbc_bundle.js            # Embedded DBC notebook (base64)
+│   └── package.json             # Backend dependencies
 ├── frontend/
-│   ├── package.json              # React + Vite dependencies
-│   ├── vite.config.js            # Vite config with API proxy to backend
-│   ├── index.html                # Entry HTML
-│   └── src/
-│       ├── App.jsx               # Main app with routing & navigation
-│       ├── main.jsx              # React entry point
-│       ├── index.css             # Tailwind + custom styles
-│       ├── components/           # Reusable UI components
-│       │   ├── ConfigForm.jsx    # Pipeline parameter form
-│       │   ├── Header.jsx        # Page headers
-│       │   ├── RunStatus.jsx     # Job status badges
-│       │   ├── SettingsPanel.jsx  # Connection settings
-│       │   ├── Stepper.jsx       # Pipeline progress stepper
-│       │   └── DatabricksLogo.jsx
-│       └── pages/
-│           ├── LandingPage.jsx   # Welcome screen
-│           ├── ConfigPage.jsx    # Databricks connection setup
-│           ├── LaunchPage.jsx    # Parameter config & job submission
-│           ├── MonitorPage.jsx   # Real-time job monitoring
-│           └── ResultsPage.jsx   # Use case browser
-│
-├── notebooks/
-│   ├── 00_inspire_commons.py     # Shared library (~34K lines)
-│   ├── 01_init_validate.py       # Step 1: Init & validate
-│   ├── 02_business_context.py    # Step 2: Business context extraction
-│   ├── 03_schema_discovery.py    # Step 3: Schema discovery
-│   ├── 04_use_case_gen.py        # Step 4: Use case generation
-│   ├── 05_scoring_quality.py     # Step 5: Scoring & quality
-│   ├── 06_sql_notebooks.py       # Step 6: SQL gen & notebooks
-│   ├── 07_documentation.py       # Step 7: Documentation
-│   ├── 08_samples_finalize.py    # Step 8: Samples & finalize
-│   └── workflow_definition.json  # Multi-task pipeline DAG definition
-│
-├── databricks_inspire_v38.dbc    # Bundled DBC archive (auto-published)
-└── split_notebook.py             # Utility: split monolith into notebooks
+│   ├── src/
+│   │   ├── App.jsx              # Root component, routing, auto-config, ErrorBoundary
+│   │   ├── index.css            # Tailwind v4 theme (Glow design system)
+│   │   ├── components/
+│   │   │   ├── Header.jsx       # Navigation bar with step indicators
+│   │   │   ├── HeroScene3D.jsx  # Three.js 3D animated landing scene
+│   │   │   ├── SettingsPanel.jsx # Side panel — warehouse selector, config fields
+│   │   │   └── DatabricksLogo.jsx
+│   │   └── pages/
+│   │       ├── LandingPage.jsx  # 3D hero + onboarding
+│   │       ├── LaunchPage.jsx   # Simplified essentials + advanced accordion
+│   │       ├── MonitorPage.jsx  # Real-time tracker with collapsible details
+│   │       └── ResultsPage.jsx  # Use-case catalog browser
+│   └── vite.config.js           # Vite + React + Tailwind v4 + API proxy
+├── docs/screenshots/            # App screenshots for documentation
+└── notebooks/                   # Extracted notebook source files
 ```
 
 ---
 
-## 🔧 Configuration Reference
+## Tech Stack
 
-### Pipeline Parameters (set in Launch page)
-
-| Parameter | Description |
-|-----------|-------------|
-| `inspire_database` | Target `catalog.schema` where pipeline stores results |
-| `catalogs_to_analyze` | Comma-separated list of catalogs to scan |
-| `schemas_to_analyze` | Comma-separated schemas to include (or `*` for all) |
-| `business_context` | Free-text business description for the LLM |
-| `ai_model_name` | Databricks Foundation Model endpoint (e.g., `databricks-claude-sonnet-4`) |
-| `max_parallelism` | Max concurrent LLM calls (default: 10) |
-| `generation_options` | Output types: `excel`, `notebooks`, `pdf`, `pptx` |
-
-### Environment Variables (`backend/.env`)
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `DATABRICKS_HOST` | Yes | — | Full Databricks workspace URL |
-| `NOTEBOOK_PATH` | No | — | Default notebook path (overridable in UI) |
-| `PORT` | No | `3001` | Backend server port |
+| Layer | Technology |
+|-------|-----------|
+| Frontend | React 19, Vite 7, Tailwind CSS v4, Three.js |
+| Icons | Lucide React |
+| Backend | Express 5, Node.js 18+ |
+| Deployment | Databricks App (`app.yaml`) |
+| Notebook | Databricks .dbc v4.3 (Python) |
+| API | Databricks REST API, SQL Statement API |
 
 ---
 
-## 🔒 Security Notes
+## API Endpoints
 
-- The Databricks PAT token is **never stored on disk** — it lives only in browser memory during the session.
-- The backend acts as a proxy, forwarding your token to Databricks APIs. It does not persist or log tokens.
-- Add `backend/.env` to `.gitignore` (already included) to avoid committing secrets.
+All endpoints accept `X-DB-PAT-Token` header for authentication.
+The `X-Databricks-Host` header specifies the target workspace.
 
----
-
-## 🛠️ Development
-
-### Adding a new page
-
-1. Create `frontend/src/pages/MyPage.jsx`
-2. Add the page to the `PAGES` array in `App.jsx`
-3. Add the rendering condition in the `<main>` section
-
-### Adding a new API endpoint
-
-1. Add the route in `backend/server.js`
-2. Use `requireToken` middleware for authenticated endpoints
-3. Use `dbFetch()` helper for Databricks API calls
-4. Use `executeSqlStatement()` for SQL queries via warehouses
-
-### Modifying the pipeline
-
-1. Edit notebooks in `notebooks/`
-2. Update `workflow_definition.json` if adding/removing steps
-3. Re-publish via the Config page in the UI
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/health` | Health check + configuration status |
+| `GET` | `/api/me` | Current user info |
+| `GET` | `/api/warehouses` | List SQL warehouses with status |
+| `GET` | `/api/notebook` | Auto-publish notebook to `/Shared/inspire_ai` |
+| `GET` | `/api/catalogs` | List Unity Catalog catalogs |
+| `GET` | `/api/catalogs/:c/schemas` | List schemas in a catalog |
+| `GET` | `/api/tables/:c/:s` | List tables with metadata |
+| `POST` | `/api/publish` | Manually publish Inspire notebook (.dbc) |
+| `POST` | `/api/run` | Submit a notebook run |
+| `GET` | `/api/run/:id` | Get run status |
+| `GET` | `/api/inspire/session` | Poll session status |
+| `GET` | `/api/inspire/sessions` | List all sessions |
+| `GET` | `/api/inspire/steps` | Get step progress |
+| `GET` | `/api/inspire/results` | Get results JSON |
 
 ---
 
-## 📄 License
+## License
 
-MIT
-
----
-
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/my-feature`)
-3. Commit your changes (`git commit -am 'Add my feature'`)
-4. Push to the branch (`git push origin feature/my-feature`)
-5. Open a Pull Request
+Proprietary — provided under the terms of the customer engagement agreement.

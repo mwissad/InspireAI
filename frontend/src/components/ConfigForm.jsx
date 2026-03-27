@@ -1,8 +1,8 @@
 import { useState, useMemo, useEffect, useCallback } from 'react';
 import {
-  Building2, Database, FolderOpen, Brain, Target, Layers,
+  Building2, Database, FolderOpen, Target, Layers,
   Zap, Play, AlertCircle, ChevronDown, ChevronUp, ChevronRight, ChevronLeft,
-  Sparkles, FileText, Presentation, LayoutDashboard, Code2,
+  Sparkles, FileText, Presentation, Code2,
   FileSearch, Info, Search, Pencil, Check, RotateCcw, Loader2, RefreshCw
 } from 'lucide-react';
 import Stepper from './Stepper';
@@ -15,8 +15,9 @@ const OPERATION_OPTIONS = [
 ];
 
 const QUALITY_OPTIONS = [
-  { value: 'Extreme Quality', label: 'Extreme', desc: 'Maximum quality — slower, most thorough', tag: 'Recommended' },
+  { value: 'Very High Quality', label: 'Very High', desc: 'Maximum quality — slower, most thorough', tag: 'Recommended' },
   { value: 'High Quality', label: 'High', desc: 'Fast with high quality results' },
+  { value: 'Good Quality', label: 'Good', desc: 'Fastest — basic quality analysis' },
 ];
 
 const BUSINESS_PRIORITIES = [
@@ -37,8 +38,6 @@ const GENERATION_OPTIONS = [
   { value: 'Sample Results', label: 'Sample Results', icon: FileSearch, desc: 'Run sample queries with real data' },
   { value: 'PDF Catalog', label: 'PDF Catalog', icon: FileText, desc: 'Professional PDF documentation' },
   { value: 'Presentation', label: 'Presentation', icon: Presentation, desc: 'Executive-ready PowerPoint slides' },
-  { value: 'dashboards', label: 'Dashboards', icon: LayoutDashboard, desc: 'Generate dashboard notebooks' },
-  { value: 'Unstructured Data Usecases', label: 'Unstructured Data', icon: Layers, desc: 'Use cases for unstructured data' },
 ];
 
 const LANGUAGES = [
@@ -47,6 +46,14 @@ const LANGUAGES = [
   { group: 'Asian & Other', items: ['Hindi', 'Korean', 'Indonesian', 'Malay', 'Tamil', 'Russian'] },
 ];
 const ALL_LANGUAGES = LANGUAGES.flatMap(g => g.items);
+
+const TABLE_ELECTION_OPTIONS = [
+  { value: 'Let Inspire Decides', label: 'Let Inspire Decide', desc: 'AI selects the most relevant tables' },
+  { value: 'All Tables', label: 'All Tables', desc: 'Analyze every table in scope' },
+  { value: 'Transactional Only', label: 'Transactional Only', desc: 'Focus on transactional tables' },
+];
+
+const SQL_PER_DOMAIN_OPTIONS = ['0', '1', '2', '3', '4', '5', 'All'];
 
 /* ─── Main Component ─── */
 
@@ -59,14 +66,16 @@ export default function ConfigForm({ onSubmit, isSubmitting, submitError, disabl
     uc_metadata: '',
     inspire_database: '',
     operation: 'Discover Usecases',
-    quality_level: 'Extreme Quality',
+    table_election: 'Let Inspire Decides',
+    use_cases_quality: 'High Quality',
     business_domains: '',
     business_priorities: 'Increase Revenue',
     strategic_goals: '',
     generation_options: ['SQL Code'],
+    sql_generation_per_domain: '0',
     generation_path: './inspire_gen/',
     documents_languages: ['English'],
-    ai_model: 'databricks-gpt-oss-120b',
+    session_id: '',
   });
 
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -171,19 +180,23 @@ export default function ConfigForm({ onSubmit, isSubmitting, submitError, disabl
   };
 
   const handleSubmit = () => {
+    const finalSessionId = form.session_id ||
+      String(Date.now()) + String(Math.floor(Math.random() * 1e6));
     const params = {
       '00_business_name': form.business_name,
       '01_uc_metadata': form.uc_metadata,
       '02_inspire_database': form.inspire_database,
       '03_operation': form.operation,
-      '04_quality_level': form.quality_level,
-      '05_business_domains': form.business_domains,
-      '06_business_priorities': form.business_priorities,
-      '07_strategic_goals': form.strategic_goals,
-      '08_generation_options': form.generation_options.join(','),
-      '09_generation_path': form.generation_path,
-      '10_documents_languages': form.documents_languages.join(','),
-      '11_ai_model': form.ai_model,
+      '04_table_election': form.table_election,
+      '05_use_cases_quality': form.use_cases_quality,
+      '06_business_domains': form.business_domains,
+      '07_business_priorities': form.business_priorities,
+      '08_strategic_goals': form.strategic_goals,
+      '09_generation_options': form.generation_options.join(','),
+      '10_sql_generation_per_domain': form.sql_generation_per_domain,
+      '11_generation_path': form.generation_path,
+      '12_documents_languages': form.documents_languages.join(','),
+      '14_session_id': finalSessionId,
     };
     onSubmit(params);
   };
@@ -444,18 +457,44 @@ function StepEssentials({ form, update, catalogs, catalogsLoading, isValidInspir
         </div>
       </div>
 
-      {/* Quality — segmented toggle */}
+      {/* Table Election */}
       <div className="rounded-xl border border-white/10 bg-db-navy/40 p-5">
-        <label className="block text-sm font-medium text-white mb-1">Quality Level</label>
-        <p className="text-xs text-slate-500 mb-3">Higher quality takes longer but produces more thorough results.</p>
+        <label className="block text-sm font-medium text-white mb-1">Table Election</label>
+        <p className="text-xs text-slate-500 mb-3">How should Inspire select tables for analysis?</p>
         <div className="flex gap-3">
-          {QUALITY_OPTIONS.map((opt) => {
-            const sel = form.quality_level === opt.value;
+          {TABLE_ELECTION_OPTIONS.map((opt) => {
+            const sel = form.table_election === opt.value;
             return (
               <button
                 key={opt.value}
                 type="button"
-                onClick={() => update('quality_level', opt.value)}
+                onClick={() => update('table_election', opt.value)}
+                className={`flex-1 relative p-3.5 rounded-lg border text-center transition-all duration-200 ${
+                  sel
+                    ? 'bg-db-red/10 border-db-red/50 ring-1 ring-db-red/20'
+                    : 'bg-db-darkest/40 border-white/10 hover:border-white/20'
+                }`}
+              >
+                <p className={`text-sm font-medium ${sel ? 'text-white' : 'text-slate-300'}`}>{opt.label}</p>
+                <p className="text-xs text-slate-500 mt-0.5">{opt.desc}</p>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Quality — segmented toggle */}
+      <div className="rounded-xl border border-white/10 bg-db-navy/40 p-5">
+        <label className="block text-sm font-medium text-white mb-1">Use Cases Quality</label>
+        <p className="text-xs text-slate-500 mb-3">Higher quality takes longer but produces more thorough results.</p>
+        <div className="flex gap-3">
+          {QUALITY_OPTIONS.map((opt) => {
+            const sel = form.use_cases_quality === opt.value;
+            return (
+              <button
+                key={opt.value}
+                type="button"
+                onClick={() => update('use_cases_quality', opt.value)}
                 className={`flex-1 relative p-3.5 rounded-lg border text-center transition-all duration-200 ${
                   sel
                     ? 'bg-db-red/10 border-db-red/50 ring-1 ring-db-red/20'
@@ -689,12 +728,24 @@ function StepCustomize({ form, update, toggleMulti, showAdvanced, setShowAdvance
               value={form.generation_path}
               onChange={(v) => update('generation_path', v)}
             />
+            <div>
+              <label className="block text-xs font-medium text-slate-500 mb-1">SQL Generation per Domain</label>
+              <select
+                value={form.sql_generation_per_domain}
+                onChange={(e) => update('sql_generation_per_domain', e.target.value)}
+                className="w-full px-3 py-2 rounded-lg bg-db-darkest/60 border border-white/8 text-white text-xs focus:outline-none focus:ring-1 focus:ring-db-red/30 transition-all"
+              >
+                {SQL_PER_DOMAIN_OPTIONS.map((o) => (
+                  <option key={o} value={o}>{o}</option>
+                ))}
+              </select>
+            </div>
             <MiniInput
-              icon={Brain}
-              label="AI Model"
-              placeholder="databricks-gpt-oss-120b"
-              value={form.ai_model}
-              onChange={(v) => update('ai_model', v)}
+              icon={FolderOpen}
+              label="Session ID"
+              placeholder="Auto-generated if empty"
+              value={form.session_id}
+              onChange={(v) => update('session_id', v)}
             />
           </div>
         )}
@@ -722,11 +773,13 @@ function StepReview({ form, onEdit }) {
           <ReviewRow label="UC Metadata" value={form.uc_metadata} mono />
           <ReviewRow label="Inspire Database" value={form.inspire_database} mono />
           <ReviewRow label="Operation" value={form.operation} />
-          <ReviewRow label="Quality" value={form.quality_level} />
+          <ReviewRow label="Table Election" value={form.table_election} />
+          <ReviewRow label="Use Cases Quality" value={form.use_cases_quality} />
         </ReviewSection>
 
         {/* Customization */}
         <ReviewSection title="Customization" onEdit={() => onEdit(1)}>
+          <ReviewRow label="SQL per Domain" value={form.sql_generation_per_domain} />
           <ReviewRow label="Business Priority" value={form.business_priorities} />
           <ReviewRow label="Business Domains" value={form.business_domains || '(auto-detected)'} />
           <ReviewRow label="Strategic Goals" value={form.strategic_goals || '(AI auto-generated)'} />
@@ -743,10 +796,11 @@ function StepReview({ form, onEdit }) {
         </ReviewSection>
 
         {/* Advanced (only if set) */}
-        {(form.generation_path !== './inspire_gen/' || form.ai_model !== 'databricks-gpt-oss-120b') && (
+        {(form.generation_path !== './inspire_gen/' || form.sql_generation_per_domain !== '0' || form.session_id) && (
           <ReviewSection title="Advanced" onEdit={() => onEdit(1)}>
             {form.generation_path !== './inspire_gen/' && <ReviewRow label="Generation Path" value={form.generation_path} mono />}
-            {form.ai_model !== 'databricks-gpt-oss-120b' && <ReviewRow label="AI Model" value={form.ai_model} mono />}
+            {form.sql_generation_per_domain !== '0' && <ReviewRow label="SQL per Domain" value={form.sql_generation_per_domain} />}
+            {form.session_id && <ReviewRow label="Session ID" value={form.session_id} mono />}
           </ReviewSection>
         )}
       </div>

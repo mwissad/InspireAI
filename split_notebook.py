@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Split databricks_inspire_v38.dbc into independent phase notebooks
+Split databricks_inspire_v45.dbc into independent phase notebooks
 for a Databricks Lakeflow (Workflows) multi-task job.
 
 Architecture:
@@ -10,14 +10,15 @@ Architecture:
   03_schema_discovery  — DataLoader, table filtering, batch preparation
   04_use_case_gen      — 2-pass ensemble use case generation
   05_scoring_quality   — Clustering, scoring, dedup, quality filtering
-  06_sql_notebooks     — Domain-by-domain SQL generation & notebook assembly
+  06_genie_notebooks   — Genie code instructions generation & notebook assembly
   07_documentation     — PDF, PPTX, Excel, CSV, Markdown catalogs
-  08_samples_finalize  — Sample result execution, cleanup, reporting
+  08_samples_finalize  — Cleanup and final reporting
 
 State between phases is persisted via:
   - Delta table: {inspire_database}._inspire_pipeline_state (JSON config)
   - IntermediateStorageManager: file-based use case storage
-  - Delta tables: tracking table, use case catalog
+  - Delta tables: __inspire_session, __inspire_step (tracking)
+  - Delta tables: use case catalog
 """
 
 import json
@@ -26,7 +27,7 @@ import zipfile
 import shutil
 
 # ─── Configuration ───
-DBC_PATH = "databricks_inspire_v38.dbc"
+DBC_PATH = "databricks_inspire_v45.dbc"
 OUTPUT_DIR = "notebooks"
 
 # ─── Extract notebook from DBC ───
@@ -55,7 +56,7 @@ def main():
     print("📂 Extracting notebook from DBC...")
     nb = extract_notebook_source(DBC_PATH)
     
-    # The main code is in commands[1]
+    # v45: main code is in commands[1] (commands[0] is entry point, commands[2] is markdown)
     main_code = nb['commands'][1]['command']
     lines = main_code.split('\n')
     total_lines = len(lines)
@@ -238,22 +239,23 @@ create_widgets()
     # --- Build config dict from validated widget values ---
     widget_values = {
         "business": business_name,
+        "inspire_database": inspire_database,
+        "operation_mode": operation_mode,
+        "table_election_mode": table_election_mode,
+        "use_cases_quality": use_cases_quality,
+        "strategic_goals": strategic_goals_str,
+        "business_priorities": business_priorities_str,
+        "business_domains": business_domains_str,
         "catalogs": catalogs_str,
         "schemas": schemas_str,
         "tables": tables_str,
         "generate": generate_str,
         "generation_path": generation_path,
         "output_language": output_language_str,
-        "business_priorities": business_priorities_str,
-        "strategic_goals": strategic_goals_str,
-        "business_domains": business_domains_str,
-        "use_unstructured_data": use_unstructured_data_str,
+        "sql_generation_per_domain": sql_generation_per_domain,
         "technical_exclusion_strategy": technical_exclusion_strategy,
-        "operation_mode": operation_mode,
-        "sql_model_serving": sql_model_serving,
-        "quality_level": quality_level,
         "json_file_path": json_file_path,
-        "inspire_database": inspire_database,
+        "session_id": user_session_id,
     }
 
     # --- Save validated config to pipeline state ---

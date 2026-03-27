@@ -108,7 +108,7 @@ with ThreadPoolExecutor(max_workers=batch_parallelism, thread_name_prefix="Pass1
         futures[future] = uid
     
     done_count = 0
-    timeout = (len(batches_to_process) * 900) // max(batch_parallelism, 1) + 600
+    timeout = (len(batches_to_process) * 900) // inspirer.max_parallelism + 600
     try:
         for f in concurrent.futures.as_completed(futures, timeout=timeout):
             uid = futures[f]

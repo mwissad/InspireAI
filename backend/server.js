@@ -4,41 +4,92 @@ const dotenv = require('dotenv');
 const fs = require('fs');
 const path = require('path');
 const multer = require('multer');
+const AdmZip = require('adm-zip');
 
 dotenv.config();
 
 const app = express();
-app.use(cors());
 app.use(express.json({ limit: '50mb' }));
+
+// ═══════════════════════════════════════════════════
+//  Environment Configuration (generic — no defaults)
+// ═══════════════════════════════════════════════════
+
+// DATABRICKS_HOST: required — set by the Databricks App runtime or by the admin.
+// No hardcoded workspace URL — the app is customer-agnostic.
+const DATABRICKS_HOST = process.env.DATABRICKS_HOST || '';
+const DEFAULT_NOTEBOOK_PATH = process.env.NOTEBOOK_PATH || '';
+
+// Optional: when deployed as a Databricks App, the runtime may inject a
+// service-principal token automatically. Individual users can still
+// override this by passing their own PAT via the Authorization header.
+const SERVICE_TOKEN = process.env.DATABRICKS_TOKEN || '';
+
+// Path to the bundled DBC file — try several candidate locations
+const DBC_CANDIDATES = [
+  path.resolve(__dirname, '..', 'databricks_inspire_v45.dbc'),
+  path.resolve(__dirname, 'databricks_inspire_v45.dbc'),
+  path.resolve(__dirname, '..', 'notebooks', 'databricks_inspire_v45.dbc'),
+];
+let BUNDLED_DBC_PATH = DBC_CANDIDATES.find(p => fs.existsSync(p)) || '';
+
+// If no physical DBC file found, try to materialize from embedded base64 bundle
+if (!BUNDLED_DBC_PATH) {
+  try {
+    const b64 = require('./dbc_bundle');
+    const materializedPath = path.resolve(__dirname, 'databricks_inspire_v45.dbc');
+    fs.writeFileSync(materializedPath, Buffer.from(b64, 'base64'));
+    BUNDLED_DBC_PATH = materializedPath;
+    console.log('DBC materialized from embedded bundle.');
+  } catch (_) {
+    BUNDLED_DBC_PATH = DBC_CANDIDATES[0]; // fallback path (will show "not found")
+  }
+}
+
+// ═══════════════════════════════════════════════════
+//  Middleware
+// ═══════════════════════════════════════════════════
+
+// CORS — only needed in dev (separate Vite server);
+// in production the backend serves the static frontend.
+if (process.env.NODE_ENV !== 'production') {
+  app.use(cors());
+}
+
+// Serve frontend static build in production
+const STATIC_DIR = path.resolve(__dirname, '..', 'frontend', 'dist');
+if (fs.existsSync(STATIC_DIR)) {
+  app.use(express.static(STATIC_DIR));
+}
 
 // Request logger
 app.use((req, res, next) => {
-  const start = Date.now();
-  res.on('finish', () => {
-    const duration = Date.now() - start;
-    console.log(`${req.method} ${req.originalUrl} → ${res.statusCode} (${duration}ms)`);
-  });
+  if (req.path.startsWith('/api')) {
+    const start = Date.now();
+    res.on('finish', () => {
+      const duration = Date.now() - start;
+      console.log(`${req.method} ${req.originalUrl} → ${res.statusCode} (${duration}ms)`);
+    });
+  }
   next();
 });
 
 // Multer for file uploads (store in memory)
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
 
-const DATABRICKS_HOST = process.env.DATABRICKS_HOST || 'https://adb-3642885996758754.14.azuredatabricks.net';
-const DEFAULT_NOTEBOOK_PATH = process.env.NOTEBOOK_PATH || '';
+// ═══════════════════════════════════════════════════
+//  Helpers
+// ═══════════════════════════════════════════════════
 
-// Path to the bundled DBC file (one level up from backend/)
-const BUNDLED_DBC_PATH = path.resolve(__dirname, '..', 'databricks_inspire_v38.dbc');
+function resolveHost(req) {
+  // Priority: 1) per-request header  2) env var
+  const headerHost = req.headers['x-databricks-host'];
+  return headerHost || DATABRICKS_HOST;
+}
 
-// Path to the split notebooks directory
-const NOTEBOOKS_DIR = path.resolve(__dirname, '..', 'notebooks');
-
-// Workflow definition
-const WORKFLOW_DEF_PATH = path.resolve(NOTEBOOKS_DIR, 'workflow_definition.json');
-
-// Helper: make authenticated Databricks API calls
-async function dbFetch(token, apiPath, options = {}) {
-  const url = `${DATABRICKS_HOST}${apiPath}`;
+async function dbFetch(host, token, apiPath, options = {}) {
+  if (!host) throw new Error('Databricks host not configured. Set DATABRICKS_HOST or provide it in Settings.');
+  const url = `${host}${apiPath}`;
   try {
     const resp = await fetch(url, {
       ...options,
@@ -48,6 +99,10 @@ async function dbFetch(token, apiPath, options = {}) {
         ...options.headers,
       },
     });
+    if (!resp.ok && resp.status === 401) {
+      const tokenPreview = token ? `${token.slice(0, 4)}...${token.slice(-4)} (len=${token.length})` : 'MISSING';
+      console.error(`   🔑 Token debug: ${tokenPreview}, Host: ${host}, API: ${apiPath}`);
+    }
     return resp;
   } catch (err) {
     console.error(`❌ Fetch failed for ${apiPath}:`, err.message);
@@ -55,32 +110,358 @@ async function dbFetch(token, apiPath, options = {}) {
   }
 }
 
-// Extract token from Authorization header
 function getToken(req) {
+  // 1) Custom header from frontend — survives Databricks App proxy (which strips Authorization)
+  const customToken = req.headers['x-db-pat-token'];
+  if (customToken) return customToken;
+  // 2) Standard Authorization header (works in local dev / non-proxy mode)
   const auth = req.headers.authorization;
-  if (!auth || !auth.startsWith('Bearer ')) return null;
-  return auth.slice(7);
+  if (auth && auth.startsWith('Bearer ')) return auth.slice(7);
+  // 3) Databricks Apps inject the logged-in user's OAuth token here
+  const forwarded = req.headers['x-forwarded-access-token'];
+  if (forwarded) return forwarded;
+  // 4) Fall back to service-principal token from env
+  return SERVICE_TOKEN || null;
 }
 
-// Middleware to check for token
 function requireToken(req, res, next) {
   const token = getToken(req);
-  if (!token) return res.status(401).json({ error: 'Databricks token required. Set it in Settings.' });
+  if (!token) return res.status(401).json({ error: 'Databricks token required. Set it in Settings or configure DATABRICKS_TOKEN.' });
   req.dbToken = token;
+  req.dbHost = resolveHost(req);
   next();
 }
 
-// Health check
-app.get('/api/health', (req, res) => {
-  const hasBundledDbc = fs.existsSync(BUNDLED_DBC_PATH);
-  const hasPipeline = fs.existsSync(NOTEBOOKS_DIR) && fs.existsSync(WORKFLOW_DEF_PATH);
-  res.json({ status: 'ok', host: DATABRICKS_HOST, hasBundledDbc, hasPipeline });
+// Execute SQL via Databricks SQL Statement Execution API
+async function executeSql(host, token, warehouseId, sql) {
+  console.log(`   🔶 SQL: ${sql.substring(0, 150)}...`);
+
+  const submitResp = await dbFetch(host, token, '/api/2.0/sql/statements', {
+    method: 'POST',
+    body: JSON.stringify({
+      warehouse_id: warehouseId,
+      statement: sql,
+      wait_timeout: '50s',
+      on_wait_timeout: 'CONTINUE',
+      disposition: 'INLINE',
+      format: 'JSON_ARRAY',
+    }),
+  });
+  if (!submitResp.ok) {
+    const errText = await submitResp.text();
+    console.error(`   ❌ SQL submit failed (${submitResp.status}): ${errText.substring(0, 200)}`);
+    throw new Error(`SQL failed (${submitResp.status}): ${errText}`);
+  }
+  let result = await submitResp.json();
+  console.log(`   📄 SQL state: ${result.status?.state}`);
+
+  // Poll if still running
+  let pollCount = 0;
+  while (result.status?.state === 'PENDING' || result.status?.state === 'RUNNING') {
+    pollCount++;
+    await new Promise(r => setTimeout(r, 2000));
+    const pollResp = await dbFetch(host, token, `/api/2.0/sql/statements/${result.statement_id}`);
+    if (!pollResp.ok) throw new Error(`SQL polling failed`);
+    result = await pollResp.json();
+    if (pollCount % 5 === 0) console.log(`   ⏳ Polling (${pollCount})...`);
+  }
+
+  if (result.status?.state === 'FAILED') {
+    const errMsg = result.status?.error?.message || 'SQL statement execution failed';
+    throw new Error(errMsg);
+  }
+
+  // Handle chunked results
+  if (result.manifest?.total_chunk_count > 1 && result.manifest?.chunks) {
+    let allData = result.result?.data_array || [];
+    for (const chunk of result.manifest.chunks) {
+      if (chunk.chunk_index === 0) continue;
+      const chunkResp = await dbFetch(host, token, `/api/2.0/sql/statements/${result.statement_id}/result/chunks/${chunk.chunk_index}`);
+      if (chunkResp.ok) {
+        const chunkData = await chunkResp.json();
+        if (chunkData.data_array) allData = allData.concat(chunkData.data_array);
+      }
+    }
+    result.result = result.result || {};
+    result.result.data_array = allData;
+  }
+
+  const rowCount = result.result?.data_array?.length ?? 0;
+  console.log(`   ✅ SQL done: ${rowCount} rows`);
+  return result;
+}
+
+// Helper: convert SQL result to array of objects
+function sqlResultToObjects(result) {
+  const columns = result.manifest?.schema?.columns || [];
+  const colNames = columns.map(c => c.name);
+  const rows = result.result?.data_array || [];
+  return rows.map(row => {
+    const obj = {};
+    colNames.forEach((col, i) => { obj[col] = row[i]; });
+    return obj;
+  });
+}
+
+// ═══════════════════════════════════════════════════
+//  Auto-publish — seamless notebook deployment
+// ═══════════════════════════════════════════════════
+
+const NOTEBOOK_DEST = '/Shared/inspire_ai';
+let cachedNotebookPath = DEFAULT_NOTEBOOK_PATH || '';
+
+async function ensureNotebookPublished(host, token) {
+  // 1. If we already know the notebook path, verify it still exists
+  if (cachedNotebookPath) {
+    try {
+      const check = await dbFetch(host, token, `/api/2.0/workspace/get-status?path=${encodeURIComponent(cachedNotebookPath)}`);
+      if (check.ok) return cachedNotebookPath;
+    } catch (_) {}
+    // Path gone — re-publish
+    cachedNotebookPath = '';
+  }
+
+  // 2. Check if notebook already exists at the destination
+  try {
+    const check = await dbFetch(host, token, `/api/2.0/workspace/get-status?path=${encodeURIComponent(NOTEBOOK_DEST)}`);
+    if (check.ok) {
+      const data = await check.json();
+      if (data.object_type === 'NOTEBOOK') {
+        cachedNotebookPath = NOTEBOOK_DEST;
+        console.log(`📓 Notebook already exists: ${cachedNotebookPath}`);
+        return cachedNotebookPath;
+      }
+      if (data.object_type === 'DIRECTORY') {
+        const listResp = await dbFetch(host, token, `/api/2.0/workspace/list?path=${encodeURIComponent(NOTEBOOK_DEST)}`);
+        if (listResp.ok) {
+          const listData = await listResp.json();
+          const nb = (listData.objects || []).find(o => o.object_type === 'NOTEBOOK');
+          if (nb) {
+            cachedNotebookPath = nb.path;
+            console.log(`📓 Notebook found in folder: ${cachedNotebookPath}`);
+            return cachedNotebookPath;
+          }
+        }
+      }
+    }
+  } catch (_) {}
+
+  // 3. Publish the bundled DBC
+  if (!BUNDLED_DBC_PATH || !fs.existsSync(BUNDLED_DBC_PATH)) {
+    throw new Error('No bundled DBC file available to publish.');
+  }
+
+  console.log(`📦 Auto-publishing notebook to ${NOTEBOOK_DEST}...`);
+  const fileBuffer = fs.readFileSync(BUNDLED_DBC_PATH);
+  const base64Content = fileBuffer.toString('base64');
+
+  // Delete old if exists
+  try {
+    await dbFetch(host, token, '/api/2.0/workspace/delete', {
+      method: 'POST',
+      body: JSON.stringify({ path: NOTEBOOK_DEST, recursive: true }),
+    });
+  } catch (_) {}
+
+  const resp = await dbFetch(host, token, '/api/2.0/workspace/import', {
+    method: 'POST',
+    body: JSON.stringify({ path: NOTEBOOK_DEST, format: 'DBC', content: base64Content }),
+  });
+
+  if (!resp.ok) {
+    const err = await resp.text();
+    throw new Error(`Publish failed: ${err}`);
+  }
+
+  // Find the notebook inside the imported folder
+  cachedNotebookPath = NOTEBOOK_DEST;
+  try {
+    const listResp = await dbFetch(host, token, `/api/2.0/workspace/list?path=${encodeURIComponent(NOTEBOOK_DEST)}`);
+    if (listResp.ok) {
+      const listData = await listResp.json();
+      const nb = (listData.objects || []).find(o => o.object_type === 'NOTEBOOK');
+      if (nb) cachedNotebookPath = nb.path;
+    }
+  } catch (_) {}
+
+  console.log(`✅ Notebook published: ${cachedNotebookPath}`);
+  return cachedNotebookPath;
+}
+
+// ═══════════════════════════════════════════════════
+//  Service Principal OAuth2 Token
+// ═══════════════════════════════════════════════════
+
+app.post('/api/auth/sp-token', async (req, res) => {
+  try {
+    const { client_id, client_secret, tenant_id, databricks_host } = req.body;
+    if (!client_id || !client_secret || !tenant_id || !databricks_host) {
+      return res.status(400).json({ error: 'client_id, client_secret, tenant_id, and databricks_host required.' });
+    }
+
+    // Azure AD OAuth2 client credentials flow
+    const tokenUrl = `https://login.microsoftonline.com/${tenant_id}/oauth2/v2.0/token`;
+    // The scope for Databricks is the host + /.default
+    const scope = `${databricks_host.replace(/\/$/, '')}/.default`;
+
+    const body = new URLSearchParams({
+      grant_type: 'client_credentials',
+      client_id,
+      client_secret,
+      scope,
+    });
+
+    const resp = await fetch(tokenUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body.toString(),
+    });
+
+    if (!resp.ok) {
+      const errText = await resp.text();
+      console.error(`SP token failed (${resp.status}): ${errText.substring(0, 200)}`);
+      return res.status(resp.status).json({ error: `Azure AD token request failed: ${errText}` });
+    }
+
+    const data = await resp.json();
+    console.log('✅ SP token obtained successfully');
+    res.json({ access_token: data.access_token, expires_in: data.expires_in });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-// ─── Get current user info (to build default publish path) ───
+// ═══════════════════════════════════════════════════
+//  Workspace File Operations (list & download artifacts)
+// ═══════════════════════════════════════════════════
+
+app.get('/api/workspace/list', requireToken, async (req, res) => {
+  try {
+    const wsPath = req.query.path;
+    if (!wsPath) return res.status(400).json({ error: 'path query param required.' });
+
+    // Handle Volumes paths via Files API
+    if (wsPath.startsWith('/Volumes/')) {
+      const response = await dbFetch(req.dbHost, req.dbToken, `/api/2.0/fs/directories${wsPath}`);
+      if (!response.ok) {
+        const err = await response.text();
+        return res.status(response.status).json({ error: err });
+      }
+      const data = await response.json();
+      const contents = (data.contents || []).map(f => ({
+        path: f.path,
+        name: f.name || f.path.split('/').pop(),
+        is_directory: f.is_directory || false,
+        file_size: f.file_size || 0,
+      }));
+      return res.json({ files: contents });
+    }
+
+    // Workspace paths
+    const response = await dbFetch(req.dbHost, req.dbToken, `/api/2.0/workspace/list?path=${encodeURIComponent(wsPath)}`);
+    if (!response.ok) {
+      const err = await response.text();
+      return res.status(response.status).json({ error: err });
+    }
+    const data = await response.json();
+    const files = (data.objects || []).map(o => ({
+      path: o.path,
+      name: o.path.split('/').pop(),
+      is_directory: o.object_type === 'DIRECTORY',
+      object_type: o.object_type,
+      file_size: o.size || 0,
+    }));
+    res.json({ files });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/workspace/export', requireToken, async (req, res) => {
+  try {
+    const wsPath = req.query.path;
+    if (!wsPath) return res.status(400).json({ error: 'path query param required.' });
+
+    // Handle Volumes paths via Files API (direct download)
+    if (wsPath.startsWith('/Volumes/')) {
+      const response = await dbFetch(req.dbHost, req.dbToken, `/api/2.0/fs/files${wsPath}`);
+      if (!response.ok) {
+        const err = await response.text();
+        return res.status(response.status).json({ error: err });
+      }
+      const fileName = wsPath.split('/').pop();
+      res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+      const buffer = Buffer.from(await response.arrayBuffer());
+      return res.send(buffer);
+    }
+
+    // Workspace paths — try export with format=AUTO (base64 JSON response)
+    const fileName = wsPath.split('/').pop();
+
+    // First try: JSON export with base64 content
+    const resp1 = await dbFetch(req.dbHost, req.dbToken, `/api/2.0/workspace/export?path=${encodeURIComponent(wsPath)}&format=AUTO`);
+    if (resp1.ok) {
+      const contentType = resp1.headers.get('content-type') || '';
+      if (contentType.includes('application/json')) {
+        const data = await resp1.json();
+        if (data.content) {
+          const buffer = Buffer.from(data.content, 'base64');
+          res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+          return res.send(buffer);
+        }
+      }
+      // If direct_download returned raw bytes
+      const buffer = Buffer.from(await resp1.arrayBuffer());
+      res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+      return res.send(buffer);
+    }
+
+    // Second try: direct_download=true
+    const resp2 = await dbFetch(req.dbHost, req.dbToken, `/api/2.0/workspace/export?path=${encodeURIComponent(wsPath)}&direct_download=true`);
+    if (!resp2.ok) {
+      const err = await resp2.text();
+      return res.status(resp2.status).json({ error: err });
+    }
+    res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+    const buffer = Buffer.from(await resp2.arrayBuffer());
+    res.send(buffer);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════
+//  Basic endpoints
+// ═══════════════════════════════════════════════════
+
+app.get('/api/health', (req, res) => {
+  const hasBundledDbc = fs.existsSync(BUNDLED_DBC_PATH);
+  const host = resolveHost(req);
+  const hasForwardedToken = !!req.headers['x-forwarded-access-token'];
+  res.json({
+    status: 'ok',
+    host: host ? host.replace(/https?:\/\//, '').split('.')[0] + '...' : 'not configured',
+    hostConfigured: !!host,
+    hasBundledDbc,
+    hasServiceToken: !!SERVICE_TOKEN,
+    isDatabricksApp: hasForwardedToken || !!DATABRICKS_HOST,
+    hasUserToken: hasForwardedToken,
+  });
+});
+
+// Auto-publish and return the notebook path
+app.get('/api/notebook', requireToken, async (req, res) => {
+  try {
+    const nbPath = await ensureNotebookPublished(req.dbHost, req.dbToken);
+    res.json({ path: nbPath });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/me', requireToken, async (req, res) => {
   try {
-    const response = await dbFetch(req.dbToken, '/api/2.0/preview/scim/v2/Me');
+    const response = await dbFetch(req.dbHost, req.dbToken, '/api/2.0/preview/scim/v2/Me');
     if (!response.ok) {
       const err = await response.text();
       return res.status(response.status).json({ error: err });
@@ -93,10 +474,13 @@ app.get('/api/me', requireToken, async (req, res) => {
   }
 });
 
-// ─── List Unity Catalog catalogs ───
+// ═══════════════════════════════════════════════════
+//  Unity Catalog browsing
+// ═══════════════════════════════════════════════════
+
 app.get('/api/catalogs', requireToken, async (req, res) => {
   try {
-    const response = await dbFetch(req.dbToken, '/api/2.1/unity-catalog/catalogs');
+    const response = await dbFetch(req.dbHost, req.dbToken, '/api/2.1/unity-catalog/catalogs');
     if (!response.ok) {
       const err = await response.text();
       return res.status(response.status).json({ error: err });
@@ -113,11 +497,10 @@ app.get('/api/catalogs', requireToken, async (req, res) => {
   }
 });
 
-// ─── List schemas in a catalog ───
 app.get('/api/catalogs/:catalog/schemas', requireToken, async (req, res) => {
   try {
     const { catalog } = req.params;
-    const response = await dbFetch(req.dbToken, `/api/2.1/unity-catalog/schemas?catalog_name=${encodeURIComponent(catalog)}`);
+    const response = await dbFetch(req.dbHost, req.dbToken, `/api/2.1/unity-catalog/schemas?catalog_name=${encodeURIComponent(catalog)}`);
     if (!response.ok) {
       const err = await response.text();
       return res.status(response.status).json({ error: err });
@@ -134,397 +517,44 @@ app.get('/api/catalogs/:catalog/schemas', requireToken, async (req, res) => {
   }
 });
 
-// ─── Publish notebook: upload bundled DBC to workspace ───
-app.post('/api/publish', requireToken, async (req, res) => {
+app.get('/api/tables/:catalog/:schema', requireToken, async (req, res) => {
   try {
-    const { destination_path } = req.body;
-    if (!destination_path) {
-      return res.status(400).json({ error: 'destination_path is required.' });
-    }
-
-    // Read bundled DBC file
-    if (!fs.existsSync(BUNDLED_DBC_PATH)) {
-      return res.status(404).json({ error: 'Bundled notebook file not found on the server.' });
-    }
-
-    const fileBuffer = fs.readFileSync(BUNDLED_DBC_PATH);
-    const base64Content = fileBuffer.toString('base64');
-
-    // DBC format doesn't support overwrite — delete first if it exists
-    try {
-      await dbFetch(req.dbToken, '/api/2.0/workspace/delete', {
-        method: 'POST',
-        body: JSON.stringify({ path: destination_path, recursive: true }),
-      });
-    } catch (_) {
-      // Ignore errors (path might not exist)
-    }
-
-    // Import into Databricks workspace
-    const response = await dbFetch(req.dbToken, '/api/2.0/workspace/import', {
-      method: 'POST',
-      body: JSON.stringify({
-        path: destination_path,
-        format: 'DBC',
-        content: base64Content,
-      }),
-    });
-
-    if (!response.ok) {
-      const err = await response.text();
-      return res.status(response.status).json({ error: err });
-    }
-
-    // DBC imports as a folder. Find the actual notebook inside it.
-    let notebookPath = destination_path;
-    try {
-      const listResp = await dbFetch(req.dbToken, `/api/2.0/workspace/list?path=${encodeURIComponent(destination_path)}`);
-      if (listResp.ok) {
-        const listData = await listResp.json();
-        const objects = listData.objects || [];
-        // Find the first NOTEBOOK object inside the folder
-        const notebook = objects.find(o => o.object_type === 'NOTEBOOK');
-        if (notebook) {
-          notebookPath = notebook.path;
-        }
-      }
-    } catch (_) {
-      // If listing fails, fall back to destination_path
-    }
-
-    console.log(`✅ Published DBC to: ${destination_path}`);
-    console.log(`   Detected notebook path: ${notebookPath}`);
-
-    res.json({
-      success: true,
-      path: notebookPath,
-      folder_path: destination_path,
-      message: `Notebook published to ${notebookPath}`,
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ─── Upload & publish a custom DBC file from browser ───
-app.post('/api/publish/upload', requireToken, upload.single('file'), async (req, res) => {
-  try {
-    const { destination_path } = req.body;
-    if (!destination_path) {
-      return res.status(400).json({ error: 'destination_path is required.' });
-    }
-    if (!req.file) {
-      return res.status(400).json({ error: 'No file uploaded.' });
-    }
-
-    const base64Content = req.file.buffer.toString('base64');
-
-    // Detect format from extension
-    const ext = path.extname(req.file.originalname).toLowerCase();
-    let format = 'DBC';
-    if (ext === '.py') format = 'SOURCE';
-    else if (ext === '.ipynb') format = 'JUPYTER';
-
-    // DBC format doesn't support overwrite — delete first if it exists
-    if (format === 'DBC') {
-      try {
-        await dbFetch(req.dbToken, '/api/2.0/workspace/delete', {
-          method: 'POST',
-          body: JSON.stringify({ path: destination_path, recursive: true }),
-        });
-      } catch (_) {}
-    }
-
-    const response = await dbFetch(req.dbToken, '/api/2.0/workspace/import', {
-      method: 'POST',
-      body: JSON.stringify({
-        path: destination_path,
-        format,
-        content: base64Content,
-        ...(format !== 'DBC' ? { overwrite: true } : {}),
-        ...(format === 'SOURCE' ? { language: 'PYTHON' } : {}),
-      }),
-    });
-
-    if (!response.ok) {
-      const err = await response.text();
-      return res.status(response.status).json({ error: err });
-    }
-
-    res.json({
-      success: true,
-      path: destination_path,
-      message: `Notebook published to ${destination_path}`,
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ─── Publish split notebooks (multi-task pipeline) ───
-app.post('/api/publish/pipeline', requireToken, async (req, res) => {
-  try {
-    const { destination_path } = req.body;
-    if (!destination_path) {
-      return res.status(400).json({ error: 'destination_path is required.' });
-    }
-
-    // Check that the notebooks directory exists
-    if (!fs.existsSync(NOTEBOOKS_DIR)) {
-      return res.status(404).json({ error: 'Split notebooks directory not found. Run split_notebook.py first.' });
-    }
-
-    // Get all .py notebook files
-    const notebookFiles = fs.readdirSync(NOTEBOOKS_DIR)
-      .filter(f => f.endsWith('.py'))
-      .sort();
-
-    if (notebookFiles.length === 0) {
-      return res.status(404).json({ error: 'No notebook files found in notebooks directory.' });
-    }
-
-    console.log(`📦 Publishing ${notebookFiles.length} notebooks to ${destination_path}/`);
-
-    // Ensure the destination directory exists
-    try {
-      await dbFetch(req.dbToken, '/api/2.0/workspace/mkdirs', {
-        method: 'POST',
-        body: JSON.stringify({ path: destination_path }),
-      });
-    } catch (_) {}
-
-    const published = [];
-    const errors = [];
-
-    for (const filename of notebookFiles) {
-      const notebookName = filename.replace('.py', '');
-      const notebookPath = `${destination_path}/${notebookName}`;
-      const filePath = path.join(NOTEBOOKS_DIR, filename);
-
-      try {
-        // Read the notebook source file
-        let content = fs.readFileSync(filePath, 'utf-8');
-
-        // Remove the "# Databricks notebook source" header — the API adds it
-        content = content.replace(/^# Databricks notebook source\n/, '');
-
-        const base64Content = Buffer.from(content, 'utf-8').toString('base64');
-
-        // Upload as SOURCE format (Python)
-        const response = await dbFetch(req.dbToken, '/api/2.0/workspace/import', {
-          method: 'POST',
-          body: JSON.stringify({
-            path: notebookPath,
-            format: 'SOURCE',
-            language: 'PYTHON',
-            content: base64Content,
-            overwrite: true,
-          }),
-        });
-
-        if (!response.ok) {
-          const errText = await response.text();
-          console.error(`   ❌ ${notebookName}: ${errText}`);
-          errors.push({ notebook: notebookName, error: errText });
-        } else {
-          console.log(`   ✅ ${notebookName}`);
-          published.push(notebookPath);
-        }
-      } catch (err) {
-        console.error(`   ❌ ${notebookName}: ${err.message}`);
-        errors.push({ notebook: notebookName, error: err.message });
-      }
-    }
-
-    console.log(`📦 Published ${published.length}/${notebookFiles.length} notebooks`);
-
-    res.json({
-      success: errors.length === 0,
-      published,
-      errors,
-      base_path: destination_path,
-      total: notebookFiles.length,
-      message: `Published ${published.length}/${notebookFiles.length} notebooks to ${destination_path}`,
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ─── Submit multi-task Lakeflow workflow ───
-app.post('/api/run/pipeline', requireToken, async (req, res) => {
-  try {
-    const { params, cluster_id, notebook_base_path, inspire_database } = req.body;
-
-    if (!notebook_base_path) {
-      return res.status(400).json({ error: 'notebook_base_path is required. Publish the pipeline notebooks first.' });
-    }
-
-    // Load the workflow definition
-    let workflowDef;
-    try {
-      workflowDef = JSON.parse(fs.readFileSync(WORKFLOW_DEF_PATH, 'utf-8'));
-    } catch (err) {
-      return res.status(500).json({ error: `Could not load workflow definition: ${err.message}` });
-    }
-
-    const businessName = params?.['00_business_name'] || 'Run';
-    const runName = `Inspire AI Pipeline - ${businessName} - ${new Date().toISOString().slice(0, 19)}`;
-
-    // Build the tasks array with resolved paths and parameters
-    const tasks = workflowDef.tasks.map(task => {
-      // Replace placeholders in notebook_path
-      const notebookPath = task.notebook_task.notebook_path
-        .replace('{{BASE_PATH}}', notebook_base_path);
-
-      // Build base_parameters: merge task-specific params with the inspire_database
-      const baseParams = { ...(task.notebook_task.base_parameters || {}) };
-      if (baseParams.inspire_database === '{{INSPIRE_DATABASE}}') {
-        baseParams.inspire_database = inspire_database || '';
-      }
-
-      // The first task (01_init_validate) gets all widget params
-      if (task.task_key === '01_init_validate') {
-        Object.assign(baseParams, params);
-      }
-
-      const taskDef = {
-        task_key: task.task_key,
-        notebook_task: {
-          notebook_path: notebookPath,
-          base_parameters: baseParams,
-          source: 'WORKSPACE',
-        },
-      };
-
-      // Add dependencies
-      if (task.depends_on) {
-        taskDef.depends_on = task.depends_on;
-      }
-
-      // Add cluster
-      if (cluster_id) {
-        taskDef.existing_cluster_id = cluster_id;
-      }
-
-      return taskDef;
-    });
-
-    const payload = {
-      run_name: runName,
-      tasks,
-    };
-
-    console.log(`📋 Submitting multi-task pipeline with ${tasks.length} tasks`);
-    console.log(`   Base path: ${notebook_base_path}`);
-    console.log(`   Cluster: ${cluster_id || '(auto/job cluster)'}`);
-    tasks.forEach(t => {
-      console.log(`   📌 ${t.task_key}: ${t.notebook_task.notebook_path}`);
-    });
-
-    const response = await dbFetch(req.dbToken, '/api/2.1/jobs/runs/submit', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    });
-
-    if (!response.ok) {
-      const errText = await response.text();
-      console.error(`❌ Pipeline submit failed (${response.status}): ${errText}`);
-      let errorMsg;
-      try { errorMsg = JSON.parse(errText).message || errText; } catch { errorMsg = errText; }
-      return res.status(response.status).json({ error: errorMsg });
-    }
-
-    const data = await response.json();
-    console.log(`✅ Pipeline submitted: run_id=${data.run_id}`);
-    res.json({
-      run_id: data.run_id,
-      mode: 'pipeline',
-      task_count: tasks.length,
-      task_keys: tasks.map(t => t.task_key),
-    });
-  } catch (err) {
-    console.error(`❌ Pipeline submit exception:`, err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ─── Get pipeline status (info about split notebooks availability) ───
-app.get('/api/pipeline/info', (req, res) => {
-  const hasNotebooks = fs.existsSync(NOTEBOOKS_DIR);
-  const hasWorkflow = fs.existsSync(WORKFLOW_DEF_PATH);
-  let notebooks = [];
-  let workflowDef = null;
-
-  if (hasNotebooks) {
-    notebooks = fs.readdirSync(NOTEBOOKS_DIR)
-      .filter(f => f.endsWith('.py'))
-      .sort()
-      .map(f => f.replace('.py', ''));
-  }
-
-  if (hasWorkflow) {
-    try {
-      workflowDef = JSON.parse(fs.readFileSync(WORKFLOW_DEF_PATH, 'utf-8'));
-    } catch (_) {}
-  }
-
-  res.json({
-    available: hasNotebooks && hasWorkflow && notebooks.length > 0,
-    notebooks,
-    task_count: workflowDef?.tasks?.length || 0,
-    tasks: (workflowDef?.tasks || []).map(t => ({
-      task_key: t.task_key,
-      description: t.description,
-      depends_on: t.depends_on?.map(d => d.task_key) || [],
-    })),
-  });
-});
-
-// ─── Check if a notebook exists at a given path ───
-app.get('/api/workspace/status', requireToken, async (req, res) => {
-  try {
-    const notebookPath = req.query.path;
-    if (!notebookPath) return res.status(400).json({ error: 'path query param required.' });
-
-    const response = await dbFetch(req.dbToken, `/api/2.0/workspace/get-status?path=${encodeURIComponent(notebookPath)}`);
-    if (!response.ok) {
-      if (response.status === 404) return res.json({ exists: false });
-      const err = await response.text();
-      return res.status(response.status).json({ error: err });
-    }
-    const data = await response.json();
-    res.json({ exists: true, object_type: data.object_type, path: data.path, language: data.language });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ─── List available clusters ───
-app.get('/api/clusters', requireToken, async (req, res) => {
-  try {
-    const response = await dbFetch(req.dbToken, '/api/2.0/clusters/list');
+    const { catalog, schema } = req.params;
+    const response = await dbFetch(
+      req.dbHost, req.dbToken,
+      `/api/2.1/unity-catalog/tables?catalog_name=${encodeURIComponent(catalog)}&schema_name=${encodeURIComponent(schema)}&max_results=500`
+    );
     if (!response.ok) {
       const err = await response.text();
       return res.status(response.status).json({ error: err });
     }
     const data = await response.json();
-    const clusters = (data.clusters || []).map(c => ({
-      cluster_id: c.cluster_id,
-      cluster_name: c.cluster_name,
-      state: c.state,
-      spark_version: c.spark_version,
+    const tables = (data.tables || []).map(t => ({
+      name: t.name,
+      full_name: t.full_name,
+      catalog_name: t.catalog_name || catalog,
+      schema_name: t.schema_name || schema,
+      table_type: t.table_type,
+      data_source_format: t.data_source_format || '',
+      updated_at: t.updated_at ? new Date(t.updated_at).toISOString() : null,
+      created_at: t.created_at ? new Date(t.created_at).toISOString() : null,
+      comment: t.comment || '',
+      owner: t.owner || '',
+      columns: (t.columns || []).length,
     }));
-    res.json({ clusters });
+    res.json({ tables, count: tables.length });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// ─── List SQL warehouses ───
+// ═══════════════════════════════════════════════════
+//  SQL Warehouses & Clusters
+// ═══════════════════════════════════════════════════
+
 app.get('/api/warehouses', requireToken, async (req, res) => {
   try {
-    const response = await dbFetch(req.dbToken, '/api/2.0/sql/warehouses');
+    const response = await dbFetch(req.dbHost, req.dbToken, '/api/2.0/sql/warehouses');
     if (!response.ok) {
       const err = await response.text();
       return res.status(response.status).json({ error: err });
@@ -542,74 +572,214 @@ app.get('/api/warehouses', requireToken, async (req, res) => {
   }
 });
 
-// ─── List tables in a schema (for step tracking) ───
-app.get('/api/tables/:catalog/:schema', requireToken, async (req, res) => {
+app.get('/api/clusters', requireToken, async (req, res) => {
   try {
-    const { catalog, schema } = req.params;
-    const response = await dbFetch(
-      req.dbToken,
-      `/api/2.1/unity-catalog/tables?catalog_name=${encodeURIComponent(catalog)}&schema_name=${encodeURIComponent(schema)}&max_results=500`
-    );
+    const response = await dbFetch(req.dbHost, req.dbToken, '/api/2.0/clusters/list');
     if (!response.ok) {
       const err = await response.text();
       return res.status(response.status).json({ error: err });
     }
     const data = await response.json();
-    const tables = (data.tables || []).map(t => ({
-      name: t.name,
-      full_name: t.full_name,
-      table_type: t.table_type,
-      created_at: t.created_at,
-      updated_at: t.updated_at,
+    const clusters = (data.clusters || []).map(c => ({
+      cluster_id: c.cluster_id,
+      cluster_name: c.cluster_name,
+      state: c.state,
     }));
-    res.json({ tables, count: tables.length });
+    res.json({ clusters });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// ─── Submit a notebook job (one-time run) ───
+// ═══════════════════════════════════════════════════
+//  Publish notebook (DBC upload)
+// ═══════════════════════════════════════════════════
+
+app.post('/api/publish', requireToken, async (req, res) => {
+  try {
+    const { destination_path } = req.body;
+    if (!destination_path) {
+      return res.status(400).json({ error: 'destination_path is required.' });
+    }
+
+    if (!fs.existsSync(BUNDLED_DBC_PATH)) {
+      return res.status(404).json({ error: 'Bundled DBC file not found on server.' });
+    }
+
+    const fileBuffer = fs.readFileSync(BUNDLED_DBC_PATH);
+    const base64Content = fileBuffer.toString('base64');
+
+    // DBC format doesn't support overwrite — delete first
+    try {
+      await dbFetch(req.dbHost, req.dbToken, '/api/2.0/workspace/delete', {
+        method: 'POST',
+        body: JSON.stringify({ path: destination_path, recursive: true }),
+      });
+    } catch (_) {}
+
+    const response = await dbFetch(req.dbHost, req.dbToken, '/api/2.0/workspace/import', {
+      method: 'POST',
+      body: JSON.stringify({
+        path: destination_path,
+        format: 'DBC',
+        content: base64Content,
+      }),
+    });
+
+    if (!response.ok) {
+      const err = await response.text();
+      return res.status(response.status).json({ error: err });
+    }
+
+    // DBC imports as a folder — find the actual notebook inside
+    let notebookPath = destination_path;
+    try {
+      const listResp = await dbFetch(req.dbHost, req.dbToken, `/api/2.0/workspace/list?path=${encodeURIComponent(destination_path)}`);
+      if (listResp.ok) {
+        const listData = await listResp.json();
+        const notebook = (listData.objects || []).find(o => o.object_type === 'NOTEBOOK');
+        if (notebook) notebookPath = notebook.path;
+      }
+    } catch (_) {}
+
+    console.log(`✅ Published DBC to: ${destination_path}, notebook: ${notebookPath}`);
+    res.json({ success: true, path: notebookPath, folder_path: destination_path });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/publish/upload', requireToken, upload.single('file'), async (req, res) => {
+  try {
+    const { destination_path } = req.body;
+    if (!destination_path) return res.status(400).json({ error: 'destination_path is required.' });
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded.' });
+
+    const base64Content = req.file.buffer.toString('base64');
+    const ext = path.extname(req.file.originalname).toLowerCase();
+    let format = 'DBC';
+    if (ext === '.py') format = 'SOURCE';
+    else if (ext === '.ipynb') format = 'JUPYTER';
+
+    if (format === 'DBC') {
+      try {
+        await dbFetch(req.dbHost, req.dbToken, '/api/2.0/workspace/delete', {
+          method: 'POST',
+          body: JSON.stringify({ path: destination_path, recursive: true }),
+        });
+      } catch (_) {}
+    }
+
+    const response = await dbFetch(req.dbHost, req.dbToken, '/api/2.0/workspace/import', {
+      method: 'POST',
+      body: JSON.stringify({
+        path: destination_path,
+        format,
+        content: base64Content,
+        ...(format !== 'DBC' ? { overwrite: true } : {}),
+        ...(format === 'SOURCE' ? { language: 'PYTHON' } : {}),
+      }),
+    });
+
+    if (!response.ok) {
+      const err = await response.text();
+      return res.status(response.status).json({ error: err });
+    }
+
+    res.json({ success: true, path: destination_path });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════
+//  DBC Notebook Extraction (preview contents)
+// ═══════════════════════════════════════════════════
+
+app.get('/api/dbc/info', (req, res) => {
+  try {
+    if (!fs.existsSync(BUNDLED_DBC_PATH)) {
+      return res.status(404).json({ error: 'Bundled DBC file not found.' });
+    }
+
+    const zip = new AdmZip(BUNDLED_DBC_PATH);
+    const entries = zip.getEntries();
+    const notebooks = [];
+
+    for (const entry of entries) {
+      if (entry.entryName.endsWith('.python') || entry.entryName.endsWith('.sql') || entry.entryName.endsWith('.scala')) {
+        try {
+          const content = entry.getData().toString('utf8');
+          const data = JSON.parse(content);
+          const commands = data.commands || [];
+          notebooks.push({
+            name: entry.entryName,
+            language: data.language || 'python',
+            command_count: commands.length,
+            version: data.version || 'unknown',
+          });
+        } catch {
+          notebooks.push({ name: entry.entryName, error: 'Could not parse' });
+        }
+      }
+    }
+
+    res.json({
+      file: path.basename(BUNDLED_DBC_PATH),
+      size: fs.statSync(BUNDLED_DBC_PATH).size,
+      notebooks,
+      entry_count: entries.length,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════
+//  Submit notebook run
+// ═══════════════════════════════════════════════════
+
 app.post('/api/run', requireToken, async (req, res) => {
   try {
     const { params, cluster_id, notebook_path } = req.body;
 
     let resolvedPath = notebook_path || DEFAULT_NOTEBOOK_PATH;
     if (!resolvedPath) {
-      return res.status(400).json({ error: 'Notebook path is required. Publish the notebook first or set the path.' });
+      // Auto-publish seamlessly
+      try {
+        resolvedPath = await ensureNotebookPublished(req.dbHost, req.dbToken);
+      } catch (pubErr) {
+        return res.status(400).json({ error: `Could not auto-publish notebook: ${pubErr.message}` });
+      }
     }
 
-    // Verify the path points to a NOTEBOOK (not a DIRECTORY).
-    // DBC imports create folders — we need the notebook inside.
+    // Verify path points to a NOTEBOOK (DBC imports create folders)
     try {
-      const statusResp = await dbFetch(req.dbToken, `/api/2.0/workspace/get-status?path=${encodeURIComponent(resolvedPath)}`);
+      const statusResp = await dbFetch(req.dbHost, req.dbToken, `/api/2.0/workspace/get-status?path=${encodeURIComponent(resolvedPath)}`);
       if (statusResp.ok) {
         const statusData = await statusResp.json();
         if (statusData.object_type === 'DIRECTORY') {
-          console.log(`📂 Path "${resolvedPath}" is a DIRECTORY — searching for notebook inside...`);
-          const listResp = await dbFetch(req.dbToken, `/api/2.0/workspace/list?path=${encodeURIComponent(resolvedPath)}`);
+          console.log(`📂 Path "${resolvedPath}" is a DIRECTORY — searching for notebook...`);
+          const listResp = await dbFetch(req.dbHost, req.dbToken, `/api/2.0/workspace/list?path=${encodeURIComponent(resolvedPath)}`);
           if (listResp.ok) {
             const listData = await listResp.json();
-            const objects = listData.objects || [];
-            const notebook = objects.find(o => o.object_type === 'NOTEBOOK');
+            const notebook = (listData.objects || []).find(o => o.object_type === 'NOTEBOOK');
             if (notebook) {
               console.log(`📓 Found notebook: ${notebook.path}`);
               resolvedPath = notebook.path;
             } else {
-              return res.status(400).json({ error: `Path "${resolvedPath}" is a folder but contains no notebooks. Contents: ${objects.map(o => o.path).join(', ') || 'empty'}` });
+              return res.status(400).json({ error: `Path "${resolvedPath}" is a folder with no notebooks.` });
             }
           }
         }
-      } else {
-        console.warn(`⚠️ Could not verify path "${resolvedPath}" — proceeding anyway`);
       }
     } catch (verifyErr) {
-      console.warn(`⚠️ Path verification failed: ${verifyErr.message} — proceeding anyway`);
+      console.warn(`⚠️ Path verify failed: ${verifyErr.message}`);
     }
 
     const payload = {
       run_name: `Inspire AI - ${params['00_business_name'] || 'Run'} - ${new Date().toISOString().slice(0, 19)}`,
-      tasks: [
-        {
+      tasks: [{
           task_key: 'inspire_notebook',
           notebook_task: {
             notebook_path: resolvedPath,
@@ -617,14 +787,11 @@ app.post('/api/run', requireToken, async (req, res) => {
             source: 'WORKSPACE',
           },
           ...(cluster_id ? { existing_cluster_id: cluster_id } : {}),
-        },
-      ],
+      }],
     };
 
-    console.log(`📋 Submitting run with notebook_path: ${resolvedPath}`);
-    console.log(`   Cluster: ${cluster_id || '(auto/job cluster)'}`);
-
-    const response = await dbFetch(req.dbToken, '/api/2.1/jobs/runs/submit', {
+    console.log(`📋 Submitting run: ${resolvedPath}`);
+    const response = await dbFetch(req.dbHost, req.dbToken, '/api/2.1/jobs/runs/submit', {
       method: 'POST',
       body: JSON.stringify(payload),
     });
@@ -641,63 +808,44 @@ app.post('/api/run', requireToken, async (req, res) => {
     console.log(`✅ Run submitted: ${data.run_id}`);
     res.json({ run_id: data.run_id });
   } catch (err) {
-    console.error(`❌ Run submit exception:`, err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
-// ─── Get run status ───
+// ═══════════════════════════════════════════════════
+//  Run status & output
+// ═══════════════════════════════════════════════════
+
 app.get('/api/run/:runId', requireToken, async (req, res) => {
   try {
-    const response = await dbFetch(req.dbToken, `/api/2.1/jobs/runs/get?run_id=${req.params.runId}`);
+    const response = await dbFetch(req.dbHost, req.dbToken, `/api/2.1/jobs/runs/get?run_id=${req.params.runId}`);
     if (!response.ok) {
       const err = await response.text();
       return res.status(response.status).json({ error: err });
     }
     const data = await response.json();
-
-    // Flatten the state for easier frontend consumption
     const state = data.state || {};
-    const result = {
+    res.json({
       run_id: data.run_id,
-      // Flattened state fields
       life_cycle_state: state.life_cycle_state || 'UNKNOWN',
       result_state: state.result_state || null,
       state_message: state.state_message || '',
-      // Timing
       start_time: data.start_time,
       end_time: data.end_time,
       setup_duration: data.setup_duration,
       execution_duration: data.execution_duration,
       cleanup_duration: data.cleanup_duration,
-      // Links
       run_page_url: data.run_page_url,
       run_name: data.run_name,
-      // Tasks (enriched for multi-task pipeline monitoring)
-      tasks: data.tasks?.map(t => ({
-        task_key: t.task_key,
-        description: t.description || '',
-        life_cycle_state: t.state?.life_cycle_state,
-        result_state: t.state?.result_state,
-        state_message: t.state?.state_message || '',
-        run_id: t.run_id,
-        start_time: t.start_time,
-        end_time: t.end_time,
-        setup_duration: t.setup_duration,
-        execution_duration: t.execution_duration,
-        depends_on: t.depends_on?.map(d => d.task_key) || [],
-      })),
-    };
-    res.json(result);
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// ─── Get run output ───
 app.get('/api/run/:runId/output', requireToken, async (req, res) => {
   try {
-    const response = await dbFetch(req.dbToken, `/api/2.1/jobs/runs/get-output?run_id=${req.params.runId}`);
+    const response = await dbFetch(req.dbHost, req.dbToken, `/api/2.1/jobs/runs/get-output?run_id=${req.params.runId}`);
     if (!response.ok) {
       const err = await response.text();
       return res.status(response.status).json({ error: err });
@@ -714,246 +862,9 @@ app.get('/api/run/:runId/output', requireToken, async (req, res) => {
   }
 });
 
-// ─── Execute SQL query via Databricks SQL Statement Execution API ───
-async function executeSqlStatement(token, warehouseId, sqlStatement) {
-  console.log(`   🔶 SQL: ${sqlStatement.substring(0, 120)}...`);
-
-  // Submit the statement with explicit INLINE disposition
-  // wait_timeout must be 0s (disabled) or between 5s and 50s per Databricks API
-  const submitResp = await dbFetch(token, '/api/2.0/sql/statements', {
-    method: 'POST',
-    body: JSON.stringify({
-      warehouse_id: warehouseId,
-      statement: sqlStatement,
-      wait_timeout: '50s',
-      on_wait_timeout: 'CONTINUE',
-      disposition: 'INLINE',
-      format: 'JSON_ARRAY',
-    }),
-  });
-  if (!submitResp.ok) {
-    const errText = await submitResp.text();
-    console.error(`   ❌ SQL submit failed (${submitResp.status}): ${errText.substring(0, 200)}`);
-    throw new Error(`SQL statement submission failed (${submitResp.status}): ${errText}`);
-  }
-  let result = await submitResp.json();
-  console.log(`   📄 SQL state: ${result.status?.state}, statement_id: ${result.statement_id}`);
-
-  // Poll if still running
-  let pollCount = 0;
-  while (result.status?.state === 'PENDING' || result.status?.state === 'RUNNING') {
-    pollCount++;
-    await new Promise(r => setTimeout(r, 2000));
-    console.log(`   ⏳ Polling (${pollCount})...`);
-    const pollResp = await dbFetch(token, `/api/2.0/sql/statements/${result.statement_id}`);
-    if (!pollResp.ok) {
-      const errText = await pollResp.text();
-      throw new Error(`SQL polling failed: ${errText}`);
-    }
-    result = await pollResp.json();
-    console.log(`   📄 Poll state: ${result.status?.state}`);
-  }
-
-  if (result.status?.state === 'FAILED') {
-    const errMsg = result.status?.error?.message || 'SQL statement execution failed';
-    console.error(`   ❌ SQL failed: ${errMsg}`);
-    throw new Error(errMsg);
-  }
-
-  // Log result structure for debugging
-  const rowCount = result.result?.row_count ?? result.manifest?.total_row_count ?? 'unknown';
-  const hasData = !!(result.result?.data_array);
-  const chunkCount = result.manifest?.total_chunk_count ?? 'unknown';
-  console.log(`   ✅ SQL done: rows=${rowCount}, has_data_array=${hasData}, chunks=${chunkCount}`);
-
-  // Handle chunked results — fetch all chunks if needed
-  if (result.manifest?.total_chunk_count > 1 && result.manifest?.chunks) {
-    console.log(`   📦 Multi-chunk result, fetching ${result.manifest.total_chunk_count} chunks...`);
-    let allData = result.result?.data_array || [];
-    for (const chunk of result.manifest.chunks) {
-      if (chunk.chunk_index === 0) continue; // Already have first chunk
-      const chunkResp = await dbFetch(token,
-        `/api/2.0/sql/statements/${result.statement_id}/result/chunks/${chunk.chunk_index}`
-      );
-      if (chunkResp.ok) {
-        const chunkData = await chunkResp.json();
-        if (chunkData.data_array) {
-          allData = allData.concat(chunkData.data_array);
-        }
-      }
-    }
-    result.result = result.result || {};
-    result.result.data_array = allData;
-    console.log(`   📦 Total rows after chunk merge: ${allData.length}`);
-  }
-
-  return result;
-}
-
-// ─── List pipeline tables in inspire_database ───
-app.get('/api/results/tables', requireToken, async (req, res) => {
-  try {
-    const inspireDb = req.query.inspire_database;
-    if (!inspireDb || !inspireDb.includes('.')) {
-      return res.status(400).json({ error: 'inspire_database query param required (format: catalog.schema).' });
-    }
-    const [catalog, schema] = inspireDb.split('.');
-    const response = await dbFetch(
-      req.dbToken,
-      `/api/2.1/unity-catalog/tables?catalog_name=${encodeURIComponent(catalog)}&schema_name=${encodeURIComponent(schema)}&max_results=500`
-    );
-    if (!response.ok) {
-      const err = await response.text();
-      return res.status(response.status).json({ error: err });
-    }
-    const data = await response.json();
-    const tables = (data.tables || []).map(t => ({
-      name: t.name,
-      full_name: t.full_name,
-      table_type: t.table_type,
-    }));
-    // Filter to pipeline tables only
-    const pipelineTables = tables.filter(t =>
-      t.name.startsWith('_pipeline_') || t.name === '_inspire_tracking'
-    );
-    res.json({ tables: pipelineTables, all_tables: tables, count: pipelineTables.length });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ─── Fetch use cases from the Delta table ───
-app.get('/api/results/use-cases', requireToken, async (req, res) => {
-  try {
-    const { inspire_database, warehouse_id } = req.query;
-    if (!inspire_database || !warehouse_id) {
-      return res.status(400).json({ error: 'inspire_database and warehouse_id query params required.' });
-    }
-
-    // First, discover what tables exist
-    const [catalog, schema] = inspire_database.split('.');
-    let availableTables = [];
-    try {
-      const listResp = await dbFetch(
-        req.dbToken,
-        `/api/2.1/unity-catalog/tables?catalog_name=${encodeURIComponent(catalog)}&schema_name=${encodeURIComponent(schema)}&max_results=500`
-      );
-      if (listResp.ok) {
-        const listData = await listResp.json();
-        availableTables = (listData.tables || []).map(t => t.name);
-        console.log(`📋 Tables in ${inspire_database}: ${availableTables.join(', ')}`);
-      }
-    } catch (e) {
-      console.log(`   ⚠️ Could not list tables: ${e.message}`);
-    }
-
-    // Try known use case table suffixes, plus any table containing "use_case" in its name
-    const knownSuffixes = ['_pipeline_use_cases_final', '_pipeline_use_cases_scored', '_pipeline_use_cases_raw'];
-    const dynamicTables = availableTables.filter(t =>
-      t.toLowerCase().includes('use_case') && !knownSuffixes.includes(t)
-    );
-    const tableSuffixes = [...knownSuffixes, ...dynamicTables];
-
-    let useCases = [];
-    let sourceTable = '';
-    const triedTables = [];
-
-    for (const suffix of tableSuffixes) {
-      // Only try tables that actually exist (if we have the list)
-      if (availableTables.length > 0 && !availableTables.includes(suffix)) {
-        continue;
-      }
-      const tableName = `\`${catalog}\`.\`${schema}\`.\`${suffix}\``;
-      triedTables.push(suffix);
-      try {
-        console.log(`   🔍 Trying: ${tableName}`);
-        const result = await executeSqlStatement(
-          req.dbToken,
-          warehouse_id,
-          `SELECT * FROM ${tableName} ORDER BY idx LIMIT 1000`
-        );
-
-        console.log(`   📄 Result status: ${result.status?.state}, rows: ${result.result?.row_count || 0}`);
-
-        if (result.result?.data_array && result.result.data_array.length > 0) {
-          // Find the column index for use_case_json
-          const columns = result.manifest?.schema?.columns || [];
-          const colNames = columns.map(c => c.name);
-          const jsonColIdx = colNames.indexOf('use_case_json');
-
-          console.log(`   📊 Columns: ${colNames.join(', ')}, use_case_json at index: ${jsonColIdx}`);
-
-          if (jsonColIdx >= 0) {
-            useCases = result.result.data_array.map(row => {
-              try { return JSON.parse(row[jsonColIdx]); } catch { return null; }
-            }).filter(Boolean);
-          } else {
-            // If there's no use_case_json column, try to build from available columns
-            console.log(`   ⚠️ No use_case_json column found. Columns: ${colNames.join(', ')}`);
-            // Try returning all columns as a use case object
-            useCases = result.result.data_array.map(row => {
-              const obj = {};
-              colNames.forEach((col, i) => { obj[col] = row[i]; });
-              return obj;
-            });
-          }
-          sourceTable = suffix;
-          break;
-        }
-      } catch (e) {
-        console.log(`   ℹ️ Table ${suffix}: ${e.message}`);
-        continue;
-      }
-    }
-
-    console.log(`📊 Fetched ${useCases.length} use cases from ${sourceTable || 'none'} (tried: ${triedTables.join(', ')})`);
-    res.json({
-      use_cases: useCases,
-      source_table: sourceTable,
-      count: useCases.length,
-      available_tables: availableTables,
-      tried_tables: triedTables,
-    });
-  } catch (err) {
-    console.error(`❌ Use cases fetch error:`, err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ─── Fetch pipeline state from Delta ───
-app.get('/api/results/pipeline-state', requireToken, async (req, res) => {
-  try {
-    const { inspire_database, warehouse_id } = req.query;
-    if (!inspire_database || !warehouse_id) {
-      return res.status(400).json({ error: 'inspire_database and warehouse_id query params required.' });
-    }
-
-    const tableName = `${inspire_database}._pipeline_state`;
-    const result = await executeSqlStatement(
-      req.dbToken,
-      warehouse_id,
-      `SELECT phase_name, state_json, updated_at FROM ${tableName} ORDER BY updated_at`
-    );
-
-    const states = {};
-    if (result.result?.data_array) {
-      for (const row of result.result.data_array) {
-        try {
-          states[row[0]] = { data: JSON.parse(row[1]), updated_at: row[2] };
-        } catch { /* skip */ }
-      }
-    }
-
-    res.json({ states, phases: Object.keys(states) });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ─── Cancel a run ───
 app.post('/api/run/:runId/cancel', requireToken, async (req, res) => {
   try {
-    const response = await dbFetch(req.dbToken, '/api/2.1/jobs/runs/cancel', {
+    const response = await dbFetch(req.dbHost, req.dbToken, '/api/2.1/jobs/runs/cancel', {
       method: 'POST',
       body: JSON.stringify({ run_id: parseInt(req.params.runId) }),
     });
@@ -967,14 +878,500 @@ app.post('/api/run/:runId/cancel', requireToken, async (req, res) => {
   }
 });
 
-const PORT = process.env.PORT || 3001;
+// ═══════════════════════════════════════════════════
+//  V43 Session & Step Tracking (READY/DONE Protocol)
+// ═══════════════════════════════════════════════════
+
+// Poll session status
+app.get('/api/inspire/session', requireToken, async (req, res) => {
+  try {
+    const { inspire_database, warehouse_id, session_id } = req.query;
+    if (!inspire_database || !warehouse_id) {
+      return res.status(400).json({ error: 'inspire_database and warehouse_id required.' });
+    }
+
+    const [catalog, schema] = inspire_database.split('.');
+    const table = `\`${catalog}\`.\`${schema}\`.\`__inspire_session\``;
+
+    // v45 session table has individual widget columns instead of a single widget_values JSON
+    const widgetCols = `business_name, inspire_database_name, operation_mode, table_election_mode, use_cases_quality, strategic_goals, business_priorities, business_domains, catalogs, schemas_str, tables_str, generate_choices, generation_path, output_language, sql_generation_per_domain, technical_exclusion_strategy, json_file_path`;
+    const baseCols = `session_id, processing_status, completed_percent, create_at, last_updated, completed_on, inspire_json, results_json`;
+
+    let sql;
+    if (session_id) {
+      sql = `SELECT ${baseCols}, ${widgetCols} FROM ${table} WHERE session_id = ${session_id} LIMIT 1`;
+    } else {
+      sql = `SELECT ${baseCols}, ${widgetCols} FROM ${table} ORDER BY create_at DESC LIMIT 1`;
+    }
+
+    const result = await executeSql(req.dbHost, req.dbToken, warehouse_id, sql);
+    const rows = sqlResultToObjects(result);
+
+    if (rows.length === 0) {
+      return res.json({ session: null, message: 'No session found. The notebook may still be initializing.' });
+    }
+
+    const session = rows[0];
+
+    // Reconstruct widget_values from individual columns for frontend compatibility
+    session.widget_values = {
+      business: session.business_name || '',
+      inspire_database: session.inspire_database_name || '',
+      operation_mode: session.operation_mode || '',
+      table_election_mode: session.table_election_mode || '',
+      use_cases_quality: session.use_cases_quality || '',
+      strategic_goals: session.strategic_goals || '',
+      business_priorities: session.business_priorities || '',
+      business_domains: session.business_domains || '',
+      catalogs: session.catalogs || '',
+      schemas: session.schemas_str || '',
+      tables: session.tables_str || '',
+      generate: session.generate_choices || '',
+      generation_path: session.generation_path || '',
+      output_language: session.output_language || '',
+      sql_generation_per_domain: session.sql_generation_per_domain || '',
+      technical_exclusion_strategy: session.technical_exclusion_strategy || '',
+      json_file_path: session.json_file_path || '',
+    };
+
+    // Parse VARIANT fields (may come as object or string)
+    for (const field of ['inspire_json', 'results_json']) {
+      if (session[field] && typeof session[field] === 'string') {
+        try { session[field] = JSON.parse(session[field]); } catch { session[field] = null; }
+      } else if (!session[field]) {
+        session[field] = null;
+      }
+    }
+
+    // Parse numeric fields
+    session.completed_percent = parseFloat(session.completed_percent) || 0;
+
+    res.json({ session });
+  } catch (err) {
+    // Table might not exist yet — return null session
+    if (err.message.includes('TABLE_OR_VIEW_NOT_FOUND') || err.message.includes('does not exist')) {
+      return res.json({ session: null, message: 'Session table not yet created. Notebook is initializing...' });
+    }
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get step delta (new steps since last poll)
+app.get('/api/inspire/steps', requireToken, async (req, res) => {
+  try {
+    const { inspire_database, warehouse_id, session_id, since } = req.query;
+    if (!inspire_database || !warehouse_id) {
+      return res.status(400).json({ error: 'inspire_database and warehouse_id required.' });
+    }
+
+    const [catalog, schema] = inspire_database.split('.');
+    const table = `\`${catalog}\`.\`${schema}\`.\`__inspire_step\``;
+
+    let sql;
+    if (session_id && since) {
+      sql = `SELECT step_id, session_id, last_updated, stage_name, step_name, sub_step_name, progress_increment, message, status, result_json FROM ${table} WHERE session_id = ${session_id} AND last_updated > '${since}' ORDER BY last_updated, step_id`;
+    } else if (session_id) {
+      sql = `SELECT step_id, session_id, last_updated, stage_name, step_name, sub_step_name, progress_increment, message, status, result_json FROM ${table} WHERE session_id = ${session_id} ORDER BY last_updated, step_id`;
+    } else {
+      sql = `SELECT step_id, session_id, last_updated, stage_name, step_name, sub_step_name, progress_increment, message, status, result_json FROM ${table} ORDER BY last_updated DESC, step_id DESC LIMIT 100`;
+    }
+
+    const result = await executeSql(req.dbHost, req.dbToken, warehouse_id, sql);
+    const steps = sqlResultToObjects(result);
+
+    // Parse result_json and progress_increment for each step
+    for (const step of steps) {
+      try { step.result_json = JSON.parse(step.result_json); } catch { step.result_json = null; }
+      step.progress_increment = parseFloat(step.progress_increment) || 0;
+    }
+
+    res.json({ steps, count: steps.length });
+  } catch (err) {
+    if (err.message.includes('TABLE_OR_VIEW_NOT_FOUND') || err.message.includes('does not exist')) {
+      return res.json({ steps: [], count: 0, message: 'Step table not yet created.' });
+    }
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Build progressive results from __inspire_step result_json (no need to wait for final results_json)
+app.get('/api/inspire/step-results', requireToken, async (req, res) => {
+  try {
+    const { inspire_database, warehouse_id, session_id } = req.query;
+    if (!inspire_database || !warehouse_id || !session_id) {
+      return res.status(400).json({ error: 'inspire_database, warehouse_id, and session_id required.' });
+    }
+
+    const [catalog, schema] = inspire_database.split('.');
+    const stepTable = `\`${catalog}\`.\`${schema}\`.\`__inspire_step\``;
+
+    // Fetch all ended_success steps that carry payload data
+    const sql = `SELECT step_id, stage_name, step_name, status, result_json FROM ${stepTable} WHERE session_id = ${session_id} AND status IN ('ended_success', 'ended_warning') ORDER BY last_updated, step_id`;
+
+    const result = await executeSql(req.dbHost, req.dbToken, warehouse_id, sql);
+    const steps = sqlResultToObjects(result);
+
+    // Parse result_json for each step
+    for (const step of steps) {
+      try {
+        if (step.result_json && typeof step.result_json === 'string') {
+          step.result_json = JSON.parse(step.result_json);
+        }
+      } catch { step.result_json = null; }
+    }
+
+    // ── Assemble progressive results from step payloads ──
+    // Use cases keyed by id to allow merging across phases
+    const ucMap = new Map();       // id → use case object
+    const domainsList = [];        // { domain_name, use_case_ids }
+    let executiveSummary = '';
+    let businessContext = null;
+
+    for (const step of steps) {
+      const rj = step.result_json;
+      if (!rj) continue;
+      const prompt = rj.prompt_name || '';
+
+      // 1) Use Case Generation (BASE, AI, STATS, UNSTRUCTURED)
+      if (prompt.endsWith('_USE_CASE_GEN_PROMPT') && Array.isArray(rj.use_cases)) {
+        for (const uc of rj.use_cases) {
+          if (!uc.id) continue;
+          const existing = ucMap.get(uc.id) || {};
+          ucMap.set(uc.id, {
+            ...existing,
+            No: uc.id,
+            Name: uc.name || existing.Name || '',
+            'Business Domain': uc.business_domain || existing['Business Domain'] || '',
+            Subdomain: uc.subdomain || existing.Subdomain || '',
+            type: uc.type || existing.type || '',
+            _source_prompt: prompt,
+          });
+        }
+      }
+
+      // 2) Domain Clustering
+      if (prompt === 'DOMAIN_FINDER_PROMPT' && Array.isArray(rj.domains)) {
+        for (const d of rj.domains) {
+          domainsList.push({
+            domain_name: d.domain_name || '',
+            use_case_ids: d.use_case_ids || [],
+          });
+        }
+      }
+
+      // 3) Scoring (COMBINED_VALUE_QUALITY_SCORE_PROMPT)
+      if (prompt === 'COMBINED_VALUE_QUALITY_SCORE_PROMPT' && Array.isArray(rj.scored_use_cases)) {
+        for (const sc of rj.scored_use_cases) {
+          if (!sc.id) continue;
+          const existing = ucMap.get(sc.id) || {};
+          ucMap.set(sc.id, {
+            ...existing,
+            No: sc.id,
+            Name: sc.name || existing.Name || '',
+            Priority: sc.priority || existing.Priority || '',
+            Quality: sc.quality || existing.Quality || '',
+            _value: sc.value || existing._value || '',
+            _feasibility: sc.feasibility || existing._feasibility || '',
+          });
+        }
+      }
+
+      // 4) Review / dedup (REVIEW_USE_CASES_PROMPT) — may contain full use case rows
+      if (prompt === 'REVIEW_USE_CASES_PROMPT' && Array.isArray(rj.rows)) {
+        for (const row of rj.rows) {
+          if (!row.No && !row.id) continue;
+          const id = String(row.No || row.id);
+          const existing = ucMap.get(id) || {};
+          ucMap.set(id, { ...existing, ...row, No: id });
+        }
+      }
+
+      // 5) SQL Generation
+      if (prompt === 'USE_CASE_SQL_GEN_PROMPT' && rj.sql_preview) {
+        // entity_id format: USE_CASE_SQL_GEN_PROMPT:SQL_Gen:uc_42
+        const ucIdMatch = (rj.entity_id || '').match(/uc_(\d+)/);
+        if (ucIdMatch) {
+          const id = ucIdMatch[1];
+          const existing = ucMap.get(id) || {};
+          ucMap.set(id, { ...existing, No: id, SQL: rj.sql_preview });
+        }
+      }
+
+      // 6) Summary
+      if (prompt === 'SUMMARY_GEN_PROMPT' && rj.response_chars) {
+        executiveSummary = rj.summary || executiveSummary;
+      }
+
+      // 7) Business Context
+      if (prompt === 'BUSINESS_CONTEXT_WORKER_PROMPT' && rj.json) {
+        businessContext = rj.json;
+      }
+
+      // 8) Translation rows — may carry full use case objects
+      if (prompt === 'USE_CASE_TRANSLATE_PROMPT' && Array.isArray(rj.rows)) {
+        for (const row of rj.rows) {
+          if (!row.No) continue;
+          const id = String(row.No);
+          const existing = ucMap.get(id) || {};
+          ucMap.set(id, { ...existing, ...row, No: id });
+        }
+      }
+    }
+
+    // ── Build domain → use_cases structure ──
+    const allUcs = Array.from(ucMap.values());
+
+    // Assign domains to use cases based on clustering
+    if (domainsList.length > 0) {
+      const idToDomain = {};
+      for (const d of domainsList) {
+        for (const ucId of d.use_case_ids) {
+          idToDomain[String(ucId)] = d.domain_name;
+        }
+      }
+      for (const uc of allUcs) {
+        if (!uc['Business Domain'] && idToDomain[String(uc.No)]) {
+          uc['Business Domain'] = idToDomain[String(uc.No)];
+        }
+      }
+    }
+
+    // Group use cases by domain
+    const domainMap = new Map();
+    for (const uc of allUcs) {
+      const dName = uc['Business Domain'] || 'Uncategorized';
+      if (!domainMap.has(dName)) domainMap.set(dName, []);
+      domainMap.get(dName).push(uc);
+    }
+
+    const domains = Array.from(domainMap.entries()).map(([domain_name, use_cases]) => ({
+      domain_name,
+      use_cases,
+    }));
+
+    const progressiveResults = {
+      title: businessContext ? `${businessContext.business_context || ''} Use Cases Catalog` : 'Use Cases Catalog (In Progress)',
+      executive_summary: executiveSummary || '',
+      domains_summary: domains.map(d => `${d.domain_name}: ${d.use_cases.length} use cases`).join(', '),
+      domains,
+      table_registry: {},
+      column_registry: {},
+      _progressive: true,
+      _use_case_count: allUcs.length,
+      _step_count: steps.length,
+    };
+
+    console.log(`   📊 step-results: ${allUcs.length} use cases from ${steps.length} steps, ${domains.length} domains`);
+    res.json({ results: progressiveResults, session_id });
+  } catch (err) {
+    if (err.message.includes('TABLE_OR_VIEW_NOT_FOUND') || err.message.includes('does not exist')) {
+      return res.json({ results: null, message: 'Step table not yet created.' });
+    }
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get use cases from __inspire_usecases table (final polished data)
+app.get('/api/inspire/usecases', requireToken, async (req, res) => {
+  try {
+    const { inspire_database, warehouse_id, session_id } = req.query;
+    if (!inspire_database || !warehouse_id || !session_id) {
+      return res.status(400).json({ error: 'inspire_database, warehouse_id, and session_id required.' });
+    }
+    const [catalog, schema] = inspire_database.split('.');
+    const table = `\`${catalog}\`.\`${schema}\`.\`__inspire_usecases\``;
+    const sql = `SELECT * FROM ${table} WHERE session_id = ${session_id} ORDER BY No`;
+    const result = await executeSql(req.dbHost, req.dbToken, warehouse_id, sql);
+    const rows = sqlResultToObjects(result);
+    console.log(`   📋 usecases: ${rows.length} rows for session ${session_id}`);
+    res.json({ usecases: rows, count: rows.length });
+  } catch (err) {
+    if (err.message.includes('TABLE_OR_VIEW_NOT_FOUND') || err.message.includes('does not exist')) {
+      return res.json({ usecases: [], count: 0, message: 'Usecases table not found.' });
+    }
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ACK: set processing_status = 'done'
+app.post('/api/inspire/ack', requireToken, async (req, res) => {
+  try {
+    const { inspire_database, warehouse_id, session_id } = req.body;
+    if (!inspire_database || !warehouse_id || !session_id) {
+      return res.status(400).json({ error: 'inspire_database, warehouse_id, and session_id required.' });
+    }
+
+    const [catalog, schema] = inspire_database.split('.');
+    const table = `\`${catalog}\`.\`${schema}\`.\`__inspire_session\``;
+    const sql = `UPDATE ${table} SET processing_status = 'done' WHERE session_id = ${session_id} AND processing_status = 'ready'`;
+
+    await executeSql(req.dbHost, req.dbToken, warehouse_id, sql);
+    console.log(`   ✅ ACK sent for session ${session_id}`);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get results_json for completed session
+app.get('/api/inspire/results', requireToken, async (req, res) => {
+  try {
+    const { inspire_database, warehouse_id, session_id } = req.query;
+    if (!inspire_database || !warehouse_id) {
+      return res.status(400).json({ error: 'inspire_database and warehouse_id required.' });
+    }
+
+    const [catalog, schema] = inspire_database.split('.');
+    const table = `\`${catalog}\`.\`${schema}\`.\`__inspire_session\``;
+
+    let sql;
+    if (session_id) {
+      sql = `SELECT results_json, completed_on, session_id FROM ${table} WHERE session_id = ${session_id} AND completed_on IS NOT NULL LIMIT 1`;
+    } else {
+      // Get latest completed session
+      sql = `SELECT results_json, completed_on, session_id FROM ${table} WHERE completed_on IS NOT NULL ORDER BY completed_on DESC LIMIT 1`;
+    }
+
+    const result = await executeSql(req.dbHost, req.dbToken, warehouse_id, sql);
+    const rows = sqlResultToObjects(result);
+
+    if (rows.length === 0) {
+      return res.json({ results: null, message: 'No completed session found.' });
+    }
+
+    let results = null;
+    const raw = rows[0].results_json;
+    if (raw && typeof raw === 'object') {
+      // VARIANT type already returned as object
+      results = raw;
+    } else if (raw && typeof raw === 'string') {
+      try { results = JSON.parse(raw); } catch { results = null; }
+    }
+    console.log('   📊 results_json type:', typeof raw, '| domains:', Array.isArray(results?.domains) ? results.domains.length : 'N/A', '| has use_cases:', !!results?.use_cases);
+
+    res.json({
+      results,
+      session_id: rows[0].session_id,
+      completed_on: rows[0].completed_on,
+    });
+  } catch (err) {
+    if (err.message.includes('TABLE_OR_VIEW_NOT_FOUND') || err.message.includes('does not exist')) {
+      return res.json({ results: null, message: 'Session table not found.' });
+    }
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// List all sessions (for results page - pick which session to view)
+app.get('/api/inspire/sessions', requireToken, async (req, res) => {
+  try {
+    const { inspire_database, warehouse_id } = req.query;
+    if (!inspire_database || !warehouse_id) {
+      return res.status(400).json({ error: 'inspire_database and warehouse_id required.' });
+    }
+
+    const [catalog, schema] = inspire_database.split('.');
+    const table = `\`${catalog}\`.\`${schema}\`.\`__inspire_session\``;
+    const sql = `SELECT session_id, processing_status, completed_percent, create_at, completed_on, business_name, inspire_database_name, operation_mode, generation_path FROM ${table} ORDER BY create_at DESC LIMIT 20`;
+
+    const result = await executeSql(req.dbHost, req.dbToken, warehouse_id, sql);
+    const sessions = sqlResultToObjects(result);
+
+    for (const s of sessions) {
+      // Reconstruct minimal widget_values for frontend compatibility
+      s.widget_values = {
+        business: s.business_name || '',
+        '00_business_name': s.business_name || '',
+        inspire_database: s.inspire_database_name || '',
+        operation_mode: s.operation_mode || '',
+        generation_path: s.generation_path || '',
+      };
+      s.completed_percent = parseFloat(s.completed_percent) || 0;
+    }
+
+    res.json({ sessions });
+  } catch (err) {
+    if (err.message.includes('TABLE_OR_VIEW_NOT_FOUND') || err.message.includes('does not exist')) {
+      return res.json({ sessions: [], message: 'Session table not found.' });
+    }
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════
+//  Legacy results endpoints (fallback for old data)
+// ═══════════════════════════════════════════════════
+
+app.get('/api/results/tables', requireToken, async (req, res) => {
+  try {
+    const inspireDb = req.query.inspire_database;
+    if (!inspireDb || !inspireDb.includes('.')) {
+      return res.status(400).json({ error: 'inspire_database required (catalog.schema).' });
+    }
+    const [catalog, schema] = inspireDb.split('.');
+    const response = await dbFetch(
+      req.dbHost, req.dbToken,
+      `/api/2.1/unity-catalog/tables?catalog_name=${encodeURIComponent(catalog)}&schema_name=${encodeURIComponent(schema)}&max_results=500`
+    );
+    if (!response.ok) {
+      const err = await response.text();
+      return res.status(response.status).json({ error: err });
+    }
+    const data = await response.json();
+    const tables = (data.tables || []).map(t => ({
+      name: t.name,
+      full_name: t.full_name,
+      table_type: t.table_type,
+    }));
+    res.json({ tables, count: tables.length });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════
+//  Workspace status check
+// ═══════════════════════════════════════════════════
+
+app.get('/api/workspace/status', requireToken, async (req, res) => {
+  try {
+    const notebookPath = req.query.path;
+    if (!notebookPath) return res.status(400).json({ error: 'path query param required.' });
+    const response = await dbFetch(req.dbHost, req.dbToken, `/api/2.0/workspace/get-status?path=${encodeURIComponent(notebookPath)}`);
+    if (!response.ok) {
+      if (response.status === 404) return res.json({ exists: false });
+      const err = await response.text();
+      return res.status(response.status).json({ error: err });
+    }
+    const data = await response.json();
+    res.json({ exists: true, object_type: data.object_type, path: data.path, language: data.language });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════
+//  SPA Fallback — serve index.html for non-API routes
+// ═══════════════════════════════════════════════════
+
+if (fs.existsSync(STATIC_DIR)) {
+  app.get('{*path}', (req, res) => {
+    res.sendFile(path.join(STATIC_DIR, 'index.html'));
+  });
+}
+
+// ═══════════════════════════════════════════════════
+//  Start server
+// ═══════════════════════════════════════════════════
+
+const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   const hasDbc = fs.existsSync(BUNDLED_DBC_PATH);
-  const hasNotebooks = fs.existsSync(NOTEBOOKS_DIR);
-  const notebookCount = hasNotebooks ? fs.readdirSync(NOTEBOOKS_DIR).filter(f => f.endsWith('.py')).length : 0;
-  console.log(`\n🚀 Inspire Backend running on http://localhost:${PORT}`);
-  console.log(`   Databricks Host: ${DATABRICKS_HOST}`);
+  const servingStatic = fs.existsSync(STATIC_DIR);
+  console.log(`\n🚀 Inspire AI running on http://localhost:${PORT}`);
+  console.log(`   Databricks Host: ${DATABRICKS_HOST || '⚠️  Not configured — set DATABRICKS_HOST'}`);
+  console.log(`   Service Token:   ${SERVICE_TOKEN ? '✅ Configured' : '—  (users must provide PAT)'}`);
   console.log(`   Bundled DBC:     ${hasDbc ? '✅ Found' : '❌ Not found'}`);
-  console.log(`   Pipeline Mode:   ${hasNotebooks ? `✅ ${notebookCount} notebooks` : '❌ Not available'}`);
+  console.log(`   Static Frontend: ${servingStatic ? '✅ Serving from ' + STATIC_DIR : '—  (dev proxy mode)'}`);
   console.log(`   Default Notebook: ${DEFAULT_NOTEBOOK_PATH || '(publish via UI)'}\n`);
 });
