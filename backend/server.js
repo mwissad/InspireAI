@@ -27,9 +27,9 @@ const SERVICE_TOKEN = process.env.DATABRICKS_TOKEN || '';
 
 // Path to the bundled DBC file — try several candidate locations
 const DBC_CANDIDATES = [
-  path.resolve(__dirname, '..', 'databricks_inspire_v43.dbc'),
-  path.resolve(__dirname, 'databricks_inspire_v43.dbc'),
-  path.resolve(__dirname, '..', 'notebooks', 'databricks_inspire_v43.dbc'),
+  path.resolve(__dirname, '..', 'databricks_inspire_v45.dbc'),
+  path.resolve(__dirname, 'databricks_inspire_v45.dbc'),
+  path.resolve(__dirname, '..', 'notebooks', 'databricks_inspire_v45.dbc'),
 ];
 let BUNDLED_DBC_PATH = DBC_CANDIDATES.find(p => fs.existsSync(p)) || '';
 
@@ -37,7 +37,7 @@ let BUNDLED_DBC_PATH = DBC_CANDIDATES.find(p => fs.existsSync(p)) || '';
 if (!BUNDLED_DBC_PATH) {
   try {
     const b64 = require('./dbc_bundle');
-    const materializedPath = path.resolve(__dirname, 'databricks_inspire_v43.dbc');
+    const materializedPath = path.resolve(__dirname, 'databricks_inspire_v45.dbc');
     fs.writeFileSync(materializedPath, Buffer.from(b64, 'base64'));
     BUNDLED_DBC_PATH = materializedPath;
     console.log('DBC materialized from embedded bundle.');
@@ -893,7 +893,7 @@ app.get('/api/inspire/session', requireToken, async (req, res) => {
     const [catalog, schema] = inspire_database.split('.');
     const table = `\`${catalog}\`.\`${schema}\`.\`__inspire_session\``;
 
-    // v43 session table has individual widget columns instead of a single widget_values JSON
+    // v45 session table has individual widget columns instead of a single widget_values JSON
     const widgetCols = `business_name, inspire_database_name, operation_mode, table_election_mode, use_cases_quality, strategic_goals, business_priorities, business_domains, catalogs, schemas_str, tables_str, generate_choices, generation_path, output_language, sql_generation_per_domain, technical_exclusion_strategy, json_file_path`;
     const baseCols = `session_id, processing_status, completed_percent, create_at, last_updated, completed_on, inspire_json, results_json`;
 

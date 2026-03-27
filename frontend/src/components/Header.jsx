@@ -22,7 +22,7 @@ export default function Header({
   };
 
   return (
-    <header className="bg-surface border-b border-border sticky top-0 z-40">
+    <header className="bg-surface/80 backdrop-blur-xl border-b border-border sticky top-0 z-40">
       <div className="max-w-screen-xl mx-auto px-6">
         <div className="flex items-center justify-between h-14">
           {/* Brand */}
@@ -34,8 +34,8 @@ export default function Header({
             <span className="text-text-primary font-bold text-xl tracking-tight">
               Inspire AI
             </span>
-            <span className="text-[10px] font-medium text-text-tertiary border border-border rounded px-1.5 py-0.5 ml-0.5">
-              v4.3
+            <span className="text-[10px] font-semibold text-db-red border border-db-red/30 bg-db-red-50 rounded-full px-2 py-0.5 ml-0.5">
+              v4.5
             </span>
           </button>
 

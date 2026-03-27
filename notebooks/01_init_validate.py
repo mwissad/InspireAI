@@ -17,17 +17,15 @@ def create_widgets():
     0- Business Name
     1- UC Metadata
     2- Inspire Database
-    3- Operation
-    4- Table Election
-    5- Use Cases Quality
-    6- Business Domains
-    7- Business Priorities
-    8- Strategic Goals
-    9- Generation Options
-    10- SQL Generation Per Domain
-    11- Generation Path
-    12- Documents Languages
-    13- Inspire Session ID
+    3- Table Election
+    4- Use Cases Quality
+    5- Business Domains
+    6- Business Priorities
+    7- Strategic Goals
+    8- Generation Options
+    9- Generation Path
+    10- Documents Languages
+    11- Inspire Session ID
     """
     
     log_print("Creating widgets (retaining existing values)...")
@@ -52,16 +50,7 @@ def create_widgets():
     except Exception as e:
         widget_errors.append(f"Inspire Database: {e}")
     
-    # --- 3. Operation (controls main operation mode) ---
-    try:
-        operation_options = [
-            "Discover Usecases",
-            "Re-generate SQL"
-        ]
-        dbutils.widgets.dropdown("03_operation", "Discover Usecases", operation_options, "04. Operation")
-    except Exception as e:
-        widget_errors.append(f"Operation: {e}")
-    
+
     # --- 4. Table Election (controls which tables are used for use case generation) ---
     try:
         table_election_options = [
@@ -117,14 +106,13 @@ def create_widgets():
     # --- 9. Generation Options (multiselect with generation choices) ---
     try:
         generation_options = [
-            "SQL Code",
-            "Sample Results",
+            "Genie Code Instructions",
             "PDF Catalog",
             "Presentation",
         ]
         dbutils.widgets.multiselect(
             "09_generation_options", 
-            "SQL Code",
+            "Genie Code Instructions",
             generation_options, 
             "10. Generation Options"
         )
@@ -132,18 +120,6 @@ def create_widgets():
         widget_errors.append(f"Generation Options: {e}")
     
     # --- 10. Generation Path ---
-    try:
-        sql_per_domain_options = ["0", "1", "2", "3", "4", "5", "All"]
-        dbutils.widgets.dropdown(
-            "10_sql_generation_per_domain",
-            "0",
-            sql_per_domain_options,
-            "11. SQL Generation Per Domain"
-        )
-    except Exception as e:
-        widget_errors.append(f"SQL Generation Per Domain: {e}")
-
-    # --- 11. Generation Path ---
     try:
         dbutils.widgets.text("11_generation_path", "./inspire_gen/", "12. Generation Path")
     except Exception as e:
@@ -256,10 +232,7 @@ def main():
     if inspire_database:
         inspire_database = inspire_database.strip()
     
-    # --- Operation Mode ---
-    operation_mode = dbutils.widgets.get("03_operation")
-    log_print(f"🎯 Operation Mode: {operation_mode}")
-    
+
     # --- Table Election Mode ---
     table_election_mode = dbutils.widgets.get("04_table_election")
     log_print(f"🗳️ Table Election: {table_election_mode}")
@@ -329,14 +302,7 @@ def main():
     # Extract special options from generation options
     technical_exclusion_strategy = "Aggressive"
 
-    # --- SQL Generation Per Domain ---
-    try:
-        sql_generation_per_domain = dbutils.widgets.get("10_sql_generation_per_domain").strip()
-    except Exception:
-        sql_generation_per_domain = "0"
-    if not sql_generation_per_domain:
-        sql_generation_per_domain = "0"
-    
+
     # --- Generation Path ---
     generation_path = dbutils.widgets.get("11_generation_path")
     
@@ -370,13 +336,6 @@ def main():
         else:
             log_print(f"✅ Inspire Database: '{inspire_database}'")
     
-    # Validate Operation mode
-    valid_operations = ["Discover Usecases", "Re-generate SQL"]
-    if operation_mode not in valid_operations:
-        validation_errors.append(f"❌ 'Operation' (03_operation) must be one of: {', '.join(valid_operations)}")
-    else:
-        log_print(f"✅ Operation: '{operation_mode}'")
-    
     # Validate Table Election mode
     valid_table_elections = ["Let Inspire Decides", "All Tables", "Transactional Only"]
     if table_election_mode not in valid_table_elections:
@@ -391,18 +350,7 @@ def main():
     else:
         log_print(f"✅ Use Cases Quality: '{use_cases_quality}'")
     
-    # AUTO-ENABLE SQL Code generation for "Re-generate SQL" mode (regardless of checkbox)
-    if operation_mode == "Re-generate SQL" and "SQL Code" not in generate_options_list:
-        generate_options_list.append("SQL Code")
-        generate_str = ", ".join(generate_options_list)
-        log_print(f"ℹ️ Auto-enabled 'SQL Code' for Re-generate SQL mode")
-    
-    # AUTO-ENABLE SQL Code generation when "Sample Results" is selected (samples require SQL)
-    if "Sample Results" in generate_options_list and "SQL Code" not in generate_options_list:
-        generate_options_list.append("SQL Code")
-        generate_str = ", ".join(generate_options_list)
-        log_print(f"ℹ️ Auto-enabled 'SQL Code' for Sample Results (samples require executable SQL)")
-    
+
     # Log Business Priorities (optional)
     if business_priorities_str:
         log_print(f"✅ Business Priorities: '{business_priorities_str}'")
@@ -421,14 +369,10 @@ def main():
     else:
         log_print(f"ℹ️ Strategic Goals: Not provided")
     
-    # UC Metadata validation depends on operation mode
+    # UC Metadata validation
     if not json_file_path:
-        if (operation_mode == "Discover Usecases" and 
-            not catalogs_str and not schemas_str and not tables_str):
+        if not catalogs_str and not schemas_str and not tables_str:
             validation_errors.append("❌ 'UC Metadata' (01_uc_metadata) is REQUIRED when discovering use cases")
-        elif operation_mode in ["Re-generate SQL"]:
-            # These modes work on existing notebooks, UC Metadata not required
-            log_print(f"ℹ️ UC Metadata: Not required for '{operation_mode}' mode")
         else:
             log_print(f"✅ UC Metadata provided: catalogs={len(catalogs_str.split(',')) if catalogs_str else 0}, schemas={len(schemas_str.split(',')) if schemas_str else 0}, tables={len(tables_str.split(',')) if tables_str else 0}")
     else:
@@ -467,20 +411,52 @@ def main():
             log_print(f"ℹ️ Documents Languages: {', '.join(languages)} (optional for notebooks-only)")
     
     # Log derived options
-    generate_sql_code = "SQL Code" in generate_options_list
-    generate_sample_result = "Sample Results" in generate_options_list
-    valid_sql_per_domain = {"0", "1", "2", "3", "4", "5", "All"}
-    if sql_generation_per_domain not in valid_sql_per_domain:
-        validation_errors.append("❌ 'SQL Generation Per Domain' (10_sql_generation_per_domain) must be one of: 0, 1, 2, 3, 4, 5, All")
-    else:
-        log_print(f"✅ SQL Generation Per Domain: {sql_generation_per_domain}")
-    log_print(f"ℹ️ SQL Code Generation: {'Enabled' if generate_sql_code else 'DISABLED (notebooks will have placeholder SQL)'}")
-    log_print(f"ℹ️ Sample Results: {'Enabled (SQL will be executed and samples generated)' if generate_sample_result else 'Disabled'}")
+    generate_genie_instructions = "Genie Code Instructions" in generate_options_list
+    log_print(f"ℹ️ Genie Code Instructions: {'ENABLED (will generate per-use-case Genie notebooks)' if generate_genie_instructions else 'Disabled'}")
     log_print("ℹ️ Technical table filtering: Aggressive (mandatory)")
     
     if user_session_id:
         log_print(f"✅ Inspire Session ID: '{user_session_id}' (user-provided)")
     else:
+        log_print(f"ℹ️ Inspire Session ID: Not provided (will be auto-generated)")
+    
+    if validation_errors:
+        import sys as _sys
+        error_count = len(validation_errors)
+        error_summary = "\n".join(validation_errors)
+        
+        log_print("=" * 80, level="ERROR")
+        log_print(f"❌ VALIDATION FAILED - {error_count} ERROR(S) FOUND:", level="ERROR")
+        log_print("=" * 80, level="ERROR")
+        for error in validation_errors:
+            log_print(error, level="ERROR")
+        log_print("=" * 80, level="ERROR")
+        
+        print(f"\n{'='*80}\n❌ VALIDATION ERRORS ({error_count}):\n{error_summary}\n{'='*80}\n", file=_sys.stderr, flush=True)
+        _sys.stdout.flush()
+        _sys.stderr.flush()
+        
+        exit_msg = f"Validation failed with {error_count} error(s):\n{error_summary}"
+        dbutils.notebook.exit(exit_msg)
+    
+    log_print("=" * 80)
+    log_print("✅ ALL VALIDATIONS PASSED - Starting generation...")
+    log_print("=" * 80)
+
+    # --- 3. Pack values and Run ---
+    
+    widget_values = {
+        "business": business_name,
+        "inspire_database": inspire_database,
+        "table_election_mode": table_election_mode,
+        "use_cases_quality": use_cases_quality,
+        "strategic_goals": strategic_goals_str,
+        "business_priorities": business_priorities_str,
+        "business_domains": business_domains_str,
+        "catalogs": catalogs_str,
+        "schemas": schemas_str,
+        "tables": tables_str,
+        "generate": generate_str,
 
     # --- Build config dict from validated widget values ---
     widget_values = {

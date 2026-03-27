@@ -3,36 +3,36 @@
 @theme {
   /* Databricks brand */
   --color-db-red: #FF3621;
-  --color-db-red-hover: #E62E1B;
-  --color-db-red-50: #FEF2F0;
-  --color-db-red-100: #FDD9D4;
+  --color-db-red-hover: #FF4A36;
+  --color-db-red-50: rgba(255, 54, 33, 0.08);
+  --color-db-red-100: rgba(255, 54, 33, 0.15);
 
-  /* Surfaces */
-  --color-surface: #FFFFFF;
-  --color-bg: #F7F8FA;
-  --color-bg-subtle: #F0F2F5;
-  --color-panel: #FAFBFC;
+  /* Surfaces — dark mode */
+  --color-surface: #111113;
+  --color-bg: #09090B;
+  --color-bg-subtle: #1A1A1F;
+  --color-panel: #0F0F12;
 
-  /* Borders */
-  --color-border: #E5E7EB;
-  --color-border-subtle: #F0F1F3;
-  --color-border-strong: #D1D5DB;
+  /* Borders — dark mode */
+  --color-border: rgba(255, 255, 255, 0.08);
+  --color-border-subtle: rgba(255, 255, 255, 0.04);
+  --color-border-strong: rgba(255, 255, 255, 0.15);
 
-  /* Text */
-  --color-text-primary: #1B2332;
-  --color-text-secondary: #5F6B7A;
-  --color-text-tertiary: #9CA3AF;
-  --color-text-disabled: #C4C9D2;
+  /* Text — dark mode */
+  --color-text-primary: #F0F0F3;
+  --color-text-secondary: #A0A0AB;
+  --color-text-tertiary: #63636E;
+  --color-text-disabled: #3F3F46;
 
-  /* Status */
-  --color-success: #16A34A;
-  --color-success-bg: #F0FDF4;
-  --color-warning: #D97706;
-  --color-warning-bg: #FFFBEB;
-  --color-error: #DC2626;
-  --color-error-bg: #FEF2F2;
-  --color-info: #2563EB;
-  --color-info-bg: #EFF6FF;
+  /* Status — dark mode */
+  --color-success: #22C55E;
+  --color-success-bg: rgba(34, 197, 94, 0.1);
+  --color-warning: #EAB308;
+  --color-warning-bg: rgba(234, 179, 8, 0.1);
+  --color-error: #EF4444;
+  --color-error-bg: rgba(239, 68, 68, 0.1);
+  --color-info: #3B82F6;
+  --color-info-bg: rgba(59, 130, 246, 0.1);
 }
 
 /* Base */
@@ -40,27 +40,29 @@ body {
   font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  background-color: #09090B;
+  color: #F0F0F3;
 }
 
-/* Custom scrollbar (light) */
+/* Custom scrollbar (dark) */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #D1D5DB; border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: #9CA3AF; }
+::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.1); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.2); }
 
 /* Glow focus ring */
 .glow-focus:focus-within {
-  box-shadow: 0 0 0 2px rgba(255, 54, 33, 0.08), 0 0 0 4px rgba(255, 54, 33, 0.04);
+  box-shadow: 0 0 0 2px rgba(255, 54, 33, 0.15), 0 0 0 4px rgba(255, 54, 33, 0.08);
 }
 
 /* Red glow for active/selected elements */
 .glow-active {
-  box-shadow: 0 0 0 1px #FF3621, 0 0 0 3px rgba(255, 54, 33, 0.1), 0 0 12px rgba(255, 54, 33, 0.06);
+  box-shadow: 0 0 0 1px #FF3621, 0 0 0 3px rgba(255, 54, 33, 0.15), 0 0 12px rgba(255, 54, 33, 0.1);
 }
 
 /* Subtle red glow for hover */
 .glow-hover:hover {
-  box-shadow: 0 0 0 1px rgba(255, 54, 33, 0.15), 0 0 8px rgba(255, 54, 33, 0.04);
+  box-shadow: 0 0 0 1px rgba(255, 54, 33, 0.2), 0 0 8px rgba(255, 54, 33, 0.08);
 }
 
 /* Smooth transitions */
@@ -70,14 +72,144 @@ body {
 
 /* Progress bar glow */
 .progress-glow {
-  box-shadow: 0 0 8px rgba(255, 54, 33, 0.3), 0 0 20px rgba(255, 54, 33, 0.1);
+  box-shadow: 0 0 8px rgba(255, 54, 33, 0.4), 0 0 20px rgba(255, 54, 33, 0.15);
 }
 
-/* Input field styling */
+/* Input field styling — dark mode */
+input[type="text"],
+input[type="password"],
+select {
+  background-color: #111113;
+  color: #F0F0F3;
+}
+
 input[type="text"]:focus,
 input[type="password"]:focus,
 select:focus {
   border-color: #FF3621;
-  box-shadow: 0 0 0 3px rgba(255, 54, 33, 0.08);
+  box-shadow: 0 0 0 3px rgba(255, 54, 33, 0.12);
   outline: none;
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: #63636E;
+}
+
+/* Infinite scrolling marquee */
+@keyframes marquee {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
+.animate-marquee {
+  animation: marquee 40s linear infinite;
+}
+
+/* Hide scrollbar */
+.scrollbar-hide::-webkit-scrollbar { display: none; }
+.scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
+
+/* ═══ Landing Page Animations ═══ */
+
+/* Fade in + slide up entrance */
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.animate-fade-in-up {
+  animation: fadeInUp 0.7s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+/* Ambient floating blobs */
+@keyframes ambientFloat {
+  0%, 100% {
+    transform: translate(0, 0) scale(1);
+    opacity: 0.6;
+  }
+  33% {
+    transform: translate(30px, -20px) scale(1.05);
+    opacity: 0.8;
+  }
+  66% {
+    transform: translate(-20px, 15px) scale(0.95);
+    opacity: 0.5;
+  }
+}
+.animate-ambient-float {
+  animation: ambientFloat 12s ease-in-out infinite;
+}
+.animate-ambient-float-delayed {
+  animation: ambientFloat 16s ease-in-out infinite;
+  animation-delay: -6s;
+}
+
+@keyframes ambientPulse {
+  0%, 100% {
+    opacity: 0.4;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.7;
+    transform: scale(1.1);
+  }
+}
+.animate-ambient-pulse {
+  animation: ambientPulse 10s ease-in-out infinite;
+}
+
+/* Terminal line entrance */
+@keyframes terminalLine {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.animate-terminal-line {
+  animation: terminalLine 0.15s ease-out forwards;
+}
+
+/* Cursor blink */
+@keyframes cursorBlink {
+  0%, 50% { opacity: 1; }
+  51%, 100% { opacity: 0; }
+}
+.animate-cursor-blink {
+  animation: cursorBlink 1s step-end infinite;
+}
+
+/* Shimmer border for industry cards */
+@keyframes shimmerBorder {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+.animate-shimmer-border {
+  background-size: 200% 100%;
+  animation: shimmerBorder 4s linear infinite;
+}
+
+/* Gradient border glow on hover */
+@keyframes gradientBorder {
+  0%, 100% {
+    opacity: 0.3;
+  }
+  50% {
+    opacity: 0.7;
+  }
+}
+.animate-gradient-border {
+  animation: gradientBorder 2s ease-in-out infinite;
 }

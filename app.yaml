@@ -1,7 +1,21 @@
-# Databricks App — Inspire AI
-# The Databricks runtime automatically injects:
-#   DATABRICKS_HOST  -> workspace URL
-#   DATABRICKS_TOKEN -> service-principal token (if configured)
+# ═══════════════════════════════════════════════════════════════
+#  Inspire AI — Databricks App Configuration
+# ═══════════════════════════════════════════════════════════════
+#
+#  DEPLOYMENT (Git-backed):
+#    1. Go to your Databricks workspace → Compute → Apps
+#    2. Click "Create App"
+#    3. Choose "Create from Git repository"
+#    4. Paste the GitHub URL of this repo
+#    5. Set app name to "inspire-ai"
+#    6. Click "Create" — Databricks handles the rest
+#
+#  The runtime automatically injects:
+#    DATABRICKS_HOST  → workspace URL (e.g. https://adb-xxx.azuredatabricks.net)
+#    DATABRICKS_TOKEN → service principal token (if resource configured)
+#    PORT             → port the app must listen on
+#
+# ═══════════════════════════════════════════════════════════════
 
 command:
   - "bash"
@@ -10,3 +24,12 @@ command:
 env:
   - name: "NODE_ENV"
     value: "production"
+
+# Uncomment to add a service principal for automatic authentication:
+# resources:
+#   - name: "inspire-ai-sp"
+#     type: "service-principal"
+#     description: "Service principal for Inspire AI to access Databricks APIs"
+#     permissions:
+#       - "CAN_USE"    # Use SQL warehouses
+#       - "CAN_MANAGE" # Publish notebooks, manage workspace files

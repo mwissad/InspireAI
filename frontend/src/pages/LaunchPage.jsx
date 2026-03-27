@@ -22,13 +22,11 @@ import {
   X,
 } from 'lucide-react';
 
-/* ─── Constants (v43 notebook widget options) ─── */
+/* ─── Constants (v45 notebook widget options) ─── */
 const QUALITY_OPTIONS = ['Good Quality', 'High Quality', 'Very High Quality'];
-const OPERATION_OPTIONS = ['Discover Usecases', 'Re-generate SQL'];
 const TABLE_ELECTION = ['Let Inspire Decides', 'All Tables', 'Transactional Only'];
 const GENERATION_OPTIONS = [
-  { key: 'SQL Code', icon: Layers, desc: 'Generate SQL queries for each use case' },
-  { key: 'Sample Results', icon: BarChart3, desc: 'Execute SQL and preview data samples' },
+  { key: 'Genie Code Instructions', icon: Sparkles, desc: 'Generate Genie code instructions per use case' },
   { key: 'PDF Catalog', icon: FileText, desc: 'Professional PDF use case catalog' },
   { key: 'Presentation', icon: Target, desc: 'Executive-ready slide deck' },
 ];
@@ -44,25 +42,22 @@ const BUSINESS_PRIORITIES = [
   { key: 'Protect Revenue', icon: '🔒' },
   { key: 'Execute Strategy', icon: '🎯' },
 ];
-const SQL_PER_DOMAIN = ['0', '1', '2', '3', '4', '5', 'All'];
 const TECH_EXCLUSION_OPTIONS = ['None', 'Exclude System Tables', 'Exclude All Technical'];
 
 export default function LaunchPage({ settings, update, onLaunched }) {
   const { databricksHost, token, notebookPath, warehouseId, inspireDatabase } = settings;
 
-  // ── Widget params (v43 exact widget names) ──
+  // ── Widget params (v45 exact widget names) ──
   const [params, setParams] = useState({
     '00_business_name': '',
     '01_uc_metadata': '',
     '02_inspire_database': inspireDatabase || '',
-    '03_operation': 'Discover Usecases',
     '04_table_election': 'Let Inspire Decides',
     '05_use_cases_quality': 'High Quality',
     '06_business_domains': '',
     '07_business_priorities': '',
     '08_strategic_goals': '',
     '09_generation_options': 'PDF Catalog',
-    '10_sql_generation_per_domain': '3',
     '11_generation_path': './inspire_gen/',
     '12_documents_languages': 'English',
     '14_session_id': '',
@@ -225,7 +220,7 @@ export default function LaunchPage({ settings, update, onLaunched }) {
       return setLaunchError('Business name is required.');
     if (!params['02_inspire_database'] && !inspireDatabase)
       return setLaunchError('Inspire Database is required. Set it in Settings.');
-    if (params['03_operation'] === 'Discover Usecases' && !params['01_uc_metadata'])
+    if (!params['01_uc_metadata'])
       return setLaunchError('Select at least one catalog, schema, or table for UC Metadata.');
 
     setLaunching(true);
@@ -262,7 +257,7 @@ export default function LaunchPage({ settings, update, onLaunched }) {
   const filteredTables = tables.filter(
     (t) => !tableSearch || t.full_name.toLowerCase().includes(tableSearch.toLowerCase())
   );
-  const isDiscover = params['03_operation'] === 'Discover Usecases';
+  const isDiscover = true; // v45: always in discover mode
   const needsLanguage = params['09_generation_options'].includes('PDF') || params['09_generation_options'].includes('Presentation');
 
   // Table select all / deselect all
@@ -356,20 +351,20 @@ export default function LaunchPage({ settings, update, onLaunched }) {
                     </div>
                     <div className="max-h-32 overflow-y-auto flex flex-wrap gap-1">
                       {selectedTables.map((t) => (
-                        <span key={t} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-white text-db-red text-[10px] font-medium border border-db-red/20">
+                        <span key={t} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-db-red-50 text-db-red text-[10px] font-medium border border-db-red/20">
                           <Table2 size={9} />
                           {t.split('.').pop()}
                           <button onClick={() => setSelectedTables((p) => p.filter((x) => x !== t))} className="hover:text-db-red-hover ml-0.5"><X size={8} /></button>
                         </span>
                       ))}
                       {selectedSchemas.map((s) => (
-                        <span key={s} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-white text-text-secondary text-[10px] font-medium border border-border">
+                        <span key={s} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-bg-subtle text-text-secondary text-[10px] font-medium border border-border">
                           {s}
                           <button onClick={() => { setSelectedSchemas((p) => p.filter((x) => x !== s)); setSelectedTables((p) => p.filter((x) => !x.startsWith(s + '.'))); }} className="hover:text-db-red ml-0.5"><X size={8} /></button>
                         </span>
                       ))}
                       {selectedCatalogs.map((c) => (
-                        <span key={c} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-white text-text-secondary text-[10px] font-medium border border-border">
+                        <span key={c} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-bg-subtle text-text-secondary text-[10px] font-medium border border-border">
                           <Database size={9} />
                           {c}
                           <button onClick={() => { setSelectedCatalogs((p) => p.filter((x) => x !== c)); setSelectedSchemas((p) => p.filter((x) => !x.startsWith(c + '.'))); setSelectedTables((p) => p.filter((x) => !x.startsWith(c + '.'))); }} className="hover:text-db-red ml-0.5"><X size={8} /></button>
@@ -657,25 +652,8 @@ export default function LaunchPage({ settings, update, onLaunched }) {
                 </Field>
               </div>
 
-              {/* SQL per Domain */}
-              <FieldSection label="SQL per Domain" hint="Queries per domain (default: 3)">
-                <GlowSelect
-                  value={params['10_sql_generation_per_domain']}
-                  onChange={(v) => updateParam('10_sql_generation_per_domain', v)}
-                  options={SQL_PER_DOMAIN}
-                />
-              </FieldSection>
-
-              {/* Row: Operation + Table Election + Quality */}
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
-                <FieldSection label="Operation Mode">
-                  <GlowSelect
-                    value={params['03_operation']}
-                    onChange={(v) => updateParam('03_operation', v)}
-                    options={OPERATION_OPTIONS}
-                  />
-                </FieldSection>
-
+              {/* Row: Table Election + Quality */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
                 <FieldSection label="Table Election">
                   <GlowSelect
                     value={params['04_table_election']}

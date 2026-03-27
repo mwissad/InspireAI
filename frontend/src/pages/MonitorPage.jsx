@@ -13,13 +13,13 @@ import {
   ChevronDown,
   ChevronRight,
   Activity,
-  BarChart3,
   Eye,
   EyeOff,
   Layers,
-  Target,
   Building2,
+  Sparkles,
 } from 'lucide-react';
+import ResultsPage from './ResultsPage';
 
 // Run lifecycle phases
 const PHASE_PENDING = 'PENDING';
@@ -35,7 +35,7 @@ const STATUS_FILTERS = [
   { key: 'error', label: 'Error', color: 'text-error' },
 ];
 
-export default function MonitorPage({ settings, sessionId, runId, onComplete }) {
+export default function MonitorPage({ settings, update, sessionId, runId, onComplete }) {
   const { databricksHost, token, warehouseId, inspireDatabase } = settings;
 
   // Run-level state
@@ -58,9 +58,11 @@ export default function MonitorPage({ settings, sessionId, runId, onComplete }) 
   const [autoScroll, setAutoScroll] = useState(true);
   const stepsEndRef = useRef(null);
 
-  // Results preview state
-  const [previewResults, setPreviewResults] = useState(null);
-  const [previewLoading, setPreviewLoading] = useState(false);
+  // Results inline display state
+  const [showInlineResults, setShowInlineResults] = useState(false);
+
+  // Live use case preview (extracted from steps during the run)
+  const [liveUseCases, setLiveUseCases] = useState([]);
 
   const apiFetch = useCallback(
     async (url, opts = {}) => {
@@ -105,6 +107,7 @@ export default function MonitorPage({ settings, sessionId, runId, onComplete }) 
       if (warehouseId && inspireDatabase) {
         try {
           const sessQ = new URLSearchParams({ inspire_database: inspireDatabase, warehouse_id: warehouseId });
+          if (sessionId) sessQ.set('session_id', String(sessionId));
           const sessData = await apiFetch(`/api/inspire/session?${sessQ}`);
           if (sessData.session) {
             const sess = sessData.session;
@@ -145,7 +148,8 @@ export default function MonitorPage({ settings, sessionId, runId, onComplete }) 
 
             const runDone = !runId || currentRunInfo?.life_cycle_state === 'TERMINATED' || currentRunInfo?.life_cycle_state === 'INTERNAL_ERROR';
             const sessionDone = sess.completed_on || sess.completed_percent >= 100;
-            if (runDone && sessionDone) setPolling(false);
+            const sessionFinal = sess.processing_status === 'done' || sess.processing_status === 'ready';
+            if (runDone && sessionDone && (!noRunTracking || sessionFinal)) setPolling(false);
           }
         } catch { /* session table might not exist */ }
       } else if (!runId) {
@@ -154,7 +158,7 @@ export default function MonitorPage({ settings, sessionId, runId, onComplete }) 
     };
 
     poll();
-    const interval = setInterval(poll, 5000);
+    const interval = setInterval(poll, 2000);
     return () => clearInterval(interval);
   }, [polling, warehouseId, inspireDatabase, sessionId, runId, apiFetch]); // eslint-disable-line
 
@@ -166,12 +170,18 @@ export default function MonitorPage({ settings, sessionId, runId, onComplete }) 
   }, [steps, autoScroll]);
 
   // ── Derived display state ──
-  const isStaleSession = session?.completed_on && runPhase !== PHASE_TERMINATED;
+  // When no runId, derive state purely from session data
+  const noRunTracking = !runId;
+  const isStaleSession = !noRunTracking && session?.completed_on && runPhase !== PHASE_TERMINATED;
   const percent = isStaleSession ? 0 : (session?.completed_percent || 0);
   const isFailed = runInfo?.result_state === 'FAILED' || runInfo?.life_cycle_state === 'INTERNAL_ERROR';
-  const isComplete = !isFailed && !isStaleSession && runPhase === PHASE_TERMINATED && runInfo?.result_state === 'SUCCESS' && (session?.completed_on || percent >= 100);
-  const isPending = runPhase === PHASE_PENDING;
-  const isRunning = runPhase === PHASE_RUNNING && !isComplete && !isFailed;
+  const isComplete = noRunTracking
+    ? (session && (session.completed_on || percent >= 100) && session.processing_status !== 'running')
+    : (!isFailed && !isStaleSession && runPhase === PHASE_TERMINATED && runInfo?.result_state === 'SUCCESS' && (session?.completed_on || percent >= 100));
+  const isPending = noRunTracking ? (!session) : (runPhase === PHASE_PENDING);
+  const isRunning = noRunTracking
+    ? (session && !isComplete && session.processing_status !== 'done')
+    : (runPhase === PHASE_RUNNING && !isComplete && !isFailed);
 
   let statusLabel = 'Initializing';
   let statusDetail = '';
@@ -183,19 +193,69 @@ export default function MonitorPage({ settings, sessionId, runId, onComplete }) 
 
   const elapsed = runInfo?.execution_duration ? formatDuration(runInfo.execution_duration) : null;
 
-  // Fetch results preview when pipeline completes
+  // Auto-show inline results when pipeline completes
   useEffect(() => {
-    if (!isComplete || !warehouseId || !inspireDatabase || !sessionId) return;
-    if (previewResults) return; // already loaded
-    setPreviewLoading(true);
-    const q = new URLSearchParams({ inspire_database: inspireDatabase, warehouse_id: warehouseId, session_id: String(sessionId) });
-    apiFetch(`/api/inspire/usecases?${q}`)
-      .then((data) => {
-        if (data.usecases?.length > 0) setPreviewResults(data.usecases);
-      })
-      .catch(() => {})
-      .finally(() => setPreviewLoading(false));
-  }, [isComplete, warehouseId, inspireDatabase, sessionId]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (isComplete) setShowInlineResults(true);
+  }, [isComplete]);
+
+  // Extract live use case preview from steps as they arrive
+  useEffect(() => {
+    const ucs = [];
+
+    // Validate that an item is a real use case object (not a string or LLM feedback)
+    const isValidUseCase = (uc) => {
+      if (!uc || typeof uc !== 'object' || Array.isArray(uc)) return false;
+      const name = uc.Name || uc.name || '';
+      // Must have a non-empty name that looks like a use case title (not markdown/feedback)
+      if (!name || typeof name !== 'string') return false;
+      if (name.length < 5 || name.length > 200) return false;
+      // Reject markdown fragments, bullet points, feedback text
+      if (name.startsWith('**') || name.startsWith('-') || name.startsWith('#') || name.startsWith('*')) return false;
+      if (name.includes('Pass 1') || name.includes('DUPLICATE') || name.includes('coverage')) return false;
+      return true;
+    };
+
+    for (const step of steps) {
+      const rj = step.result_json;
+      if (!rj || typeof rj !== 'object') continue;
+      // Use case generation steps
+      if (Array.isArray(rj.use_cases)) {
+        for (const uc of rj.use_cases) {
+          if (!isValidUseCase(uc)) continue;
+          ucs.push({
+            name: uc.Name || uc.name || '',
+            domain: uc['Business Domain'] || uc.domain || '',
+            priority: uc.Priority || uc.priority || '',
+            id: uc.No || uc.id || '',
+          });
+        }
+      }
+      // Scoring steps
+      if (Array.isArray(rj.scored_use_cases)) {
+        for (const sc of rj.scored_use_cases) {
+          if (!isValidUseCase(sc)) continue;
+          ucs.push({
+            name: sc.Name || sc.name || '',
+            domain: sc['Business Domain'] || sc.domain || '',
+            priority: sc.Priority || sc.priority || '',
+            quality: sc.Quality || sc.quality || '',
+            id: sc.No || sc.id || '',
+          });
+        }
+      }
+    }
+    // Deduplicate by name
+    const seen = new Set();
+    const deduped = [];
+    for (const uc of ucs) {
+      const key = uc.name || uc.id;
+      if (key && !seen.has(key)) {
+        seen.add(key);
+        deduped.push(uc);
+      }
+    }
+    setLiveUseCases(deduped);
+  }, [steps]);
 
   // Group steps by stage, applying filters
   const { stages, stageNames, filteredCount, totalCount, statusCounts } = useMemo(() => {
@@ -705,6 +765,66 @@ export default function MonitorPage({ settings, sessionId, runId, onComplete }) 
         </div>
       ) : null}
 
+      {/* ═══ Live Use Case Preview (during run) ═══ */}
+      {!isComplete && liveUseCases.length > 0 && (
+        <div className="bg-surface border border-border rounded-xl overflow-hidden shadow-sm mb-6">
+          <div className="px-4 py-3 border-b border-border bg-gradient-to-r from-db-red-50 to-surface flex items-center gap-2">
+            <Sparkles size={14} className="text-db-red" />
+            <span className="text-xs font-bold text-text-primary">Use Cases Discovered</span>
+            <span className="text-[10px] text-text-tertiary ml-auto">
+              {liveUseCases.length} use case{liveUseCases.length !== 1 ? 's' : ''} so far
+              {isRunning && <span className="ml-1 inline-block w-1.5 h-1.5 rounded-full bg-db-red animate-pulse" />}
+            </span>
+          </div>
+          <div className="max-h-72 overflow-y-auto divide-y divide-border">
+            {liveUseCases.slice(0, 20).map((uc, i) => {
+              const priorityLower = (uc.priority || '').toLowerCase();
+              const priBadge = priorityLower.includes('ultra') || priorityLower.includes('very high')
+                ? 'text-db-red bg-db-red-50'
+                : priorityLower.includes('high')
+                  ? 'text-error bg-error-bg'
+                  : priorityLower.includes('medium')
+                    ? 'text-warning bg-warning-bg'
+                    : 'text-text-secondary bg-bg';
+              return (
+                <div key={uc.id || i} className="flex items-center gap-3 px-4 py-2.5">
+                  <span className="text-[10px] font-mono text-text-tertiary w-5 shrink-0">
+                    {uc.id || `#${i + 1}`}
+                  </span>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs font-medium text-text-primary truncate">{uc.name}</p>
+                    {uc.domain && (
+                      <p className="text-[10px] text-text-tertiary flex items-center gap-1 mt-0.5">
+                        <Building2 size={8} /> {uc.domain}
+                      </p>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    {uc.quality && (
+                      <span className="text-[9px] font-medium px-1.5 py-0.5 rounded-full bg-bg-subtle text-text-secondary">
+                        Q: {uc.quality}
+                      </span>
+                    )}
+                    {uc.priority && (
+                      <span className={`text-[9px] font-semibold px-2 py-0.5 rounded-full ${priBadge}`}>
+                        {uc.priority}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          {liveUseCases.length > 20 && (
+            <div className="px-4 py-2 bg-bg border-t border-border text-center">
+              <span className="text-[10px] text-text-tertiary font-medium">
+                +{liveUseCases.length - 20} more use cases
+              </span>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* ═══ Failed State ═══ */}
       {isFailed && (
         <div className="mt-6 bg-error-bg border border-error/20 rounded-xl p-5">
@@ -749,69 +869,32 @@ export default function MonitorPage({ settings, sessionId, runId, onComplete }) 
                 </p>
               </div>
             </div>
-            <button
-              onClick={onComplete}
-              className="inline-flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-db-red to-db-red-hover text-white text-sm font-bold rounded-xl hover:shadow-md transition-smooth"
-            >
-              View Results
-              <ArrowRight size={14} />
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setShowInlineResults(!showInlineResults)}
+                className={`inline-flex items-center gap-2 px-4 py-2.5 text-sm font-bold rounded-xl transition-smooth border ${
+                  showInlineResults
+                    ? 'border-db-red/20 bg-db-red-50 text-db-red'
+                    : 'border-border bg-surface text-text-secondary hover:bg-bg-subtle'
+                }`}
+              >
+                {showInlineResults ? <EyeOff size={14} /> : <Eye size={14} />}
+                {showInlineResults ? 'Hide Results' : 'Show Results'}
+              </button>
+              <button
+                onClick={onComplete}
+                className="inline-flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-db-red to-db-red-hover text-white text-sm font-bold rounded-xl hover:shadow-md transition-smooth"
+              >
+                Open Results Page
+                <ArrowRight size={14} />
+              </button>
+            </div>
           </div>
 
-          {/* Results Preview */}
-          {previewLoading && (
-            <div className="bg-surface border border-border rounded-xl p-6 text-center">
-              <Loader2 size={16} className="animate-spin text-text-tertiary mx-auto mb-2" />
-              <p className="text-xs text-text-secondary">Loading results preview...</p>
-            </div>
-          )}
-          {previewResults && previewResults.length > 0 && (
-            <div className="bg-surface border border-border rounded-xl overflow-hidden shadow-sm">
-              <div className="px-4 py-3 border-b border-border bg-gradient-to-r from-db-red-50 to-surface flex items-center gap-2">
-                <Target size={14} className="text-db-red" />
-                <span className="text-xs font-bold text-text-primary">Results Preview</span>
-                <span className="text-[10px] text-text-tertiary ml-auto">
-                  {previewResults.length} use cases &middot; {[...new Set(previewResults.map(uc => uc['Business Domain'] || uc.domain).filter(Boolean))].length} domains
-                </span>
-              </div>
-              <div className="max-h-72 overflow-y-auto divide-y divide-border">
-                {previewResults.slice(0, 10).map((uc, i) => {
-                  const name = uc.Name || uc.use_case_name || uc.name || `Use Case ${i + 1}`;
-                  const domain = uc['Business Domain'] || uc.domain || '';
-                  const priority = uc.Priority || uc.priority || '';
-                  const priorityLower = priority.toLowerCase();
-                  const priBadge = priorityLower.includes('ultra') || priorityLower.includes('very high')
-                    ? 'text-db-red bg-db-red-50'
-                    : priorityLower.includes('high')
-                      ? 'text-error bg-error-bg'
-                      : priorityLower.includes('medium')
-                        ? 'text-warning bg-warning-bg'
-                        : 'text-text-secondary bg-bg';
-                  return (
-                    <div key={uc.No || i} className="flex items-center gap-3 px-4 py-2.5">
-                      <span className="text-[10px] font-mono text-text-tertiary w-5 shrink-0">#{uc.No || i + 1}</span>
-                      <div className="flex-1 min-w-0">
-                        <p className="text-xs font-medium text-text-primary truncate">{name}</p>
-                        {domain && (
-                          <p className="text-[10px] text-text-tertiary flex items-center gap-1 mt-0.5">
-                            <Building2 size={8} /> {domain}
-                          </p>
-                        )}
-                      </div>
-                      {priority && (
-                        <span className={`text-[9px] font-semibold px-2 py-0.5 rounded-full shrink-0 ${priBadge}`}>
-                          {priority}
-                        </span>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-              {previewResults.length > 10 && (
-                <div className="px-4 py-2 bg-bg border-t border-border text-center">
-                  <span className="text-[10px] text-text-tertiary font-medium">+{previewResults.length - 10} more use cases</span>
-                </div>
-              )}
+          {/* Inline Results — full ResultsPage embedded */}
+          {showInlineResults && (
+            <div className="border border-border rounded-xl overflow-hidden shadow-sm bg-surface">
+              <ResultsPage settings={settings} update={update} sessionId={sessionId} embedded />
             </div>
           )}
         </div>

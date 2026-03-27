@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Split databricks_inspire_v43.dbc into independent phase notebooks
+Split databricks_inspire_v45.dbc into independent phase notebooks
 for a Databricks Lakeflow (Workflows) multi-task job.
 
 Architecture:
@@ -10,9 +10,9 @@ Architecture:
   03_schema_discovery  — DataLoader, table filtering, batch preparation
   04_use_case_gen      — 2-pass ensemble use case generation
   05_scoring_quality   — Clustering, scoring, dedup, quality filtering
-  06_sql_notebooks     — Domain-by-domain SQL generation & notebook assembly
+  06_genie_notebooks   — Genie code instructions generation & notebook assembly
   07_documentation     — PDF, PPTX, Excel, CSV, Markdown catalogs
-  08_samples_finalize  — Sample result execution, cleanup, reporting
+  08_samples_finalize  — Cleanup and final reporting
 
 State between phases is persisted via:
   - Delta table: {inspire_database}._inspire_pipeline_state (JSON config)
@@ -27,7 +27,7 @@ import zipfile
 import shutil
 
 # ─── Configuration ───
-DBC_PATH = "databricks_inspire_v43.dbc"
+DBC_PATH = "databricks_inspire_v45.dbc"
 OUTPUT_DIR = "notebooks"
 
 # ─── Extract notebook from DBC ───
@@ -56,8 +56,8 @@ def main():
     print("📂 Extracting notebook from DBC...")
     nb = extract_notebook_source(DBC_PATH)
     
-    # v43: main code is in commands[0] (commands[1] is entry point, commands[2] is markdown)
-    main_code = nb['commands'][0]['command']
+    # v45: main code is in commands[1] (commands[0] is entry point, commands[2] is markdown)
+    main_code = nb['commands'][1]['command']
     lines = main_code.split('\n')
     total_lines = len(lines)
     print(f"   Total lines: {total_lines}")

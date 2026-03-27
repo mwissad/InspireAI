@@ -65,7 +65,7 @@ const PIPELINE_STAGES = [
   'Executive Readout',
 ];
 
-export default function ResultsPage({ settings, update, sessionId: propSessionId }) {
+export default function ResultsPage({ settings, update, sessionId: propSessionId, embedded = false }) {
   const { databricksHost, token, warehouseId: settingsWarehouseId, inspireDatabase: settingsInspireDb } = settings;
 
   // Local editable copies for the source-picker
@@ -439,52 +439,74 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
   const highPriorityCount = allUseCases.filter((uc) => ['Ultra High', 'Very High', 'High'].includes(String(uc?.Priority || ''))).length;
 
   return (
-    <div className="max-w-7xl mx-auto px-6 py-8">
+    <div className={embedded ? "px-4 py-4" : "max-w-7xl mx-auto px-6 py-8"}>
       {/* Page header */}
-      <div className="flex items-center justify-between mb-6">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-db-red to-db-red-hover flex items-center justify-center shadow-sm">
-            <Sparkles size={20} className="text-white" />
+      {!embedded && (
+        <div className="flex items-center justify-between mb-6">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-db-red to-db-red-hover flex items-center justify-center shadow-sm">
+              <Sparkles size={20} className="text-white" />
+            </div>
+            <div>
+              <h1 className="text-2xl font-bold text-text-primary">Results</h1>
+              <p className="text-sm text-text-secondary">
+                Explore your AI-generated data strategy.
+              </p>
+            </div>
           </div>
-          <div>
-            <h1 className="text-2xl font-bold text-text-primary">Results</h1>
-            <p className="text-sm text-text-secondary">
-              Explore your AI-generated data strategy.
-            </p>
+          <div className="flex items-center gap-2">
+            {results && (
+              <button
+                onClick={() => {
+                  setResults(null);
+                  setUsecases(null);
+                  setError('');
+                  setExpandedUseCase(null);
+                  setSelectedSessionId(null);
+                  setSessionsLoaded(false);
+                  setIsProgressive(false);
+                }}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm text-text-tertiary border border-border rounded-lg hover:bg-bg-subtle transition-smooth"
+              >
+                <RefreshCw size={12} />
+                Change Session
+              </button>
+            )}
+            {filteredUseCases.length > 0 && (
+              <button
+                onClick={handleExport}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm text-text-secondary border border-border rounded-lg hover:bg-bg-subtle hover:shadow-sm transition-smooth"
+              >
+                <Download size={14} />
+                Export JSON
+              </button>
+            )}
           </div>
         </div>
-        <div className="flex items-center gap-2">
-          {results && (
-            <button
-              onClick={() => {
-                setResults(null);
-                setUsecases(null);
-                setError('');
-                setExpandedUseCase(null);
-                setSelectedSessionId(null);
-                setSessionsLoaded(false);
-                setIsProgressive(false);
-              }}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm text-text-tertiary border border-border rounded-lg hover:bg-bg-subtle transition-smooth"
-            >
-              <RefreshCw size={12} />
-              Change Session
-            </button>
-          )}
-          {filteredUseCases.length > 0 && (
-            <button
-              onClick={handleExport}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm text-text-secondary border border-border rounded-lg hover:bg-bg-subtle hover:shadow-sm transition-smooth"
-            >
-              <Download size={14} />
-              Export JSON
-            </button>
-          )}
+      )}
+      {embedded && filteredUseCases.length > 0 && (
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center gap-2">
+            <Sparkles size={16} className="text-db-red" />
+            <span className="text-sm font-bold text-text-primary">
+              {allUseCases.length} Use Cases Generated
+            </span>
+            <span className="text-xs text-text-tertiary">
+              across {domains.length} domain{domains.length !== 1 ? 's' : ''}
+            </span>
+          </div>
+          <button
+            onClick={handleExport}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm text-text-secondary border border-border rounded-lg hover:bg-bg-subtle hover:shadow-sm transition-smooth"
+          >
+            <Download size={14} />
+            Export JSON
+          </button>
         </div>
-      </div>
+      )}
 
-      {/* ═══ Source Picker — shown when no results loaded ═══ */}
-      {!results && !loading && (
+      {/* ═══ Source Picker — shown when no results loaded (hidden when embedded) ═══ */}
+      {!embedded && !results && !loading && (
         <div className="bg-surface border border-border rounded-lg overflow-hidden mb-6">
           <div className="flex items-center gap-3 px-5 py-3 border-b border-border bg-panel">
             <div className="w-7 h-7 rounded-full bg-db-red flex items-center justify-center">

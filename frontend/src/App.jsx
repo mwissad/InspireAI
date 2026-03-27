@@ -187,9 +187,10 @@ export default function App() {
         )}
 
         {page === 'monitor' && (
-          <div className="max-w-5xl mx-auto px-6 py-8">
+          <div className="max-w-7xl mx-auto px-6 py-8">
             <MonitorPage
               settings={settings}
+              update={update}
               sessionId={sessionId}
               runId={runId}
               onComplete={() => nav('results')}
