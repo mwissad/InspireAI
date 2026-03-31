@@ -11,7 +11,6 @@ import {
   Search,
   Filter,
   ChevronDown,
-  ChevronRight,
   Activity,
   Eye,
   EyeOff,
@@ -149,7 +148,7 @@ export default function MonitorPage({ settings, update, sessionId, runId, onComp
             const runDone = !runId || currentRunInfo?.life_cycle_state === 'TERMINATED' || currentRunInfo?.life_cycle_state === 'INTERNAL_ERROR';
             const sessionDone = sess.completed_on || sess.completed_percent >= 100;
             const sessionFinal = sess.processing_status === 'done' || sess.processing_status === 'ready';
-            if (runDone && sessionDone && (!noRunTracking || sessionFinal)) setPolling(false);
+            if (runDone && sessionDone && (!sessionOnly || sessionFinal)) setPolling(false);
           }
         } catch { /* session table might not exist */ }
       } else if (!runId) {
@@ -171,15 +170,15 @@ export default function MonitorPage({ settings, update, sessionId, runId, onComp
 
   // ── Derived display state ──
   // When no runId, derive state purely from session data
-  const noRunTracking = !runId;
-  const isStaleSession = !noRunTracking && session?.completed_on && runPhase !== PHASE_TERMINATED;
+  const sessionOnly = !runId;
+  const isStaleSession = !sessionOnly && session?.completed_on && runPhase !== PHASE_TERMINATED;
   const percent = isStaleSession ? 0 : (session?.completed_percent || 0);
   const isFailed = runInfo?.result_state === 'FAILED' || runInfo?.life_cycle_state === 'INTERNAL_ERROR';
-  const isComplete = noRunTracking
+  const isComplete = sessionOnly
     ? (session && (session.completed_on || percent >= 100) && session.processing_status !== 'running')
     : (!isFailed && !isStaleSession && runPhase === PHASE_TERMINATED && runInfo?.result_state === 'SUCCESS' && (session?.completed_on || percent >= 100));
-  const isPending = noRunTracking ? (!session) : (runPhase === PHASE_PENDING);
-  const isRunning = noRunTracking
+  const isPending = sessionOnly ? (!session) : (runPhase === PHASE_PENDING);
+  const isRunning = sessionOnly
     ? (session && !isComplete && session.processing_status !== 'done')
     : (runPhase === PHASE_RUNNING && !isComplete && !isFailed);
 
@@ -347,15 +346,15 @@ export default function MonitorPage({ settings, update, sessionId, runId, onComp
             className="inline-flex items-center gap-1.5 px-3.5 py-2 text-sm text-text-secondary border border-border rounded-lg hover:bg-bg-subtle hover:shadow-sm transition-smooth"
           >
             View in Databricks
-            <ExternalLink size={14} />
+            <ExternalLink size={14} aria-hidden="true" />
           </a>
         )}
       </div>
 
       {/* ═══ Status Card ═══ */}
       <div className={`border rounded-xl p-5 mb-6 shadow-sm ${
-        isComplete ? 'bg-success-bg/30 border-success/20' :
-        isFailed ? 'bg-error-bg/30 border-error/20' :
+        isComplete ? 'bg-success-bg border-success/20' :
+        isFailed ? 'bg-error-bg border-error/20' :
         'bg-surface border-border'
       }`}>
         <div className="flex items-center justify-between mb-4">
@@ -403,7 +402,7 @@ export default function MonitorPage({ settings, update, sessionId, runId, onComp
         </div>
 
         {/* Progress bar */}
-        <div className="h-2.5 bg-bg rounded-full overflow-hidden">
+        <div className="h-2.5 bg-bg-subtle rounded-full overflow-hidden">
           <div
             className={`h-full rounded-full transition-all duration-700 ease-out ${
               isComplete ? 'bg-success' :
@@ -469,8 +468,8 @@ export default function MonitorPage({ settings, update, sessionId, runId, onComp
                 {statusCounts.error > 0 && <> &middot; <span className="text-error font-medium">{statusCounts.error} error{statusCounts.error > 1 ? 's' : ''}</span></>}
               </p>
             </div>
-            <div className={`transition-transform duration-200 ${showFilters ? 'rotate-90' : ''}`}>
-              <ChevronRight size={18} className="text-text-tertiary" />
+            <div className={`transition-transform duration-200 ${showFilters ? 'rotate-180' : ''}`}>
+              <ChevronDown size={18} className="text-text-tertiary" />
             </div>
           </button>
 
@@ -573,10 +572,10 @@ export default function MonitorPage({ settings, update, sessionId, runId, onComp
                               style={{ width: `${pct}%` }}
                             />
                           </div>
-                          <span className="text-[9px] font-mono text-text-tertiary shrink-0">{done}/{total}</span>
+                          <span className="text-[10px] font-mono text-text-tertiary shrink-0">{done}/{total}</span>
                         </div>
                         {errors > 0 && (
-                          <span className="text-[9px] text-error font-medium mt-0.5 block">
+                          <span className="text-[10px] text-error font-medium mt-0.5 block">
                             {errors} error{errors > 1 ? 's' : ''}
                           </span>
                         )}
@@ -634,7 +633,7 @@ export default function MonitorPage({ settings, update, sessionId, runId, onComp
                   className={`p-1.5 rounded-lg transition-smooth border ${
                     autoScroll ? 'border-db-red/20 bg-db-red-50 text-db-red' : 'border-transparent text-text-tertiary hover:bg-bg-subtle'
                   }`}
-                  title={autoScroll ? 'Auto-scroll on' : 'Auto-scroll off'}
+                  aria-label={autoScroll ? 'Disable auto-scroll' : 'Enable auto-scroll'}
                 >
                   {autoScroll ? <Eye size={14} /> : <EyeOff size={14} />}
                 </button>
@@ -643,6 +642,7 @@ export default function MonitorPage({ settings, update, sessionId, runId, onComp
                   <button
                     onClick={() => { setSearchQuery(''); setStatusFilter('all'); setStageFilter('all'); }}
                     className="text-[11px] text-db-red hover:underline font-medium shrink-0"
+                    aria-label="Clear all filters"
                   >
                     Clear
                   </button>
@@ -660,19 +660,19 @@ export default function MonitorPage({ settings, update, sessionId, runId, onComp
                   {statusFilter !== 'all' && (
                     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-db-red-50 text-db-red text-[10px] font-medium border border-db-red/20">
                       {STATUS_FILTERS.find((f) => f.key === statusFilter)?.label}
-                      <button onClick={() => setStatusFilter('all')} className="hover:text-db-red-hover">&times;</button>
+                      <button onClick={() => setStatusFilter('all')} aria-label="Remove status filter" className="hover:text-db-red-hover">&times;</button>
                     </span>
                   )}
                   {stageFilter !== 'all' && (
                     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-db-red-50 text-db-red text-[10px] font-medium border border-db-red/20">
                       {stageFilter}
-                      <button onClick={() => setStageFilter('all')} className="hover:text-db-red-hover">&times;</button>
+                      <button onClick={() => setStageFilter('all')} aria-label="Remove stage filter" className="hover:text-db-red-hover">&times;</button>
                     </span>
                   )}
                   {searchQuery && (
                     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-db-red-50 text-db-red text-[10px] font-medium border border-db-red/20">
                       "{searchQuery}"
-                      <button onClick={() => setSearchQuery('')} className="hover:text-db-red-hover">&times;</button>
+                      <button onClick={() => setSearchQuery('')} aria-label="Clear search" className="hover:text-db-red-hover">&times;</button>
                     </span>
                   )}
                 </div>
@@ -694,8 +694,8 @@ export default function MonitorPage({ settings, update, sessionId, runId, onComp
                         onClick={() => toggleStage(stageName)}
                         className="w-full px-4 py-3 border-b border-border bg-panel flex items-center gap-3 hover:bg-bg-subtle transition-smooth text-left"
                       >
-                        <div className={`transition-transform duration-200 ${collapsed ? '' : 'rotate-90'}`}>
-                          <ChevronRight size={14} className="text-text-tertiary" />
+                        <div className={`transition-transform duration-200 ${collapsed ? '' : 'rotate-180'}`}>
+                          <ChevronDown size={14} className="text-text-tertiary" />
                         </div>
                         {errorCount > 0 ? (
                           <div className="w-5 h-5 rounded-full bg-error-bg flex items-center justify-center"><XCircle size={11} className="text-error" /></div>
@@ -801,12 +801,12 @@ export default function MonitorPage({ settings, update, sessionId, runId, onComp
                   </div>
                   <div className="flex items-center gap-1.5 shrink-0">
                     {uc.quality && (
-                      <span className="text-[9px] font-medium px-1.5 py-0.5 rounded-full bg-bg-subtle text-text-secondary">
+                      <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-bg-subtle text-text-secondary">
                         Q: {uc.quality}
                       </span>
                     )}
                     {uc.priority && (
-                      <span className={`text-[9px] font-semibold px-2 py-0.5 rounded-full ${priBadge}`}>
+                      <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${priBadge}`}>
                         {uc.priority}
                       </span>
                     )}
@@ -894,6 +894,10 @@ export default function MonitorPage({ settings, update, sessionId, runId, onComp
           {/* Inline Results — full ResultsPage embedded */}
           {showInlineResults && (
             <div className="border border-border rounded-xl overflow-hidden shadow-sm bg-surface">
+              <div className="px-4 py-3 border-b border-border bg-panel flex items-center gap-2">
+                <Sparkles size={14} className="text-db-red" />
+                <span className="text-xs font-bold text-text-primary">Results — Session {sessionId}</span>
+              </div>
               <ResultsPage settings={settings} update={update} sessionId={sessionId} embedded />
             </div>
           )}
