@@ -213,3 +213,55 @@ textarea::placeholder {
 .animate-gradient-border {
   animation: gradientBorder 2s ease-in-out infinite;
 }
+
+/* Respect reduced motion preference */
+@media (prefers-reduced-motion: reduce) {
+  .animate-marquee,
+  .animate-ambient-float,
+  .animate-ambient-float-delayed,
+  .animate-ambient-pulse,
+  .animate-shimmer-border,
+  .animate-gradient-border,
+  .animate-cursor-blink,
+  .animate-fade-in-up {
+    animation: none !important;
+  }
+  .animate-fade-in-up {
+    opacity: 1 !important;
+    transform: none !important;
+  }
+  .animate-ping,
+  .animate-schema-float {
+    animation: none !important;
+  }
+}
+
+/* Floating schema names — drift right to left */
+@keyframes schemaFloat {
+  from { transform: translateX(0); }
+  to { transform: translateX(-120vw); }
+}
+.animate-schema-float {
+  animation: schemaFloat 30s linear infinite;
+}
+
+/* Inspire Orb — radiating ring pulse */
+@keyframes orbRing {
+  0%, 100% {
+    transform: translate(-50%, -50%) scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: translate(-50%, -50%) scale(1.15);
+    opacity: 0.5;
+  }
+}
+
+/* Snap scroll — hide scrollbar completely */
+.scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}

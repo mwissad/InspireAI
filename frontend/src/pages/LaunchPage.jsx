@@ -11,8 +11,7 @@ import {
   Search,
   CheckCircle2,
   Globe2,
-  ChevronRight,
-  BarChart3,
+  ChevronDown,
   Sliders,
   Sparkles,
   Settings2,
@@ -20,6 +19,16 @@ import {
   Table2,
   ShoppingCart,
   X,
+  TrendingUp,
+  DollarSign,
+  Cog,
+  Shield,
+  Users,
+  Star,
+  Rocket,
+  Leaf,
+  Lock,
+  Crosshair,
 } from 'lucide-react';
 
 /* ─── Constants (v45 notebook widget options) ─── */
@@ -31,18 +40,17 @@ const GENERATION_OPTIONS = [
   { key: 'Presentation', icon: Target, desc: 'Executive-ready slide deck' },
 ];
 const BUSINESS_PRIORITIES = [
-  { key: 'Increase Revenue', icon: '📈' },
-  { key: 'Reduce Cost', icon: '💰' },
-  { key: 'Optimize Operations', icon: '⚙️' },
-  { key: 'Mitigate Risk', icon: '🛡️' },
-  { key: 'Empower Talent', icon: '👥' },
-  { key: 'Enhance Experience', icon: '✨' },
-  { key: 'Drive Innovation', icon: '🚀' },
-  { key: 'Achieve ESG', icon: '🌱' },
-  { key: 'Protect Revenue', icon: '🔒' },
-  { key: 'Execute Strategy', icon: '🎯' },
+  { key: 'Increase Revenue', icon: TrendingUp },
+  { key: 'Reduce Cost', icon: DollarSign },
+  { key: 'Optimize Operations', icon: Cog },
+  { key: 'Mitigate Risk', icon: Shield },
+  { key: 'Empower Talent', icon: Users },
+  { key: 'Enhance Experience', icon: Star },
+  { key: 'Drive Innovation', icon: Rocket },
+  { key: 'Achieve ESG', icon: Leaf },
+  { key: 'Protect Revenue', icon: Lock },
+  { key: 'Execute Strategy', icon: Crosshair },
 ];
-const TECH_EXCLUSION_OPTIONS = ['None', 'Exclude System Tables', 'Exclude All Technical'];
 
 export default function LaunchPage({ settings, update, onLaunched }) {
   const { databricksHost, token, notebookPath, warehouseId, inspireDatabase } = settings;
@@ -257,7 +265,6 @@ export default function LaunchPage({ settings, update, onLaunched }) {
   const filteredTables = tables.filter(
     (t) => !tableSearch || t.full_name.toLowerCase().includes(tableSearch.toLowerCase())
   );
-  const isDiscover = true; // v45: always in discover mode
   const needsLanguage = params['09_generation_options'].includes('PDF') || params['09_generation_options'].includes('Presentation');
 
   // Table select all / deselect all
@@ -273,8 +280,7 @@ export default function LaunchPage({ settings, update, onLaunched }) {
   };
 
   // Validation state
-  const canLaunch = params['00_business_name'] && (params['02_inspire_database'] || inspireDatabase) &&
-    (!isDiscover || params['01_uc_metadata']);
+  const canLaunch = params['00_business_name'] && (params['02_inspire_database'] || inspireDatabase) && params['01_uc_metadata'];
 
   return (
     <div className="max-w-5xl mx-auto px-6 py-8">
@@ -307,7 +313,7 @@ export default function LaunchPage({ settings, update, onLaunched }) {
             SECTION 1: ESSENTIALS
            ═══════════════════════════════════════════════ */}
         <section className="bg-surface border border-border rounded-xl overflow-hidden shadow-sm">
-          <div className="flex items-center gap-3 px-6 py-4 border-b border-border bg-gradient-to-r from-db-red-50 to-surface">
+          <div className="flex items-center gap-3 px-6 py-4 border-b border-border bg-surface">
             <div className="w-8 h-8 rounded-lg bg-db-red flex items-center justify-center shadow-sm">
               <Zap size={16} className="text-white" />
             </div>
@@ -332,9 +338,19 @@ export default function LaunchPage({ settings, update, onLaunched }) {
               />
             </Field>
 
+            {/* Inspire Database */}
+            <Field label="Inspire Database" required icon={Database} hint="catalog.schema format — where Inspire stores tracking tables">
+              <input
+                type="text"
+                placeholder="e.g. my_catalog._inspire"
+                value={params['02_inspire_database']}
+                onChange={(e) => updateParam('02_inspire_database', e.target.value)}
+                className="w-full pl-10 pr-4 py-2.5 text-sm border border-border rounded-lg bg-surface text-text-primary placeholder:text-text-tertiary glow-focus transition-smooth font-mono"
+              />
+            </Field>
+
             {/* UC Metadata — Catalog/Schema/Table pickers with shopping basket */}
-            {isDiscover && (
-              <Field label="Unity Catalog Metadata" required icon={Database} hint="Navigate catalogs and schemas to select tables">
+            <Field label="Unity Catalog Metadata" required icon={Database} hint="Navigate catalogs and schemas to select tables">
                 {/* Selected Metadata Basket — always visible */}
                 {(selectedCatalogs.length > 0 || selectedSchemas.length > 0 || selectedTables.length > 0) && (
                   <div className="mb-3 rounded-lg border border-db-red/20 bg-db-red-50/50 p-3">
@@ -354,20 +370,20 @@ export default function LaunchPage({ settings, update, onLaunched }) {
                         <span key={t} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-db-red-50 text-db-red text-[10px] font-medium border border-db-red/20">
                           <Table2 size={9} />
                           {t.split('.').pop()}
-                          <button onClick={() => setSelectedTables((p) => p.filter((x) => x !== t))} className="hover:text-db-red-hover ml-0.5"><X size={8} /></button>
+                          <button aria-label={`Remove ${t}`} onClick={() => setSelectedTables((p) => p.filter((x) => x !== t))} className="hover:text-db-red-hover ml-0.5"><X size={8} /></button>
                         </span>
                       ))}
                       {selectedSchemas.map((s) => (
                         <span key={s} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-bg-subtle text-text-secondary text-[10px] font-medium border border-border">
                           {s}
-                          <button onClick={() => { setSelectedSchemas((p) => p.filter((x) => x !== s)); setSelectedTables((p) => p.filter((x) => !x.startsWith(s + '.'))); }} className="hover:text-db-red ml-0.5"><X size={8} /></button>
+                          <button aria-label={`Remove ${s}`} onClick={() => { setSelectedSchemas((p) => p.filter((x) => x !== s)); setSelectedTables((p) => p.filter((x) => !x.startsWith(s + '.'))); }} className="hover:text-db-red ml-0.5"><X size={8} /></button>
                         </span>
                       ))}
                       {selectedCatalogs.map((c) => (
                         <span key={c} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-bg-subtle text-text-secondary text-[10px] font-medium border border-border">
                           <Database size={9} />
                           {c}
-                          <button onClick={() => { setSelectedCatalogs((p) => p.filter((x) => x !== c)); setSelectedSchemas((p) => p.filter((x) => !x.startsWith(c + '.'))); setSelectedTables((p) => p.filter((x) => !x.startsWith(c + '.'))); }} className="hover:text-db-red ml-0.5"><X size={8} /></button>
+                          <button aria-label={`Remove ${c}`} onClick={() => { setSelectedCatalogs((p) => p.filter((x) => x !== c)); setSelectedSchemas((p) => p.filter((x) => !x.startsWith(c + '.'))); setSelectedTables((p) => p.filter((x) => !x.startsWith(c + '.'))); }} className="hover:text-db-red ml-0.5"><X size={8} /></button>
                         </span>
                       ))}
                     </div>
@@ -380,8 +396,8 @@ export default function LaunchPage({ settings, update, onLaunched }) {
                   onClick={() => setPickerExpanded(!pickerExpanded)}
                   className="flex items-center gap-2 mb-2 text-xs font-semibold text-text-secondary hover:text-text-primary transition-smooth"
                 >
-                  <div className={`transition-transform duration-200 ${pickerExpanded ? 'rotate-90' : ''}`}>
-                    <ChevronRight size={14} />
+                  <div className={`transition-transform duration-200 ${pickerExpanded ? 'rotate-180' : ''}`}>
+                    <ChevronDown size={14} />
                   </div>
                   {pickerExpanded ? 'Hide catalog browser' : 'Browse catalogs'}
                   {!pickerExpanded && (selectedCatalogs.length + selectedSchemas.length + selectedTables.length > 0) && (
@@ -497,7 +513,7 @@ export default function LaunchPage({ settings, update, onLaunched }) {
                       <span className="text-[10px] text-success/70 font-mono">
                         {params['01_uc_metadata'].split(',').length} item{params['01_uc_metadata'].split(',').length > 1 ? 's' : ''}
                       </span>
-                      <ChevronRight size={12} className={`text-success transition-transform duration-200 ${metadataPreviewExpanded ? 'rotate-90' : ''}`} />
+                      <ChevronDown size={12} className={`text-success transition-transform duration-200 ${metadataPreviewExpanded ? 'rotate-180' : ''}`} />
                     </button>
                     {metadataPreviewExpanded && (
                       <div className="px-4 pb-3 max-h-32 overflow-y-auto">
@@ -507,7 +523,6 @@ export default function LaunchPage({ settings, update, onLaunched }) {
                   </div>
                 )}
               </Field>
-            )}
 
           </div>
         </section>
@@ -530,8 +545,8 @@ export default function LaunchPage({ settings, update, onLaunched }) {
                 Generation options, operation mode, quality, and more
               </p>
             </div>
-            <div className={`transition-transform duration-200 ${showAdvanced ? 'rotate-90' : ''}`}>
-              <ChevronRight size={18} className="text-text-tertiary" />
+            <div className={`transition-transform duration-200 ${showAdvanced ? 'rotate-180' : ''}`}>
+              <ChevronDown size={18} className="text-text-tertiary" />
             </div>
           </button>
 
@@ -555,7 +570,7 @@ export default function LaunchPage({ settings, update, onLaunched }) {
                         }`}
                       >
                         <span className="flex items-center gap-1.5">
-                          <span className="text-sm">{bp.icon}</span>
+                          <bp.icon size={13} className={active ? 'text-db-red' : 'text-text-tertiary'} />
                           <span className="truncate">{bp.key}</span>
                         </span>
                         {active && <CheckCircle2 size={12} className="absolute top-1.5 right-1.5 text-db-red" />}
@@ -686,14 +701,7 @@ export default function LaunchPage({ settings, update, onLaunched }) {
                 </FieldSection>
               </div>
 
-              {/* Technical Exclusion Strategy */}
-              <FieldSection label="Technical Exclusion Strategy" hint="Filter out technical/system tables">
-                <GlowSelect
-                  value={params['15_tech_exclusion'] || 'None'}
-                  onChange={(v) => updateParam('15_tech_exclusion', v)}
-                  options={TECH_EXCLUSION_OPTIONS}
-                />
-              </FieldSection>
+              {/* Technical exclusion is always "Aggressive" in v45 — no user option needed */}
             </div>
           )}
         </section>
@@ -728,7 +736,8 @@ export default function LaunchPage({ settings, update, onLaunched }) {
         <button
           onClick={handleLaunch}
           disabled={launching || !canLaunch}
-          className="w-full py-3.5 bg-gradient-to-r from-db-red to-db-red-hover text-white text-sm font-bold rounded-xl hover:shadow-md disabled:opacity-50 disabled:cursor-not-allowed transition-smooth flex items-center justify-center gap-2.5 shadow-sm"
+          className="w-full py-3.5 bg-gradient-to-r from-db-red to-db-red-hover text-white text-sm font-bold rounded-xl disabled:opacity-50 disabled:cursor-not-allowed transition-smooth flex items-center justify-center gap-2.5 hover:-translate-y-0.5"
+          style={{ boxShadow: '0 0 0 1px rgba(255,54,33,0.3), 0 4px 12px rgba(255,54,33,0.2), 0 8px 30px rgba(255,54,33,0.15), 0 20px 60px rgba(255,54,33,0.1)' }}
         >
           {launching ? (
             <>
@@ -831,7 +840,7 @@ function PickerList({ items, selected, onToggle, getKey, getLabel, searchValue, 
                 key={key}
                 type="button"
                 onClick={() => onToggle(key)}
-                className={`w-full flex items-center gap-2 px-2.5 py-1.5 rounded-md text-xs transition-smooth ${
+                className={`w-full flex items-center gap-2 px-2.5 py-2.5 rounded-md text-xs transition-smooth ${
                   active
                     ? 'bg-db-red-50 text-db-red border border-db-red/20'
                     : 'text-text-primary hover:bg-bg-subtle border border-transparent'
@@ -848,24 +857,6 @@ function PickerList({ items, selected, onToggle, getKey, getLabel, searchValue, 
           })
         )}
       </div>
-    </div>
-  );
-}
-
-function ChipList({ items, onRemove, icon: Icon }) {
-  if (items.length === 0) return null;
-  return (
-    <div className="flex flex-wrap gap-1 mt-2">
-      {items.map((item) => (
-        <span
-          key={item}
-          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-db-red-50 text-db-red text-[10px] font-medium border border-db-red/20"
-        >
-          {Icon && <Icon size={9} />}
-          {item}
-          <button onClick={() => onRemove(item)} className="hover:text-db-red-hover ml-0.5">&times;</button>
-        </span>
-      ))}
     </div>
   );
 }
