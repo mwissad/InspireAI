@@ -1,0 +1,1133 @@
+openapi: 3.0.3
+info:
+  title: Inspire AI API
+  description: |
+    Programmatic API for launching AI-driven data strategy analysis, monitoring execution progress in real time, and retrieving discovered use cases.
+
+    ---
+
+    ### Getting Started
+
+    **Step 1 — Get your Databricks token**
+
+    You need a **Personal Access Token (PAT)** from your Databricks workspace.
+    If you don't have one yet:
+    1. Open your Databricks workspace (the URL looks like `https://adb-123456789.0.azuredatabricks.net`)
+    2. Click your profile icon (top-right) → **Settings**
+    3. Go to **Developer** → **Access tokens** → **Generate new token**
+    4. Give it a name (e.g. "Inspire AI"), set an expiry, and copy the generated token
+
+    **Step 2 — Authorize**
+
+    Click the **Authorize** button below and paste your token into the **Value** field. All subsequent "Try it out" requests will include it automatically.
+
+    **Step 3 — Try it out**
+
+    Use the endpoints below to launch an analysis, monitor progress, and retrieve results.
+
+    ---
+
+    ### Workflow Overview
+
+    | Phase | What to call | What it does |
+    |-------|-------------|-------------|
+    | **Launch** | `POST /api/run` | Start an Inspire AI analysis on your lakehouse |
+    | **Monitor** | `GET /api/inspire/session` | Poll completion percentage in real time |
+    | **Monitor** | `GET /api/inspire/steps` | Watch individual processing stages |
+    | **Results** | `GET /api/inspire/usecases` | Retrieve scored, prioritized use cases |
+    | **Results** | `GET /api/inspire/results` | Get the full analysis output |
+
+  version: 1.0.0
+  contact:
+    name: Inspire AI Team
+
+servers:
+  - url: /
+    description: This Inspire AI instance
+
+tags:
+  - name: Authentication
+    description: |
+      Verify connectivity and exchange service principal credentials for a token.
+      Most users should use a **Personal Access Token** (see above) — these endpoints are only needed for automated deployments using Azure AD service principals.
+  - name: Launch
+    description: |
+      Submit an Inspire AI analysis run.
+      The notebook is auto-published to your workspace on first use — just provide your business parameters and go.
+  - name: Monitor
+    description: |
+      Track execution progress and processing steps in real time.
+      Poll the session endpoint every few seconds to get live completion percentage, or fetch individual steps for granular progress.
+  - name: Results
+    description: |
+      Retrieve discovered use cases and the final analysis output.
+      Use cases include priority, quality score, business domain, feasibility, and optional generated SQL.
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        Your Databricks Personal Access Token (PAT).
+
+        **How to get one:**  Open your Databricks workspace → Profile → Settings → Developer → Access tokens → Generate new token.
+
+        Paste the token value (e.g. `dapi1234abcd5678efgh`) in the field below.
+
+  parameters:
+    DatabricksHost:
+      name: x-databricks-host
+      in: header
+      required: false
+      schema:
+        type: string
+        example: https://adb-1234567890123456.7.azuredatabricks.net
+      description: Override the Databricks workspace host URL
+    InspireDatabase:
+      name: inspire_database
+      in: query
+      required: true
+      schema:
+        type: string
+        example: workspace._inspire
+      description: 'Inspire database in `catalog.schema` format'
+    WarehouseId:
+      name: warehouse_id
+      in: query
+      required: true
+      schema:
+        type: string
+      description: SQL Warehouse ID used for executing queries
+    SessionId:
+      name: session_id
+      in: query
+      required: false
+      schema:
+        type: integer
+      description: Specific session ID (defaults to latest if omitted)
+    SessionIdRequired:
+      name: session_id
+      in: query
+      required: true
+      schema:
+        type: integer
+      description: Session ID
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          example: Databricks token required.
+
+    # ── Authentication ──
+    SpTokenRequest:
+      type: object
+      required: [client_id, client_secret, tenant_id, databricks_host]
+      properties:
+        client_id:
+          type: string
+          description: Azure AD application (client) ID
+        client_secret:
+          type: string
+          description: Azure AD client secret
+        tenant_id:
+          type: string
+          description: Azure AD tenant ID
+        databricks_host:
+          type: string
+          description: Databricks workspace URL
+          example: https://adb-1234567890123456.7.azuredatabricks.net
+
+    SpTokenResponse:
+      type: object
+      properties:
+        access_token:
+          type: string
+        expires_in:
+          type: integer
+          description: Token lifetime in seconds
+
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: ok
+        host:
+          type: string
+          example: adb-123...
+        hostConfigured:
+          type: boolean
+        hasBundledDbc:
+          type: boolean
+        hasServiceToken:
+          type: boolean
+        isDatabricksApp:
+          type: boolean
+        hasUserToken:
+          type: boolean
+
+    # ── Launch ──
+    RunSubmitRequest:
+      type: object
+      required: [params]
+      properties:
+        params:
+          type: object
+          description: Notebook widget parameters that configure the Inspire AI analysis
+          required:
+            - 00_business_name
+            - inspire_database
+            - warehouse_id
+          properties:
+            00_business_name:
+              type: string
+              description: Name of the business being analyzed
+              example: Acme Corp
+            inspire_database:
+              type: string
+              description: 'Target database for session tracking (`catalog.schema`)'
+              example: workspace._inspire
+            warehouse_id:
+              type: string
+              description: SQL Warehouse ID for query execution
+            operation_mode:
+              type: string
+              description: Analysis depth
+              enum: [full, quick, custom]
+              default: full
+            table_election_mode:
+              type: string
+              description: How tables are selected for analysis
+            use_cases_quality:
+              type: string
+              description: Quality tier for generated use cases
+            strategic_goals:
+              type: string
+              description: Business strategic goals to guide analysis
+            business_priorities:
+              type: string
+              description: Business priorities to weight use case scoring
+            business_domains:
+              type: string
+              description: Comma-separated business domains to focus on
+            catalogs:
+              type: string
+              description: Comma-separated Unity Catalog names to scan
+              example: main
+            schemas:
+              type: string
+              description: Comma-separated schema names to scan
+            tables:
+              type: string
+              description: Comma-separated table names to analyze
+              example: fact_sales,dim_customer
+            generate_choices:
+              type: string
+              description: 'Comma-separated output artifacts to generate (e.g. `genie`, `pdf`)'
+              example: genie,pdf
+            generation_path:
+              type: string
+              description: Workspace path for generated output artifacts
+              example: /Shared/inspire_output
+            output_language:
+              type: string
+              description: ISO language code for output
+              example: en
+            sql_generation_per_domain:
+              type: string
+              description: Whether to generate SQL per domain
+            technical_exclusion_strategy:
+              type: string
+              description: Strategy for excluding technical/system tables
+          additionalProperties:
+            type: string
+        cluster_id:
+          type: string
+          description: Optional compute cluster ID (uses serverless if omitted)
+        notebook_path:
+          type: string
+          description: Optional notebook path override (auto-published from bundled DBC if omitted)
+
+    # ── Monitor ──
+    RunStatus:
+      type: object
+      properties:
+        run_id:
+          type: integer
+        life_cycle_state:
+          type: string
+          enum: [PENDING, RUNNING, TERMINATING, TERMINATED, SKIPPED, INTERNAL_ERROR, BLOCKED, WAITING_FOR_RETRY]
+        result_state:
+          type: string
+          nullable: true
+          enum: [SUCCESS, FAILED, TIMEDOUT, CANCELED]
+        state_message:
+          type: string
+        start_time:
+          type: integer
+          description: Epoch milliseconds
+        end_time:
+          type: integer
+          description: Epoch milliseconds
+          nullable: true
+        setup_duration:
+          type: integer
+          description: Milliseconds
+        execution_duration:
+          type: integer
+          description: Milliseconds
+        cleanup_duration:
+          type: integer
+          description: Milliseconds
+        run_page_url:
+          type: string
+          description: Direct link to the run in the Databricks workspace UI
+        run_name:
+          type: string
+
+    Session:
+      type: object
+      properties:
+        session_id:
+          type: integer
+        processing_status:
+          type: string
+          enum: [ready, done]
+          description: '`ready` = still processing, `done` = acknowledged by client'
+        completed_percent:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 100
+        create_at:
+          type: string
+          format: date-time
+        last_updated:
+          type: string
+          format: date-time
+        completed_on:
+          type: string
+          format: date-time
+          nullable: true
+          description: Null while the run is still in progress
+        inspire_json:
+          type: object
+          nullable: true
+        results_json:
+          type: object
+          nullable: true
+          description: Final results payload (populated on completion)
+        widget_values:
+          $ref: '#/components/schemas/WidgetValues'
+        business_name:
+          type: string
+        inspire_database_name:
+          type: string
+        generation_path:
+          type: string
+
+    WidgetValues:
+      type: object
+      description: Reconstructed launch parameters for the session
+      properties:
+        business:
+          type: string
+        inspire_database:
+          type: string
+        operation_mode:
+          type: string
+        table_election_mode:
+          type: string
+        use_cases_quality:
+          type: string
+        strategic_goals:
+          type: string
+        business_priorities:
+          type: string
+        business_domains:
+          type: string
+        catalogs:
+          type: string
+        schemas:
+          type: string
+        tables:
+          type: string
+        generate:
+          type: string
+        generation_path:
+          type: string
+        output_language:
+          type: string
+        sql_generation_per_domain:
+          type: string
+        technical_exclusion_strategy:
+          type: string
+        json_file_path:
+          type: string
+
+    Step:
+      type: object
+      properties:
+        step_id:
+          type: integer
+        session_id:
+          type: integer
+        last_updated:
+          type: string
+          format: date-time
+        stage_name:
+          type: string
+          description: High-level processing stage
+        step_name:
+          type: string
+          description: Specific step within the stage
+        sub_step_name:
+          type: string
+        progress_increment:
+          type: number
+          format: float
+          description: How much this step contributes to overall progress
+        message:
+          type: string
+          description: Human-readable status message
+        status:
+          type: string
+          enum: [in_progress, ended_success, ended_warning, ended_error]
+        result_json:
+          type: object
+          nullable: true
+          description: Step-specific payload (use cases, scores, summaries, etc.)
+
+    # ── Results ──
+    UseCase:
+      type: object
+      properties:
+        No:
+          type: string
+          description: Use case identifier
+        Name:
+          type: string
+        Priority:
+          type: string
+          description: Priority level (e.g. Ultra High, High, Medium, Low)
+        Quality:
+          type: string
+          description: Quality grade (e.g. A, B, C)
+        _value:
+          type: string
+          description: Business value score
+        _feasibility:
+          type: string
+          description: Technical feasibility score
+        Business Domain:
+          type: string
+        SQL:
+          type: string
+          nullable: true
+          description: Generated Genie SQL instruction
+      additionalProperties:
+        type: string
+
+    Domain:
+      type: object
+      properties:
+        domain_name:
+          type: string
+        use_cases:
+          type: array
+          items:
+            $ref: '#/components/schemas/UseCase'
+
+    ProgressiveResults:
+      type: object
+      description: Real-time assembled results from step payloads (available before the run completes)
+      properties:
+        title:
+          type: string
+        executive_summary:
+          type: string
+        domains_summary:
+          type: string
+          description: 'One-line summary of domain distribution (e.g. "Finance: 5 use cases, Sales: 7 use cases")'
+        domains:
+          type: array
+          items:
+            $ref: '#/components/schemas/Domain'
+        _progressive:
+          type: boolean
+          description: Always `true` — indicates these are assembled from steps, not the final payload
+        _use_case_count:
+          type: integer
+        _step_count:
+          type: integer
+
+    SessionSummary:
+      type: object
+      properties:
+        session_id:
+          type: integer
+        processing_status:
+          type: string
+        completed_percent:
+          type: number
+        create_at:
+          type: string
+          format: date-time
+        completed_on:
+          type: string
+          format: date-time
+          nullable: true
+        business_name:
+          type: string
+        inspire_database_name:
+          type: string
+        operation_mode:
+          type: string
+        generation_path:
+          type: string
+        widget_values:
+          type: object
+          description: Minimal widget values for display
+
+security:
+  - BearerAuth: []
+
+paths:
+  # ════════════════════════════════════════════════════
+  #  Authentication
+  # ════════════════════════════════════════════════════
+
+  /api/auth/sp-token:
+    post:
+      tags: [Authentication]
+      summary: Exchange Azure AD credentials for a Databricks token
+      description: |
+        Performs the Azure AD OAuth2 client credentials flow to obtain a Databricks access token.
+        Use this if you authenticate via a service principal instead of a Personal Access Token.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SpTokenRequest'
+            example:
+              client_id: 12345678-abcd-1234-abcd-1234567890ab
+              client_secret: my-client-secret
+              tenant_id: 98765432-abcd-1234-abcd-0987654321ba
+              databricks_host: https://adb-1234567890123456.7.azuredatabricks.net
+      responses:
+        '200':
+          description: Token obtained successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SpTokenResponse'
+              example:
+                access_token: eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiIs...
+                expires_in: 3600
+        '400':
+          description: Missing required fields
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: 'client_id, client_secret, tenant_id, and databricks_host required.'
+        '500':
+          description: Azure AD token request failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/health:
+    get:
+      tags: [Authentication]
+      summary: Health check
+      description: Verify that the server is running and check configuration status. Useful to validate connectivity before launching a run.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/DatabricksHost'
+      responses:
+        '200':
+          description: Server is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              example:
+                status: ok
+                host: adb-123...
+                hostConfigured: true
+                hasBundledDbc: true
+                hasServiceToken: true
+                isDatabricksApp: false
+                hasUserToken: false
+
+  # ════════════════════════════════════════════════════
+  #  Launch
+  # ════════════════════════════════════════════════════
+
+  /api/run:
+    post:
+      tags: [Launch]
+      summary: Launch an Inspire AI analysis
+      description: |
+        Submits a notebook run that performs AI-driven data strategy analysis on your
+        Databricks lakehouse. The notebook scans your Unity Catalog tables, discovers
+        business use cases, scores them by value and feasibility, and optionally generates
+        Genie spaces and PDF reports.
+
+        **What happens:**
+        1. The bundled Inspire AI notebook is auto-published to the workspace (if not already present)
+        2. A Databricks job run is submitted with your configuration parameters
+        3. The run creates a session in the `inspire_database` for real-time tracking
+        4. You receive a `run_id` to monitor execution progress
+
+        **After launching**, use the Monitor endpoints to track progress and the Results endpoints to retrieve output.
+      parameters:
+        - $ref: '#/components/parameters/DatabricksHost'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RunSubmitRequest'
+            example:
+              params:
+                00_business_name: Acme Corp
+                inspire_database: workspace._inspire
+                warehouse_id: abc123def456
+                operation_mode: full
+                catalogs: main
+                tables: fact_sales,dim_customer
+                generate_choices: genie,pdf
+                generation_path: /Shared/inspire_output
+                output_language: en
+      responses:
+        '200':
+          description: Run submitted successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  run_id:
+                    type: integer
+                    description: Use this ID to monitor execution via `GET /api/run/{runId}`
+              example:
+                run_id: 123456
+        '400':
+          description: Could not auto-publish notebook or invalid configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: No Databricks token provided
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  # ════════════════════════════════════════════════════
+  #  Monitor
+  # ════════════════════════════════════════════════════
+
+  /api/run/{runId}:
+    get:
+      tags: [Monitor]
+      summary: Get notebook run status
+      description: |
+        Returns the Databricks job run lifecycle state. Use this to check whether the
+        notebook is still running, has completed, or has failed.
+
+        **Typical polling flow:**
+        1. Poll this endpoint every 10–30 seconds
+        2. When `life_cycle_state` is `TERMINATED`, check `result_state`
+        3. `SUCCESS` → proceed to Results endpoints
+        4. `FAILED` / `TIMEDOUT` → check `state_message` for details
+      parameters:
+        - $ref: '#/components/parameters/DatabricksHost'
+        - name: runId
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: Run ID returned by `POST /api/run`
+      responses:
+        '200':
+          description: Run status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunStatus'
+              example:
+                run_id: 123456
+                life_cycle_state: RUNNING
+                result_state: null
+                state_message: ''
+                start_time: 1711929600000
+                end_time: null
+                setup_duration: 12000
+                execution_duration: 45000
+                cleanup_duration: 0
+                run_page_url: https://adb-123.azuredatabricks.net/#job/123/run/456
+                run_name: Inspire AI - Acme Corp - 2026-04-03T10:00:00
+        '401':
+          description: No token provided
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/run/{runId}/cancel:
+    post:
+      tags: [Monitor]
+      summary: Cancel a running analysis
+      description: Cancels an in-progress Inspire AI run. The run will transition to `TERMINATED` with `result_state = CANCELED`.
+      parameters:
+        - $ref: '#/components/parameters/DatabricksHost'
+        - name: runId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Cancellation requested
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+              example:
+                success: true
+        '401':
+          description: No token provided
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/inspire/session:
+    get:
+      tags: [Monitor]
+      summary: Poll session progress
+      description: |
+        Returns the Inspire AI session status including completion percentage and processing state.
+        This provides finer-grained progress than the run status — the notebook updates this
+        session record as it progresses through each analysis stage.
+
+        **Returns `null` session** if the session table hasn't been created yet (the notebook
+        is still initializing). This is normal — keep polling.
+
+        **Recommended polling interval:** 3–5 seconds.
+      parameters:
+        - $ref: '#/components/parameters/DatabricksHost'
+        - $ref: '#/components/parameters/InspireDatabase'
+        - $ref: '#/components/parameters/WarehouseId'
+        - $ref: '#/components/parameters/SessionId'
+      responses:
+        '200':
+          description: Session status (or null if not yet created)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  session:
+                    $ref: '#/components/schemas/Session'
+                    nullable: true
+                  message:
+                    type: string
+                    description: Informational message when session is null
+              examples:
+                in_progress:
+                  summary: Session in progress
+                  value:
+                    session:
+                      session_id: 1
+                      processing_status: ready
+                      completed_percent: 45.5
+                      create_at: '2026-04-03T10:00:00Z'
+                      last_updated: '2026-04-03T10:05:30Z'
+                      completed_on: null
+                      business_name: Acme Corp
+                      widget_values:
+                        business: Acme Corp
+                        inspire_database: workspace._inspire
+                        operation_mode: full
+                not_ready:
+                  summary: Session table not yet created
+                  value:
+                    session: null
+                    message: No session found. The notebook may still be initializing.
+        '400':
+          description: Missing required query parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: No token provided
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/inspire/steps:
+    get:
+      tags: [Monitor]
+      summary: Get processing steps (incremental)
+      description: |
+        Returns the individual processing steps for a session. Each step represents a
+        discrete stage of the Inspire AI pipeline (table scanning, use case generation,
+        scoring, SQL generation, etc.).
+
+        Use the `since` parameter for **delta polling** — only fetching steps that were
+        updated after your last poll timestamp. This avoids re-fetching the full step history.
+
+        **Step statuses:** `in_progress`, `ended_success`, `ended_warning`, `ended_error`
+      parameters:
+        - $ref: '#/components/parameters/DatabricksHost'
+        - $ref: '#/components/parameters/InspireDatabase'
+        - $ref: '#/components/parameters/WarehouseId'
+        - $ref: '#/components/parameters/SessionId'
+        - name: since
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+          description: Only return steps updated after this timestamp (for incremental polling)
+          example: '2026-04-03T10:05:00Z'
+      responses:
+        '200':
+          description: Step list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  steps:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Step'
+                  count:
+                    type: integer
+                  message:
+                    type: string
+              example:
+                steps:
+                  - step_id: 1
+                    session_id: 1
+                    last_updated: '2026-04-03T10:01:00Z'
+                    stage_name: Discovery
+                    step_name: Table Scanning
+                    sub_step_name: ''
+                    progress_increment: 5.0
+                    message: Scanning 12 tables in main.analytics...
+                    status: ended_success
+                    result_json: null
+                  - step_id: 2
+                    session_id: 1
+                    last_updated: '2026-04-03T10:03:00Z'
+                    stage_name: Generation
+                    step_name: Use Case Generation
+                    sub_step_name: BASE_USE_CASE_GEN_PROMPT
+                    progress_increment: 15.0
+                    message: Generated 8 use cases from base analysis
+                    status: ended_success
+                    result_json:
+                      prompt_name: BASE_USE_CASE_GEN_PROMPT
+                      use_cases:
+                        - id: '1'
+                          name: Revenue Forecasting
+                          business_domain: Finance
+                count: 2
+        '400':
+          description: Missing required query parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: No token provided
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/inspire/step-results:
+    get:
+      tags: [Monitor]
+      summary: Get progressive results (real-time)
+      description: |
+        Assembles use case results in real time by parsing completed step payloads.
+        This lets you display discovered use cases **while the analysis is still running**,
+        without waiting for the final `results_json`.
+
+        Results are grouped by business domain and include scoring when available.
+        The `_progressive: true` flag indicates these are assembled incrementally and
+        may be incomplete.
+      parameters:
+        - $ref: '#/components/parameters/DatabricksHost'
+        - $ref: '#/components/parameters/InspireDatabase'
+        - $ref: '#/components/parameters/WarehouseId'
+        - $ref: '#/components/parameters/SessionIdRequired'
+      responses:
+        '200':
+          description: Progressive results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    $ref: '#/components/schemas/ProgressiveResults'
+                    nullable: true
+                  session_id:
+                    type: integer
+                  message:
+                    type: string
+              example:
+                results:
+                  title: Acme Corp Use Cases Catalog
+                  executive_summary: Discovered 15 high-value analytics use cases across 4 business domains...
+                  domains_summary: 'Finance: 5 use cases, Sales: 7 use cases, Operations: 2 use cases, HR: 1 use case'
+                  domains:
+                    - domain_name: Finance
+                      use_cases:
+                        - No: '1'
+                          Name: Revenue Forecasting
+                          Priority: Ultra High
+                          Quality: A
+                          _value: High
+                          _feasibility: Medium
+                          Business Domain: Finance
+                          SQL: '-- Genie instruction for revenue forecasting'
+                  _progressive: true
+                  _use_case_count: 15
+                  _step_count: 12
+                session_id: 1
+        '400':
+          description: Missing required query parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: No token provided
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  # ════════════════════════════════════════════════════
+  #  Results
+  # ════════════════════════════════════════════════════
+
+  /api/inspire/results:
+    get:
+      tags: [Results]
+      summary: Get final analysis results
+      description: |
+        Returns the complete `results_json` payload from a finished session.
+        This is the authoritative final output — use it after the session's `completed_on`
+        is non-null. If no `session_id` is provided, returns the latest completed session.
+      parameters:
+        - $ref: '#/components/parameters/DatabricksHost'
+        - $ref: '#/components/parameters/InspireDatabase'
+        - $ref: '#/components/parameters/WarehouseId'
+        - $ref: '#/components/parameters/SessionId'
+      responses:
+        '200':
+          description: Final results (or null if no completed session exists)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: object
+                    nullable: true
+                    description: Full results JSON payload with domains, use cases, summaries
+                  session_id:
+                    type: integer
+                  completed_on:
+                    type: string
+                    format: date-time
+                  message:
+                    type: string
+        '400':
+          description: Missing required query parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: No token provided
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/inspire/usecases:
+    get:
+      tags: [Results]
+      summary: Get polished use cases
+      description: |
+        Returns the final, polished use cases from the dedicated `__inspire_usecases` table.
+        These are the cleaned, scored, and formatted use cases — ready for presentation or export.
+        Available after the session completes.
+      parameters:
+        - $ref: '#/components/parameters/DatabricksHost'
+        - $ref: '#/components/parameters/InspireDatabase'
+        - $ref: '#/components/parameters/WarehouseId'
+        - $ref: '#/components/parameters/SessionIdRequired'
+      responses:
+        '200':
+          description: Polished use cases
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  usecases:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/UseCase'
+                  count:
+                    type: integer
+                  message:
+                    type: string
+              example:
+                usecases:
+                  - No: '1'
+                    Name: Revenue Forecasting Dashboard
+                    Priority: Ultra High
+                    Quality: A
+                    _value: High
+                    _feasibility: High
+                    Business Domain: Finance
+                    SQL: SELECT date_trunc('month', order_date)...
+                  - No: '2'
+                    Name: Customer Churn Prediction
+                    Priority: High
+                    Quality: A
+                    _value: High
+                    _feasibility: Medium
+                    Business Domain: Sales
+                    SQL: null
+                count: 2
+        '400':
+          description: Missing required query parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: No token provided
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/inspire/sessions:
+    get:
+      tags: [Results]
+      summary: List recent sessions
+      description: Returns the last 20 Inspire AI sessions, ordered by creation date. Use this to browse past analyses or pick a specific session to retrieve results from.
+      parameters:
+        - $ref: '#/components/parameters/DatabricksHost'
+        - $ref: '#/components/parameters/InspireDatabase'
+        - $ref: '#/components/parameters/WarehouseId'
+      responses:
+        '200':
+          description: Session list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sessions:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/SessionSummary'
+                  message:
+                    type: string
+        '400':
+          description: Missing required query parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: No token provided
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/inspire/ack:
+    post:
+      tags: [Results]
+      summary: Acknowledge session completion
+      description: |
+        Marks the session as fully acknowledged by setting `processing_status` to `done`.
+        Call this after you've successfully retrieved and processed the results.
+        This prevents the session from appearing as "pending acknowledgement" on subsequent polls.
+      parameters:
+        - $ref: '#/components/parameters/DatabricksHost'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [inspire_database, warehouse_id, session_id]
+              properties:
+                inspire_database:
+                  type: string
+                  example: workspace._inspire
+                warehouse_id:
+                  type: string
+                session_id:
+                  type: integer
+            example:
+              inspire_database: workspace._inspire
+              warehouse_id: abc123def456
+              session_id: 1
+      responses:
+        '200':
+          description: Acknowledgement recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+              example:
+                success: true
+        '400':
+          description: Missing required fields
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: No token provided
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'

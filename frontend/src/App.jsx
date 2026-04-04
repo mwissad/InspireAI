@@ -6,6 +6,7 @@ import ConfigPage from './pages/ConfigPage';
 import LaunchPage from './pages/LaunchPage';
 import MonitorPage from './pages/MonitorPage';
 import ResultsPage from './pages/ResultsPage';
+import McpGuidePage from './pages/McpGuidePage';
 
 // Error Boundary to catch rendering crashes and display useful info
 class ErrorBoundary extends Component {
@@ -205,6 +206,8 @@ export default function App() {
             </div>
           </ErrorBoundary>
         )}
+
+        {page === 'mcp' && <McpGuidePage />}
       </main>
 
       {/* Settings panel */}
