@@ -33,7 +33,7 @@ fi
 # ─── 2. Install backend dependencies ───
 if [ ! -d "backend/node_modules" ]; then
   echo "📦 Installing backend dependencies..."
-  cd backend && npm install --production --no-audit --no-fund 2>&1 && cd ..
+  cd backend && npm install --omit=dev --no-audit --no-fund 2>&1 && cd ..
   echo "✅ Dependencies installed."
 else
   echo "✅ Backend dependencies found."
