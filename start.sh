@@ -33,8 +33,16 @@ fi
 # ─── 2. Install backend dependencies ───
 if [ ! -d "backend/node_modules" ]; then
   echo "📦 Installing backend dependencies..."
-  (cd backend && npm install --omit=dev --no-audit --no-fund 2>&1) || true
-  echo "✅ Dependencies installed."
+  if (cd backend && npm ci --omit=dev --no-audit --no-fund 2>&1); then
+    echo "✅ Dependencies installed."
+  else
+    echo "❌ npm install failed — retrying with --legacy-peer-deps..."
+    (cd backend && npm install --omit=dev --no-audit --no-fund --legacy-peer-deps 2>&1) || {
+      echo "❌ ERROR: Failed to install backend dependencies."
+      exit 1
+    }
+    echo "✅ Dependencies installed (retry succeeded)."
+  fi
 else
   echo "✅ Backend dependencies found."
 fi
