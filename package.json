@@ -8,7 +8,6 @@
     "dev:backend": "cd backend && node --watch server.js",
     "dev:frontend": "cd frontend && npm run dev",
     "dev": "npx --yes concurrently -n backend,frontend -c blue,green \"npm run dev:backend\" \"npm run dev:frontend\"",
-    "build": "cd frontend && npm install && npm run build",
     "start": "NODE_ENV=production node backend/server.js"
   }
 }
