@@ -22,6 +22,10 @@ import {
   Copy,
   Check,
   FolderOpen,
+  FileCode,
+  Eye,
+  EyeOff,
+  ExternalLink,
 } from 'lucide-react';
 
 /* ── Priority sort order ── */
@@ -364,11 +368,19 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
     setArtifactsRootFiles(null);
     const headers = artifactHeaders();
 
-    // Build candidate paths: original, absolute workspace, Volumes
+    // Build candidate paths: resolved path, then fallbacks
     const candidates = [genPath];
     if (!genPath.startsWith('/')) {
+      // If genPath is still relative (shouldn't happen after resolution), try common locations
       candidates.push(`/Workspace/${genPath.replace(/^\.\//, '')}`);
       candidates.push(`/Shared/${genPath.replace(/^\.\//, '')}`);
+    } else {
+      // Also try without /Workspace prefix or with it, in case of mismatch
+      if (genPath.startsWith('/Workspace/')) {
+        candidates.push(genPath.replace('/Workspace/', '/'));
+      } else if (!genPath.startsWith('/Volumes/')) {
+        candidates.push(`/Workspace${genPath}`);
+      }
     }
 
     for (const path of candidates) {
@@ -434,7 +446,24 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
 
   // Find generation path from selected session
   const selectedSession = sessions.find(s => String(s.session_id) === String(selectedSessionId));
-  const generationPath = selectedSession?.generation_path || selectedSession?.widget_values?.generation_path || '';
+  const generationRootPath = selectedSession?.generation_path || selectedSession?.widget_values?.generation_path || '';
+  // Build experiment-specific path: {generation_path}/{sanitized(business_name)}
+  const businessName = selectedSession?.widget_values?.['00_business_name'] || selectedSession?.business_name || '';
+  const sanitizedName = businessName ? businessName.toLowerCase().replace(/[^a-z0-9_]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '') || '_' : '';
+  // Resolve relative generation_path using the notebook's workspace location
+  const notebookPath = settings?.notebookPath || '';
+  const notebookDir = notebookPath ? notebookPath.replace(/\/[^/]+$/, '') : '';
+  const resolvedRoot = (() => {
+    if (!generationRootPath) return '';
+    if (generationRootPath.startsWith('/')) return generationRootPath; // already absolute
+    if (generationRootPath.startsWith('./') && notebookDir) {
+      return `${notebookDir}/${generationRootPath.slice(2).replace(/\/+$/, '')}`;
+    }
+    return generationRootPath;
+  })();
+  const generationPath = sanitizedName && resolvedRoot
+    ? `${resolvedRoot.replace(/\/+$/, '')}/${sanitizedName}`
+    : resolvedRoot;
 
   const highPriorityCount = allUseCases.filter((uc) => ['Ultra High', 'Very High', 'High'].includes(String(uc?.Priority || ''))).length;
 
@@ -1277,6 +1306,8 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
                         setExpandedUseCase(expandedUseCase === (uc.No || idx) ? null : uc.No || idx)
                       }
                       resolveTable={resolveTable}
+                      token={token}
+                      databricksHost={databricksHost}
                     />
                   ))}
                 </div>
@@ -1382,7 +1413,12 @@ function CopyButton({ text }) {
 }
 
 /* ── Use Case Card ── */
-function UseCaseCard({ uc, index, expanded, onToggle, resolveTable }) {
+function UseCaseCard({ uc, index, expanded, onToggle, resolveTable, token, databricksHost }) {
+  const [notebookContent, setNotebookContent] = useState(null);
+  const [notebookLoading, setNotebookLoading] = useState(false);
+  const [notebookError, setNotebookError] = useState('');
+  const [showNotebook, setShowNotebook] = useState(false);
+
   if (!uc || typeof uc !== 'object') return null;
 
   const s = (v) => (v == null ? '' : String(v));      // safe-string helper
@@ -1407,7 +1443,44 @@ function UseCaseCard({ uc, index, expanded, onToggle, resolveTable }) {
   const resultTable = s(uc.result_table);
   const technicalDesign = stripHtml(uc['Technical Design']);
   const tablesInvolved = s(uc['Tables Involved']);
+  const notebookPath = s(uc.notebook_path);
+  const genieInstruction = s(uc.genie_instruction);
   const typeIcon = TYPE_ICONS[ucType] || '📋';
+
+  const hasNotebook = !!(notebookPath || genieInstruction);
+
+  const loadNotebookPreview = async () => {
+    if (notebookContent) { setShowNotebook(true); return; }
+    // Try genie_instruction first (stored inline), then fetch from workspace
+    if (genieInstruction) {
+      setNotebookContent(genieInstruction);
+      setShowNotebook(true);
+      return;
+    }
+    if (!notebookPath || !token) return;
+    setNotebookLoading(true);
+    setNotebookError('');
+    try {
+      const headers = { Authorization: `Bearer ${token}`, 'X-DB-PAT-Token': token };
+      if (databricksHost) headers['X-Databricks-Host'] = databricksHost;
+      const resp = await fetch(`/api/workspace/export?path=${encodeURIComponent(notebookPath)}`, { headers });
+      if (resp.ok) {
+        const data = await resp.json();
+        // Content may be base64 encoded or plain text
+        let content = data.content || '';
+        if (data.content && data.file_type !== 'text') {
+          try { content = atob(data.content); } catch { /* already decoded */ }
+        }
+        setNotebookContent(content);
+        setShowNotebook(true);
+      } else {
+        setNotebookError('Could not load notebook');
+      }
+    } catch (err) {
+      setNotebookError(err.message || 'Failed to fetch');
+    }
+    setNotebookLoading(false);
+  };
 
   const priorityLower = priority.toLowerCase();
   const priorityStyle =
@@ -1454,6 +1527,11 @@ function UseCaseCard({ uc, index, expanded, onToggle, resolveTable }) {
                 className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${qualityStyle}`}
               >
                 Q: {quality}
+              </span>
+            )}
+            {hasNotebook && (
+              <span className="text-[10px] px-2 py-0.5 rounded-full font-medium text-[#FF3621] bg-[#FF3621]/10 flex items-center gap-1">
+                <FileCode size={9} /> Notebook
               </span>
             )}
           </div>
@@ -1562,6 +1640,90 @@ function UseCaseCard({ uc, index, expanded, onToggle, resolveTable }) {
                   {sql}
                 </pre>
               </div>
+            </div>
+          )}
+
+          {/* Genie Code Notebook Preview */}
+          {hasNotebook && (
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <h4 className="text-[10px] font-bold text-[#FF3621] uppercase tracking-wider flex items-center gap-1.5">
+                  <FileCode size={10} /> Genie Code Instruction
+                  {notebookPath && (
+                    <span className="text-text-tertiary font-normal normal-case ml-1 font-mono text-[9px] truncate max-w-[300px] inline-block align-bottom">
+                      {notebookPath.split('/').pop()}
+                    </span>
+                  )}
+                </h4>
+                <div className="flex items-center gap-2">
+                  {notebookPath && (
+                    <a
+                      href={databricksHost ? `https://${databricksHost.replace(/^https?:\/\//, '')}#workspace${notebookPath}` : '#'}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-[10px] text-text-tertiary hover:text-text-secondary flex items-center gap-1 transition-colors"
+                      title="Open in Databricks"
+                    >
+                      <ExternalLink size={10} /> Open
+                    </a>
+                  )}
+                  <button
+                    onClick={showNotebook ? () => setShowNotebook(false) : loadNotebookPreview}
+                    disabled={notebookLoading}
+                    className="text-[10px] font-medium text-text-tertiary hover:text-[#FF3621] flex items-center gap-1 transition-colors disabled:opacity-50"
+                  >
+                    {notebookLoading ? (
+                      <><Loader2 size={10} className="animate-spin" /> Loading...</>
+                    ) : showNotebook ? (
+                      <><EyeOff size={10} /> Hide</>
+                    ) : (
+                      <><Eye size={10} /> Preview</>
+                    )}
+                  </button>
+                  {notebookContent && <CopyButton text={notebookContent} />}
+                </div>
+              </div>
+
+              {notebookError && (
+                <p className="text-[11px] text-error flex items-center gap-1">
+                  <AlertCircle size={10} /> {notebookError}
+                </p>
+              )}
+
+              {showNotebook && notebookContent && (
+                <div className="relative rounded-lg border border-[#FF3621]/20 overflow-hidden">
+                  <div className="absolute left-0 top-0 bottom-0 w-1 bg-[#FF3621]/30 rounded-l-lg" />
+                  <div className="bg-bg p-4 pl-5 overflow-x-auto max-h-[500px] overflow-y-auto">
+                    {notebookContent.split(/^## /m).map((section, i) => {
+                      if (i === 0 && !section.trim()) return null;
+                      const lines = (i === 0 ? section : `## ${section}`).split('\n');
+                      const heading = lines[0];
+                      const body = lines.slice(1).join('\n').trim();
+                      const isHeading = heading.startsWith('## ') || heading.startsWith('# ');
+                      return (
+                        <div key={i} className={i > 0 ? 'mt-4' : ''}>
+                          {isHeading && (
+                            <h5 className="text-xs font-bold text-[#FF3621] mb-1.5">
+                              {heading.replace(/^#+\s*/, '')}
+                            </h5>
+                          )}
+                          {!isHeading && <p className="text-[11px] text-text-secondary leading-relaxed whitespace-pre-wrap">{heading}</p>}
+                          {body && (
+                            <div className="text-[11px] text-text-secondary leading-relaxed whitespace-pre-wrap">
+                              {body.split('\n').map((line, j) => {
+                                if (line.startsWith('### ')) return <h6 key={j} className="text-[11px] font-semibold text-text-primary mt-2 mb-1">{line.replace(/^###\s*/, '')}</h6>;
+                                if (line.startsWith('- **') || line.startsWith('* **')) return <p key={j} className="ml-2 mt-0.5">{line}</p>;
+                                if (line.startsWith('- ') || line.startsWith('* ')) return <p key={j} className="ml-2 text-text-tertiary">{line}</p>;
+                                return <span key={j}>{line}{'\n'}</span>;
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>

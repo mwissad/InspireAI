@@ -210,41 +210,45 @@ function sqlResultToObjects(result) {
 const NOTEBOOK_DEST = '/Shared/inspire_ai';
 let cachedNotebookPath = DEFAULT_NOTEBOOK_PATH || '';
 
-async function ensureNotebookPublished(host, token) {
-  // 1. If we already know the notebook path, verify it still exists
-  if (cachedNotebookPath) {
-    try {
-      const check = await dbFetch(host, token, `/api/2.0/workspace/get-status?path=${encodeURIComponent(cachedNotebookPath)}`);
-      if (check.ok) return cachedNotebookPath;
-    } catch (_) {}
-    // Path gone — re-publish
-    cachedNotebookPath = '';
-  }
+async function ensureNotebookPublished(host, token, force = false) {
+  if (!force) {
+    // 1. If we already know the notebook path, verify it still exists
+    if (cachedNotebookPath) {
+      try {
+        const check = await dbFetch(host, token, `/api/2.0/workspace/get-status?path=${encodeURIComponent(cachedNotebookPath)}`);
+        if (check.ok) return cachedNotebookPath;
+      } catch (_) {}
+      // Path gone — re-publish
+      cachedNotebookPath = '';
+    }
 
-  // 2. Check if notebook already exists at the destination
-  try {
-    const check = await dbFetch(host, token, `/api/2.0/workspace/get-status?path=${encodeURIComponent(NOTEBOOK_DEST)}`);
-    if (check.ok) {
-      const data = await check.json();
-      if (data.object_type === 'NOTEBOOK') {
-        cachedNotebookPath = NOTEBOOK_DEST;
-        console.log(`📓 Notebook already exists: ${cachedNotebookPath}`);
-        return cachedNotebookPath;
-      }
-      if (data.object_type === 'DIRECTORY') {
-        const listResp = await dbFetch(host, token, `/api/2.0/workspace/list?path=${encodeURIComponent(NOTEBOOK_DEST)}`);
-        if (listResp.ok) {
-          const listData = await listResp.json();
-          const nb = (listData.objects || []).find(o => o.object_type === 'NOTEBOOK');
-          if (nb) {
-            cachedNotebookPath = nb.path;
-            console.log(`📓 Notebook found in folder: ${cachedNotebookPath}`);
-            return cachedNotebookPath;
+    // 2. Check if notebook already exists at the destination
+    try {
+      const check = await dbFetch(host, token, `/api/2.0/workspace/get-status?path=${encodeURIComponent(NOTEBOOK_DEST)}`);
+      if (check.ok) {
+        const data = await check.json();
+        if (data.object_type === 'NOTEBOOK') {
+          cachedNotebookPath = NOTEBOOK_DEST;
+          console.log(`📓 Notebook already exists: ${cachedNotebookPath}`);
+          return cachedNotebookPath;
+        }
+        if (data.object_type === 'DIRECTORY') {
+          const listResp = await dbFetch(host, token, `/api/2.0/workspace/list?path=${encodeURIComponent(NOTEBOOK_DEST)}`);
+          if (listResp.ok) {
+            const listData = await listResp.json();
+            const nb = (listData.objects || []).find(o => o.object_type === 'NOTEBOOK');
+            if (nb) {
+              cachedNotebookPath = nb.path;
+              console.log(`📓 Notebook found in folder: ${cachedNotebookPath}`);
+              return cachedNotebookPath;
+            }
           }
         }
       }
-    }
-  } catch (_) {}
+    } catch (_) {}
+  } else {
+    console.log('🔄 Force re-publish requested — overwriting existing notebook...');
+  }
 
   // 3. Publish the bundled DBC
   if (!BUNDLED_DBC_PATH || !fs.existsSync(BUNDLED_DBC_PATH)) {
@@ -452,8 +456,12 @@ app.get('/api/health', (req, res) => {
 // Auto-publish and return the notebook path
 app.get('/api/notebook', requireToken, async (req, res) => {
   try {
-    const nbPath = await ensureNotebookPublished(req.dbHost, req.dbToken);
-    res.json({ path: nbPath });
+    const force = req.query.force === 'true';
+    if (force) {
+      cachedNotebookPath = ''; // clear cache to force re-publish
+    }
+    const nbPath = await ensureNotebookPublished(req.dbHost, req.dbToken, force);
+    res.json({ path: nbPath, republished: force });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -777,8 +785,18 @@ app.post('/api/run', requireToken, async (req, res) => {
       console.warn(`⚠️ Path verify failed: ${verifyErr.message}`);
     }
 
-    const payload = {
-      run_name: `Inspire AI - ${params['00_business_name'] || 'Run'} - ${new Date().toISOString().slice(0, 19)}`,
+    const businessName = params['00_business_name'] || 'Run';
+    const sanitizedTag = businessName.toLowerCase().replace(/[^a-z0-9_]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '') || 'run';
+    const jobName = `Inspire AI - ${businessName} - ${new Date().toISOString().slice(0, 19)}`;
+
+    // Step 1: Create a job with tags
+    const createPayload = {
+      name: jobName,
+      tags: {
+        app: `inspire_ai_${sanitizedTag}`,
+        inspire_version: 'v4.5',
+        business_name: businessName,
+      },
       tasks: [{
           task_key: 'inspire_notebook',
           notebook_task: {
@@ -788,17 +806,33 @@ app.post('/api/run', requireToken, async (req, res) => {
           },
           ...(cluster_id ? { existing_cluster_id: cluster_id } : {}),
       }],
+      max_concurrent_runs: 1,
     };
 
-    console.log(`📋 Submitting run: ${resolvedPath}`);
-    const response = await dbFetch(req.dbHost, req.dbToken, '/api/2.1/jobs/runs/submit', {
+    console.log(`📋 Creating job: ${resolvedPath}`);
+    const createResp = await dbFetch(req.dbHost, req.dbToken, '/api/2.1/jobs/create', {
       method: 'POST',
-      body: JSON.stringify(payload),
+      body: JSON.stringify(createPayload),
+    });
+
+    if (!createResp.ok) {
+      const errText = await createResp.text();
+      console.error(`❌ Job create failed (${createResp.status}): ${errText}`);
+      return res.status(createResp.status).json({ error: `Job creation failed: ${errText}` });
+    }
+
+    const { job_id } = await createResp.json();
+    console.log(`✅ Job created: ${job_id}`);
+
+    // Step 2: Run the job
+    const response = await dbFetch(req.dbHost, req.dbToken, '/api/2.1/jobs/run-now', {
+      method: 'POST',
+      body: JSON.stringify({ job_id }),
     });
 
     if (!response.ok) {
       const errText = await response.text();
-      console.error(`❌ Run submit failed (${response.status}): ${errText}`);
+      console.error(`❌ Job run failed (${response.status}): ${errText}`);
       let errorMsg;
       try { errorMsg = JSON.parse(errText).message || errText; } catch { errorMsg = errText; }
       return res.status(response.status).json({ error: errorMsg });
@@ -1294,6 +1328,33 @@ app.get('/api/inspire/sessions', requireToken, async (req, res) => {
     if (err.message.includes('TABLE_OR_VIEW_NOT_FOUND') || err.message.includes('does not exist')) {
       return res.json({ sessions: [], message: 'Session table not found.' });
     }
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Delete a session by session_id
+app.delete('/api/inspire/session', requireToken, async (req, res) => {
+  try {
+    const { inspire_database, warehouse_id, session_id } = req.query;
+    if (!inspire_database || !warehouse_id || !session_id) {
+      return res.status(400).json({ error: 'inspire_database, warehouse_id, and session_id required.' });
+    }
+    const [catalog, schema] = inspire_database.split('.');
+    const sessionTable = `\`${catalog}\`.\`${schema}\`.\`__inspire_session\``;
+    const stepTable = `\`${catalog}\`.\`${schema}\`.\`__inspire_step\``;
+
+    // Delete from step tracking table first (may not exist)
+    try {
+      await executeSql(req.dbHost, req.dbToken, warehouse_id,
+        `DELETE FROM ${stepTable} WHERE session_id = ${session_id}`);
+    } catch { /* step table may not exist */ }
+
+    // Delete from session table
+    await executeSql(req.dbHost, req.dbToken, warehouse_id,
+      `DELETE FROM ${sessionTable} WHERE session_id = ${session_id}`);
+
+    res.json({ success: true, message: `Session ${session_id} deleted.` });
+  } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });

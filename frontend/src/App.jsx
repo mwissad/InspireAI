@@ -6,6 +6,7 @@ import ConfigPage from './pages/ConfigPage';
 import LaunchPage from './pages/LaunchPage';
 import MonitorPage from './pages/MonitorPage';
 import ResultsPage from './pages/ResultsPage';
+import ChoosePage from './pages/ChoosePage';
 
 // Error Boundary to catch rendering crashes and display useful info
 class ErrorBoundary extends Component {
@@ -172,7 +173,18 @@ export default function App() {
 
       {/* Main content */}
       <main>
-        {page === 'landing' && <LandingPage onStart={() => nav('launch')} />}
+        {page === 'landing' && <LandingPage onStart={() => nav('choose')} />}
+
+        {page === 'choose' && (
+          <ChoosePage
+            settings={settings}
+            onNewExperiment={() => nav('launch')}
+            onViewResults={(sid) => {
+              if (sid) setSessionId(sid);
+              nav('results');
+            }}
+          />
+        )}
 
         {page === 'launch' && (
           <LaunchPage

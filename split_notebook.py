@@ -56,8 +56,8 @@ def main():
     print("📂 Extracting notebook from DBC...")
     nb = extract_notebook_source(DBC_PATH)
     
-    # v45: main code is in commands[1] (commands[0] is entry point, commands[2] is markdown)
-    main_code = nb['commands'][1]['command']
+    # Find the main code command (largest command, contains the Python source)
+    main_code = max((cmd['command'] for cmd in nb['commands']), key=len)
     lines = main_code.split('\n')
     total_lines = len(lines)
     print(f"   Total lines: {total_lines}")

@@ -52,6 +52,8 @@ TECHNICAL_CONTEXT = {
         "table_election_threshold": 5,
         "table_election_transactional_tables_min": 3,
         "min_use_cases_for_selection": 10,
+        "query_tag_label": "dbx_inspire_agent_run_summary",
+        "genie_query_tag_label": "dbx_inspire_code_run_summary",
         "model_fallback_chain": [
             {"type": "thinker", "size": "large"},
             {"type": "worker", "size": "large"},
@@ -1064,7 +1066,75 @@ Is the portfolio diverse across business domains and analytics techniques?
 - If generating into an over-represented area, produce use cases in under-represented areas instead.
 """
 
-QUALITY_GATE_GENERATION_BLOCK = f"""
+QUALITY_GATE_GOOD = f"""
+### DATA QUALITY GATE — MAXIMUM DISCOVERY MODE
+
+**🚨 MAXIMIZE USE CASE DISCOVERY — GENERATE ALL POSSIBLE USE CASES 🚨**:
+Your PRIMARY goal is to discover and generate the MAXIMUM number of valid, non-duplicate use cases from the provided schema. Quality will be assessed and filtered in a SEPARATE downstream scoring step — your job is to CAST A WIDE NET and generate EVERY possible use case that can be supported by the data.
+
+**DO NOT self-censor or skip use cases because they might not be "high enough quality".**
+**DO NOT limit yourself to only "exceptional" use cases.**
+**Generate ALL use cases that are implementable from the schema — from simple analytical insights to complex ML pipelines.**
+
+The ONLY reasons to skip a use case are:
+1. It is a DUPLICATE of another use case you already generated (D8 check below)
+2. It references columns/tables that DO NOT EXIST in the schema (hallucination)
+3. It is purely trivial (e.g., just counting rows or selecting a column with no business insight)
+
+**SELF-CHECK PROCEDURE**: Before writing each CSV row, verify D8 (no duplicates) and schema validity. If the use case references real columns and produces a genuine business insight, INCLUDE IT.
+
+**D8 (5-LAYER DUPLICATE DETECTION)** — the ONLY hard gate during generation:
+- Layer 1: Normalize verb + strip suffix → compare core phrase
+- Layer 2: Replace noun synonyms (Revenue=Income=Sales, Churn=Attrition, etc.) → compare
+- Layer 3: Extract entity + metric → same entity + same metric = DUPLICATE
+- Layer 4: Technique swap on same business problem = DUPLICATE
+- Layer 5: Same tables + similar intent = DUPLICATE
+Match on ANY layer → DO NOT GENERATE (it's a duplicate).
+
+**QUALITY BEST PRACTICES** (aim for these but DO NOT skip use cases that fall short):
+- **D9 (ANALYTICAL DEPTH)**: Prefer multi-dimensional analysis, ML models, cross-table feature engineering. Simple aggregations are acceptable — they will be scored later.
+- **D10 (DELIVERABLE TEST)**: Prefer "with [...]" suffixes that describe business DELIVERABLES (recommendation, action plan, queue, strategy, intervention). Technical method suffixes are discouraged but not grounds for skipping.
+- **D11 (BALANCE)**: Spread use cases across domains and techniques. If one domain has many use cases already, look for opportunities in other domains too — but DO NOT stop generating valid use cases just because a domain has many.
+{QUALITY_GATE_RULES}
+**FINAL CHECK** (for each use case):
+1. "Can an engineer implement this using ONLY the columns in the schema?" If NO → DO NOT GENERATE IT.
+2. "Is this substantially different from every other use case I have generated so far (D8 check)?" If NO → DO NOT GENERATE IT.
+3. "Does this produce a genuine business insight or actionable output?" If YES → GENERATE IT.
+4. "Have I chosen an appropriate analytical approach for this problem?" If unsure, default to the technique that best fits the data.
+"""
+
+QUALITY_GATE_HIGH = f"""
+### 🚨 DATA QUALITY GATE — BALANCED MODE 🚨
+
+**GOAL: Generate a comprehensive set of HIGH-QUALITY use cases.** Balance breadth of discovery with analytical rigor. Generate all use cases that meet a reasonable quality bar — do not self-censor excessively, but do apply quality checks before including each use case.
+
+**SELF-CHECK PROCEDURE**: Before writing each CSV row, verify all checks below. If a use case fails D8 (duplicate) or D9 (too trivial) → SKIP it. For D10 and D11, prefer compliance but do not skip otherwise strong use cases.
+
+**🚨 HARD GATES (skip use case if any fails) 🚨**:
+
+**D8 (5-LAYER DUPLICATE DETECTION)**:
+- Layer 1: Normalize verb + strip suffix → compare core phrase
+- Layer 2: Replace noun synonyms (Revenue=Income=Sales, Churn=Attrition, etc.) → compare
+- Layer 3: Extract entity + metric → same entity + same metric = DUPLICATE
+- Layer 4: Technique swap on same business problem = DUPLICATE
+- Layer 5: Same tables + similar intent = DUPLICATE
+Match on ANY layer → DO NOT GENERATE (it's a duplicate).
+
+**D9 (ANALYTICAL DEPTH — STRIP TEST)**: Remove all AI function calls mentally. If what remains is ONLY a WHERE clause, single threshold check, basic GROUP BY count, date arithmetic, or single-column ratio → DO NOT GENERATE. The use case must require at least multi-column analysis, cross-table JOINs with derived insights, or genuine statistical/predictive reasoning.
+
+**QUALITY GUIDELINES (apply but do not over-filter)**:
+- **D10 (DELIVERABLE TEST)**: The "with [...]" suffix should describe a business DELIVERABLE (recommendation, action plan, queue, strategy, intervention), NOT a technical method. Rewrite weak activations rather than skipping the use case.
+- **D11 (BALANCE)**: Spread use cases across domains and techniques. If one domain exceeds ~25% or one technique exceeds ~30%, prioritize under-represented areas. But do not skip valid use cases solely for balance — generate them and let scoring handle prioritization.
+{QUALITY_GATE_RULES}
+**FINAL CHECK** (for each use case):
+1. "Can an engineer implement this using ONLY the columns in the schema, with logical cause-effect reasoning, producing a real calculable metric?" If NO → DO NOT GENERATE IT.
+2. "Is this substantially different from every other use case I have generated so far (D8 check)?" If NO → DO NOT GENERATE IT.
+3. "Does this require genuine analytical work beyond basic aggregation (D9 check)?" If NO → DO NOT GENERATE IT.
+4. "Does the 'with [activation]' part describe a business deliverable?" If not, try to rewrite. If impossible, still include if the core analysis is strong.
+5. "Have I chosen an appropriate analytical approach for this problem?" If unsure, default to the technique that best fits the data.
+"""
+
+QUALITY_GATE_VERY_HIGH = f"""
 ### 🚨🚨🚨 MANDATORY DATA QUALITY GATE (Apply BEFORE generating EACH use case) 🚨🚨🚨
 
 **🚨 QUALITY IS ABSOLUTE — QUANTITY IS IRRELEVANT 🚨**: Generate ONLY use cases that pass ALL 11 quality dimensions AND all 5 duplicate detection layers.
@@ -1092,6 +1162,12 @@ A use case that fails ANY dimension or ANY duplicate layer MUST NOT be generated
 5. "Does the action part (before 'with') contain ANY technical jargon, domain acronyms, or statistical terms?" If YES → REWRITE using plain business language or DO NOT GENERATE IT.
 6. "Have I chosen the BEST analytical approach for this problem — SQL statistical analysis, trained ML model, AI function, or hybrid — rather than defaulting to the simplest approach?" If you defaulted to SQL when an ML model would be more accurate → RECONSIDER the approach.
 """
+
+QUALITY_GATE_GENERATION_BLOCKS = {
+    "Good Quality": QUALITY_GATE_GOOD,
+    "High Quality": QUALITY_GATE_HIGH,
+    "Very High Quality": QUALITY_GATE_VERY_HIGH,
+}
 
 QUALITY_GATE_SCORING_BLOCK = f"""
 ## QUALITY SCORING DIMENSIONS
@@ -1124,18 +1200,19 @@ Same primary tables AND similar business question → D8 = 1.0.
 
 **SCORING**: D8 = 5.0 means ZERO overlap on ALL 5 layers. D8 = 3.0 means minor similarity detected but different business question. D8 ≤ 2.0 = DUPLICATE on any layer → triggers VETO.
 
-**D9 — ANALYTICAL DEPTH SCORING PROCEDURE (apply the "STRIP TEST"):**
+**D9 — ANALYTICAL DEPTH SCORING PROCEDURE (apply the "STRIP TEST" AND the "TECHNIQUE MATCH TEST"):**
 Mentally REMOVE all AI function calls from the High Level Design. What analytical substance remains? Score based on what's LEFT — considering SQL operations, ML model training, statistical modeling, and hybrid approaches:
 
 D9 = 1.0 (TRIVIAL — VETO): Date arithmetic, threshold checks, basic aggregation, simple filtering, sorting, ratio computation. Could a junior analyst replicate this with basic tools alone?
 D9 = 1.5 (TRIVIAL — VETO): Single-column Z-score, one-dimensional anomaly detection, basic period-over-period comparison.
 D9 = 2.0 (WEAK — VETO): Two-column correlation without cross-table context, simple moving average, one-dimensional grouping + threshold.
-D9 = 3.0 (MODERATE): Multiple statistical operations on 2-3 variables, but no genuine multi-dimensional reasoning or ML modeling. NOT acceptable for Extreme Quality.
+D9 = 2.0 (TECHNIQUE MISMATCH — VETO): When the Analytics Technique is any of [Anomaly Detection, Clustering, Predictive Modeling, Classification, Forecasting, Regression Analysis, Segmentation, Survival Analysis, Recommendation, Network Analysis, Optimization, Simulation] but the High Level Design describes ONLY SQL operations (z-scores, window functions, CASE WHEN, GROUP BY, NTILE, simple thresholds) without any ML model training, statistical modeling, or technique-appropriate algorithm. A technique mismatch means the use case CLAIMS to use ML-grade analytics but actually proposes SQL-grade implementation — this is analytically dishonest regardless of SQL complexity.
+D9 = 3.0 (MODERATE): Multiple statistical operations on 2-3 variables, but no genuine multi-dimensional reasoning or ML modeling. NOT acceptable for Extreme Quality. Acceptable ONLY for techniques where SQL is genuinely appropriate (Pareto Analysis, basic Cohort Analysis, Funnel Analysis).
 D9 = 3.5 (ACCEPTABLE MINIMUM): Multi-dimensional analysis across 3+ variables with derived features; OR basic ML model training (single algorithm) on well-prepared features.
-D9 = 4.0-4.5 (STRONG): Cross-table feature engineering with trained ML model (XGBoost, Random Forest, LightGBM); OR multi-step predictive pipeline with model evaluation; OR clustering/segmentation with profiling and actionable insights; OR survival analysis with time-to-event modeling.
+D9 = 4.0-4.5 (STRONG): Cross-table feature engineering with trained ML model (XGBoost, Random Forest, LightGBM, Isolation Forest, K-Means, DBSCAN); OR multi-step predictive pipeline with model evaluation; OR clustering/segmentation with profiling and actionable insights; OR survival analysis with time-to-event modeling; OR simulation with Monte Carlo or scenario modeling.
 D9 = 5.0 (EXCEPTIONAL): Novel multi-technique pipeline: feature engineering → multiple model comparison → ensemble scoring → optimization/simulation → ai_query reasoning. OR: graph/network analysis combined with ML. OR: sophisticated time-series with multiple external factors and scenario modeling.
 
-**DEFAULT IS 3.0**. The use case must EARN its way above 3.0 with concrete evidence of analytical complexity. ML model training, when appropriate for the problem, is a STRONG indicator of depth.
+**DEFAULT IS 3.0**. The use case must EARN its way above 3.0 with concrete evidence of analytical complexity. ML model training, when appropriate for the problem, is a STRONG indicator of depth. SQL-only implementations of ML-designated techniques (Anomaly Detection, Clustering, Classification, Predictive Modeling, Forecasting, etc.) are CAPPED at D9 = 2.0 regardless of SQL complexity.
 
 **D10 — ACTIVATION QUALITY SCORING PROCEDURE (apply the "DELIVERABLE TEST"):**
 The "with [...]" suffix must describe a business DELIVERABLE — the actionable output the user receives. Score based on whether the activation describes WHAT THE USER GETS (high score) vs HOW THE ANALYSIS WORKS (low score).
@@ -1311,7 +1388,7 @@ The CSV MUST have EXACTLY the following 12 columns (no more, no less):
 
 ---
 
-""" + QUALITY_GATE_GENERATION_BLOCK + """
+{quality_gate_block}
 
 ---
 
@@ -1445,10 +1522,10 @@ You MUST ONLY generate use cases that meet at least one of these criteria:
 
   - **`High Level Design`**: A high-level analytical approach (2-4 sentences) describing the data analysis strategy.
     *   **MANDATORY COLUMN LISTING**: List EXACT column names from the schema: "Using columns: [col1], [col2], [col3]"
-    *   **DESCRIBE THE ANALYTICAL APPROACH AND ALGORITHM CHOICE**: Explain what data to extract, how to join tables, what features to engineer, and WHICH ALGORITHM or TECHNIQUE to apply. For ML use cases, specify the model type (e.g., "Train an XGBoost classifier on features [col1, col2, col3] to predict [outcome]"). For statistical use cases, describe the statistical operations. For AI-driven use cases, describe the AI function usage. Choose the BEST approach for the problem — do not default to SQL aggregations when a trained model would yield better results.
+    *   **DESCRIBE THE ANALYTICAL APPROACH AND ALGORITHM CHOICE (TECHNIQUE-APPROPRIATE -- NO SQL BIAS)**: Explain what data to extract, how to join tables, what features to engineer, and WHICH ALGORITHM or TECHNIQUE to apply. The algorithm MUST match the Analytics Technique: (1) Anomaly Detection MUST use Isolation Forest, LOF, DBSCAN, or ensemble ML methods -- NOT just z-scores or SQL thresholds; (2) Forecasting MUST use Prophet, ARIMA, ai_forecast, or temporal ML models -- NOT just SQL moving averages; (3) Classification MUST use XGBoost, Random Forest, Logistic Regression, or ai_classify -- NOT just SQL CASE WHEN rules; (4) Predictive Modeling MUST use trained ML models (XGBoost, LightGBM, Random Forest) -- NOT just SQL aggregations; (5) Clustering/Segmentation MUST use K-Means, DBSCAN, GMM -- NOT just SQL NTILE or CASE WHEN tiers; (6) Regression Analysis MUST use Linear/Ridge/Lasso/GLM regression -- NOT just SQL CORR(); (7) Survival Analysis MUST use Kaplan-Meier, Cox PH -- NOT just SQL DATEDIFF; (8) Simulation MUST use Monte Carlo or scenario modeling -- NOT just SQL CASE WHEN with 2-3 scenarios; (9) Recommendation MUST use ALS or similarity algorithms -- NOT just SQL top-N by COUNT; (10) Network Analysis MUST use GraphFrames, PageRank, centrality -- NOT just SQL self-joins. For ALL techniques, specify the model type explicitly (e.g., "Train an Isolation Forest on features [col1, col2, col3] to detect anomalies", "Train an XGBoost classifier to predict [outcome]"). SQL-only approaches are ONLY acceptable for Pareto Analysis, basic Funnel Analysis, and Cohort Analysis construction. Choose the BEST approach for the problem -- do NOT default to SQL when a trained ML model or statistical model would yield better, more defensible results.
     *   **JOIN PRIORITY**: CHECK FK Relationships section. If related tables exist, describe JOINs. Multi-table > single-table for business value.
     *   **EXTERNAL DATA ENRICHMENT (≥50% of use cases)**: Describe scenarios where external market/economic/industry context enriches the analysis (e.g., "Enrich with simulated economic indicators for context"). Explain the business rationale for the external data.
-    *   **AI REASONING (MANDATORY for ALL use cases)**: Every use case MUST conclude with ai_query to analyze results, explain findings, and generate actionable recommendations regardless of the upstream analytical technique (SQL, ML, or hybrid).
+    *   **AI REASONING AS FINAL EXPLANATION LAYER (MANDATORY for ALL use cases)**: Every use case MUST conclude with ai_query as the FINAL step to EXPLAIN pre-computed analytical results, diagnose root causes, and generate actionable recommendations. ai_query does NOT perform the core analysis -- the ML model, statistical method, or AI function performs the analysis first, and ai_query receives those results (scores, predictions, clusters, anomaly flags) to generate business narratives. This separation is NON-NEGOTIABLE: ML/statistical analysis first, ai_query explanation last.
     *   Only reference columns that EXIST in the schema. No assumptions.
 
 **FOCUS AREAS:**
@@ -2502,8 +2579,9 @@ You are a **Chief Data Scientist** and **Domain Expert** responsible for assessi
 **D8 = 5.0**: A use case analyzing supplier delivery reliability when no other use case touches supplier operations. Completely novel business question.
 
 **D9 (Depth) = 1.0**: "Detect Overdue Invoice Risk" — this is just WHERE due_date < CURRENT_DATE. No advanced analysis required.
-**D9 = 3.0**: Multi-column aggregation with a statistical comparison — requires some effort but no genuine predictive modeling or ML.
-**D9 = 4.0**: Cross-table feature engineering → trained ML model (XGBoost/Random Forest) → prediction with feature importance → ai_query explanation. OR: K-Means clustering on multi-dimensional features → segment profiling → ai_query recommendations.
+**D9 = 2.0 (TECHNIQUE MISMATCH)**: Analytics Technique says "Anomaly Detection" but High Level Design describes only z-scores and SQL thresholds without Isolation Forest, LOF, or any ML-based anomaly detection. OR: Technique says "Clustering" but design uses SQL NTILE/CASE WHEN instead of K-Means/DBSCAN. SQL-only implementation of an ML-designated technique is ALWAYS D9 = 2.0 regardless of SQL complexity.
+**D9 = 3.0**: Multi-column aggregation with a statistical comparison — requires some effort but no genuine predictive modeling or ML. Acceptable ONLY when the Analytics Technique is inherently SQL-appropriate (Pareto Analysis, Cohort Analysis, Funnel Analysis).
+**D9 = 4.0**: Cross-table feature engineering → trained ML model (XGBoost/Random Forest/Isolation Forest/K-Means) → prediction/detection/clustering with evaluation metrics → ai_query explanation. The technique matches the Analytics Technique designation.
 **D9 = 5.0**: Multi-step pipeline: cross-table feature engineering → multiple model comparison (XGBoost vs LightGBM vs Random Forest) → ensemble scoring → survival analysis or optimization → counterfactual scenario analysis → ai_query with model-informed reasoning.
 
 **D10 (Activation Quality) = 1.0**: "with Correlation Analysis" — describes a technical method, not a business deliverable. Also 1.0: "with Competitive Intelligence" — meaningless buzzword.
@@ -3160,10 +3238,12 @@ def extract_honesty_score(response: str, logger: logging.Logger = None) -> tuple
                 score = 100
         
         _honesty_free_text_markers = [
-            'HONESTY SELF-ASSESSMENT',
-            'HONESTY_SCORE',
             'honesty self-assessment',
-            'Score:',
+            'honesty_score',
+            'honesty score',
+            'honesty_justification',
+            'honesty justification',
+            'score:',
         ]
         _lines = cleaned_response.split('\n')
         _first_marker_idx = None
@@ -3174,8 +3254,9 @@ def extract_honesty_score(response: str, logger: logging.Logger = None) -> tuple
             _is_csv_data = _line_stripped.startswith('"') and '","' in _line_stripped
             if _is_csv_data:
                 break
+            _line_lower = _lines[_idx].lower()
             for _marker in _honesty_free_text_markers:
-                if _marker in _lines[_idx]:
+                if _marker in _line_lower:
                     _first_marker_idx = _idx
                     break
         if _first_marker_idx is not None:
@@ -5660,19 +5741,376 @@ class LakeViewDashboard:
             self.logger.error(f"Unexpected error adding widget '{viz_title}': {get_clean_error_message(e)}")
             return False # Return False on "unexpected" failure
         
+TECHNIQUE_IMPLEMENTATION_GUIDANCE = {
+    "Anomaly Detection": (
+        "ANALYTICAL APPROACH MANDATE -- ANOMALY DETECTION:\n"
+        "Genie MUST use ML-based anomaly detection as the PRIMARY analytical engine. "
+        "Recommended algorithms (choose best fit for data characteristics): "
+        "Isolation Forest (best for high-dimensional tabular data, handles mixed feature types well), "
+        "Local Outlier Factor / LOF (best for density-based local anomalies), "
+        "DBSCAN (best for spatial/density-based clustering where anomalies are noise points), "
+        "One-Class SVM (best for well-defined normal class with clear boundary), "
+        "Ensemble methods combining multiple detectors for robust scoring. "
+        "Use sklearn.ensemble.IsolationForest, sklearn.neighbors.LocalOutlierFactor, "
+        "sklearn.cluster.DBSCAN, or spark.ml equivalents -- all run natively on Databricks Serverless. "
+        "Statistical methods (z-scores, IQR, Grubbs test, MAD) are acceptable as SUPPLEMENTARY signals "
+        "or fallback when sample size is too small for ML, but are NEVER sufficient as the sole detection method. "
+        "The ML model produces anomaly scores, anomaly flags, and feature importance; "
+        "ai_query then EXPLAINS the detected anomalies, diagnoses root causes, quantifies cost impact, "
+        "and generates corrective action recommendations. "
+        "MINIMUM BAR: Simple z-score thresholds or SQL CASE WHEN on a single metric is a FAILURE for Anomaly Detection."
+    ),
+    "Forecasting": (
+        "ANALYTICAL APPROACH MANDATE -- FORECASTING:\n"
+        "Genie MUST use time-series modeling as the PRIMARY analytical engine. "
+        "Recommended approaches (choose best fit): "
+        "Prophet (best for business time series with seasonality, holidays, and trend changes), "
+        "ARIMA/SARIMA via statsmodels (best for stationary series with clear autocorrelation), "
+        "ai_forecast() Databricks built-in function (simplest path for standard forecasting), "
+        "Temporal regression models (XGBoost/LightGBM with lag features, rolling statistics, calendar features) "
+        "for complex multi-variate forecasting where external regressors matter. "
+        "Feature engineering MUST include: lag features, rolling means/std, day-of-week/month/quarter encodings, "
+        "holiday indicators, trend decomposition components. "
+        "The forecasting model produces point forecasts, confidence intervals, and trend/seasonality decomposition; "
+        "ai_query then EXPLAINS the forecast, identifies key drivers of predicted trends, "
+        "assesses forecast uncertainty, and generates strategic recommendations. "
+        "MINIMUM BAR: Simple moving averages or SQL window function LAG/LEAD alone is a FAILURE for Forecasting."
+    ),
+    "Classification": (
+        "ANALYTICAL APPROACH MANDATE -- CLASSIFICATION:\n"
+        "Genie MUST use ML classification models as the PRIMARY analytical engine. "
+        "Recommended algorithms (choose based on data size, interpretability needs, and feature types): "
+        "XGBoost/LightGBM (best accuracy for tabular data, handles missing values, feature importance built-in), "
+        "Random Forest (good baseline, robust to overfitting, interpretable feature importance), "
+        "Logistic Regression (best when interpretability is paramount, works well with regularization), "
+        "ai_classify() Databricks built-in (acceptable for text-based or semantic classification tasks). "
+        "Pipeline MUST include: feature engineering, train/test split, model training, "
+        "evaluation metrics (accuracy, precision, recall, F1, AUC-ROC, confusion matrix), "
+        "and MLflow model registration. "
+        "The ML model produces class predictions, prediction probabilities, and feature importance scores; "
+        "ai_query then EXPLAINS each classification decision, provides confidence assessment, "
+        "and generates actionable recommendations based on the predicted class. "
+        "MINIMUM BAR: SQL CASE WHEN rules or manual threshold-based classification is a FAILURE for Classification."
+    ),
+    "Predictive Modeling": (
+        "ANALYTICAL APPROACH MANDATE -- PREDICTIVE MODELING:\n"
+        "Genie MUST train ML models as the PRIMARY analytical engine. "
+        "Recommended algorithms: "
+        "XGBoost (best general-purpose for tabular prediction), "
+        "LightGBM (best for large datasets with many features), "
+        "Random Forest (robust baseline with good interpretability), "
+        "Gradient Boosting (sklearn GradientBoostingClassifier/Regressor for smaller datasets). "
+        "Pipeline MUST include: exploratory feature analysis, feature engineering (derived features, interactions, encodings), "
+        "train/validation/test split, hyperparameter selection, model training, "
+        "comprehensive evaluation (regression: RMSE, MAE, R-squared, MAPE; classification: AUC, F1, precision, recall), "
+        "feature importance extraction, and MLflow model registration. "
+        "The ML model produces predictions and confidence scores; "
+        "ai_query then EXPLAINS each prediction, interprets feature contributions, "
+        "quantifies business impact, and generates prioritized action recommendations. "
+        "MINIMUM BAR: SQL aggregations or rule-based scoring without trained ML model is a FAILURE for Predictive Modeling."
+    ),
+    "Clustering": (
+        "ANALYTICAL APPROACH MANDATE -- CLUSTERING:\n"
+        "Genie MUST use unsupervised ML algorithms as the PRIMARY analytical engine. "
+        "Recommended algorithms: "
+        "K-Means (best for spherical clusters with known k, use elbow method or silhouette score for k selection), "
+        "DBSCAN (best for arbitrary-shaped clusters and noise detection, no need to pre-specify k), "
+        "Gaussian Mixture Models / GMM (best for overlapping clusters with probabilistic assignment), "
+        "Hierarchical/Agglomerative Clustering (best for exploring cluster hierarchy at multiple granularities). "
+        "Pipeline MUST include: feature scaling/normalization, dimensionality assessment, "
+        "optimal cluster count determination (silhouette score, elbow method, BIC for GMM), "
+        "cluster assignment, cluster profiling (centroid analysis, feature distributions per cluster). "
+        "The ML model produces cluster assignments, distance-to-centroid scores, and cluster profiles; "
+        "ai_query then PROFILES each cluster in business terms, names the segments meaningfully, "
+        "and generates targeted strategy recommendations per cluster. "
+        "MINIMUM BAR: SQL GROUP BY or NTILE-based bucketing is a FAILURE for Clustering."
+    ),
+    "Regression Analysis": (
+        "ANALYTICAL APPROACH MANDATE -- REGRESSION ANALYSIS:\n"
+        "Genie MUST use statistical or ML regression models as the PRIMARY analytical engine. "
+        "Recommended approaches: "
+        "Linear Regression with regularization (Ridge/Lasso/ElasticNet for feature selection and multicollinearity), "
+        "Generalized Linear Models / GLM (for non-normal response distributions: Poisson, Gamma, Binomial), "
+        "Polynomial regression or splines (for non-linear relationships), "
+        "Tree-based regression (XGBoost/Random Forest regressor for complex non-linear patterns). "
+        "Pipeline MUST include: feature correlation analysis, multicollinearity detection (VIF), "
+        "residual diagnostics, R-squared/adjusted R-squared, coefficient interpretation, "
+        "statistical significance testing (p-values, confidence intervals for coefficients). "
+        "The regression model produces predicted values, residuals, coefficients, and significance metrics; "
+        "ai_query then INTERPRETS the regression results in business terms, explains which factors drive outcomes, "
+        "quantifies the marginal effect of each driver, and recommends interventions. "
+        "MINIMUM BAR: SQL CORR() function or simple ratio computation alone is a FAILURE for Regression Analysis."
+    ),
+    "Segmentation": (
+        "ANALYTICAL APPROACH MANDATE -- SEGMENTATION:\n"
+        "Genie MUST use ML-driven segmentation as the PRIMARY analytical engine. "
+        "Recommended approaches: "
+        "K-Means on RFM (Recency, Frequency, Monetary) or domain-specific multi-dimensional features, "
+        "DBSCAN for density-based segmentation that handles outliers naturally, "
+        "Gaussian Mixture Models for soft/probabilistic segment assignment, "
+        "Hierarchical clustering for discovering natural segment hierarchy. "
+        "Feature engineering MUST include: behavioral features (recency, frequency, monetary value, engagement metrics), "
+        "demographic/firmographic features, lifecycle stage indicators, normalized/scaled features. "
+        "Pipeline MUST include: feature engineering, scaling, optimal segment count determination, "
+        "segment assignment, segment profiling with statistical summaries. "
+        "The ML model produces segment labels, segment membership scores, and segment profiles; "
+        "ai_query then NAMES each segment in business-friendly terms, profiles segment characteristics, "
+        "and generates segment-specific strategy recommendations. "
+        "MINIMUM BAR: SQL CASE WHEN tier assignments or NTILE-based quantile bucketing is a FAILURE for Segmentation."
+    ),
+    "Cohort Analysis": (
+        "ANALYTICAL APPROACH MANDATE -- COHORT ANALYSIS:\n"
+        "Genie should use a combination of cohort construction, retention/survival analysis, and optionally ML scoring. "
+        "Recommended approaches: "
+        "Cohort retention matrices (cohort definition by time period, tracking metric over subsequent periods), "
+        "Kaplan-Meier survival curves per cohort for time-to-event analysis, "
+        "ML-based cohort scoring (train a model to predict cohort-level outcomes like LTV, retention probability), "
+        "Statistical comparison tests between cohorts (t-test, chi-square, Mann-Whitney U test). "
+        "Pipeline MUST include: cohort definition logic, retention/conversion tracking over time periods, "
+        "cohort comparison metrics, statistical significance of inter-cohort differences. "
+        "ai_query then EXPLAINS cohort performance differences, identifies what distinguishes high-performing cohorts, "
+        "and recommends strategies to improve underperforming cohorts. "
+        "SQL-based cohort construction is acceptable as the foundation, but MUST be enriched with "
+        "statistical testing or ML-based scoring beyond simple aggregation."
+    ),
+    "Trend Analysis": (
+        "ANALYTICAL APPROACH MANDATE -- TREND ANALYSIS:\n"
+        "Genie MUST use statistical trend detection methods beyond simple SQL window functions. "
+        "Recommended approaches: "
+        "Seasonal decomposition (STL decomposition to separate trend, seasonality, residuals), "
+        "Mann-Kendall test for statistically significant trend detection, "
+        "Change-point detection (PELT, Binary Segmentation, or Bayesian methods) to identify regime changes, "
+        "Holt-Winters exponential smoothing for trend + seasonality modeling, "
+        "Linear regression on time variable with statistical significance testing. "
+        "Pipeline MUST include: time-series construction, decomposition into components, "
+        "trend significance testing, change-point identification, volatility measurement. "
+        "ai_query then INTERPRETS the trend patterns, explains inflection points and regime changes, "
+        "assesses whether trends are statistically significant or noise, and recommends strategic responses. "
+        "MINIMUM BAR: SQL LAG/LEAD or simple period-over-period percentage change alone is a FAILURE for Trend Analysis."
+    ),
+    "Correlation Analysis": (
+        "ANALYTICAL APPROACH MANDATE -- CORRELATION ANALYSIS:\n"
+        "Genie MUST use multi-dimensional correlation and relationship analysis beyond simple pairwise correlation. "
+        "Recommended approaches: "
+        "Correlation matrix with Pearson, Spearman (rank), and Kendall (ordinal) coefficients, "
+        "Partial correlation (controlling for confounding variables), "
+        "Mutual Information for detecting non-linear dependencies, "
+        "Principal Component Analysis / PCA for dimensionality reduction and latent factor discovery, "
+        "Variance Inflation Factor / VIF for multicollinearity detection. "
+        "Pipeline MUST include: multi-variable correlation computation, statistical significance testing, "
+        "identification of spurious correlations, partial correlation to isolate direct relationships, "
+        "visualization-ready correlation matrices. "
+        "ai_query then INTERPRETS correlations in business context, warns about correlation-vs-causation, "
+        "identifies the strongest actionable relationships, and recommends causal investigation priorities. "
+        "MINIMUM BAR: SQL CORR() on two columns alone is a FAILURE for Correlation Analysis."
+    ),
+    "Pareto Analysis": (
+        "ANALYTICAL APPROACH MANDATE -- PARETO ANALYSIS:\n"
+        "Genie should use concentration analysis with statistical rigor. "
+        "Recommended approaches: "
+        "Cumulative distribution analysis with Pareto frontier identification, "
+        "Gini coefficient computation for inequality measurement, "
+        "Lorenz curve construction for visual concentration assessment, "
+        "Entropy-based concentration metrics (Herfindahl-Hirschman Index / HHI), "
+        "Segmented Pareto analysis across multiple dimensions simultaneously. "
+        "SQL-based cumulative percentage computation is acceptable as the foundation, "
+        "but MUST include concentration metrics (Gini, HHI) and multi-dimensional cross-cutting analysis. "
+        "ai_query then EXPLAINS the concentration pattern, identifies the vital few contributors, "
+        "quantifies the resource allocation imbalance, and recommends rebalancing strategies. "
+        "MINIMUM BAR: Simple PERCENT_RANK or cumulative sum alone without concentration metrics is insufficient."
+    ),
+    "Funnel Analysis": (
+        "ANALYTICAL APPROACH MANDATE -- FUNNEL ANALYSIS:\n"
+        "Genie should use conversion modeling with statistical rigor and optionally ML-based bottleneck prediction. "
+        "Recommended approaches: "
+        "Stage-to-stage conversion rate computation with confidence intervals, "
+        "Markov chain modeling for transition probabilities between funnel stages, "
+        "Bottleneck identification using drop-off rate anomaly detection, "
+        "ML-based conversion prediction (predict which entities will convert at each stage), "
+        "A/B test framework for comparing funnel performance across segments. "
+        "SQL-based stage counting is acceptable as the foundation, "
+        "but MUST include statistical significance testing and conversion prediction or Markov modeling. "
+        "ai_query then EXPLAINS conversion bottlenecks, identifies root causes of drop-offs, "
+        "compares funnel performance across segments, and recommends specific optimization actions. "
+        "MINIMUM BAR: Simple COUNT(*) at each stage without statistical testing or modeling is insufficient."
+    ),
+    "Sentiment Analysis": (
+        "ANALYTICAL APPROACH MANDATE -- SENTIMENT ANALYSIS:\n"
+        "Genie MUST use NLP-based sentiment analysis as the PRIMARY analytical engine. "
+        "Recommended approaches: "
+        "ai_classify() with sentiment-specific prompts for scalable text classification, "
+        "ai_query for nuanced sentiment extraction with aspect-level granularity, "
+        "TextBlob or VADER via Python UDFs for rule-based sentiment scoring as a baseline, "
+        "Custom prompt engineering for domain-specific sentiment categories beyond positive/negative/neutral. "
+        "Pipeline MUST include: text preprocessing (cleaning, normalization), "
+        "sentiment scoring (positive/negative/neutral + confidence), "
+        "aspect-level sentiment extraction (WHAT specifically is positive/negative about each entity), "
+        "temporal sentiment trend analysis, entity-level sentiment aggregation. "
+        "ai_query then SYNTHESIZES sentiment patterns across entities and time, "
+        "identifies sentiment drivers and emerging concerns, and recommends response strategies. "
+        "MINIMUM BAR: Simple keyword matching or SQL LIKE patterns is a FAILURE for Sentiment Analysis."
+    ),
+    "Document Processing": (
+        "ANALYTICAL APPROACH MANDATE -- DOCUMENT PROCESSING:\n"
+        "Genie MUST use NLP extraction pipelines as the PRIMARY analytical engine. "
+        "Recommended approaches: "
+        "ai_query or ai_extract() for structured data extraction from unstructured text, "
+        "Regex-based pattern extraction for well-defined formats (dates, IDs, amounts, codes), "
+        "Multi-pass extraction pipeline: first extract entities, then classify document type, then validate cross-field consistency, then score confidence. "
+        "Pipeline MUST include: text normalization, entity extraction, field validation/cross-referencing, "
+        "confidence scoring for each extraction, structured output table creation, "
+        "error handling for malformed or ambiguous documents. "
+        "ai_query performs the core extraction AND validates results, generates quality assessments, "
+        "and flags uncertain extractions for human review with specific reason codes. "
+        "MINIMUM BAR: A single ai_query call without validation, confidence scoring, or error handling is insufficient."
+    ),
+    "Extraction": (
+        "ANALYTICAL APPROACH MANDATE -- EXTRACTION:\n"
+        "Genie MUST use NLP entity recognition and pattern extraction as the PRIMARY engine. "
+        "Recommended approaches: "
+        "ai_extract() for named entity recognition from text fields, "
+        "ai_query with structured JSON output for complex multi-field extraction, "
+        "Regex pipelines for well-defined patterns combined with AI for ambiguous cases, "
+        "Multi-stage extraction: coarse extraction -> disambiguation -> normalization -> deduplication. "
+        "Pipeline MUST include: entity extraction, entity normalization (standardize formats, resolve aliases), "
+        "deduplication (merge duplicate entities), confidence scoring per extracted entity, "
+        "cross-reference validation against known entity lists where available. "
+        "ai_query validates extractions, resolves ambiguities, normalizes entities, "
+        "and generates structured output with per-field confidence assessments. "
+        "MINIMUM BAR: A single extraction call without normalization, deduplication, or confidence scoring is insufficient."
+    ),
+    "AI Analysis": (
+        "ANALYTICAL APPROACH MANDATE -- AI ANALYSIS:\n"
+        "Genie has full freedom to choose the optimal analytical approach based on data characteristics. "
+        "This technique category is a catch-all -- Genie MUST select the BEST method for the specific problem: "
+        "ML models (XGBoost, Random Forest, Isolation Forest) when predicting outcomes or detecting patterns, "
+        "Clustering (K-Means, DBSCAN) when discovering natural groups in the data, "
+        "Statistical methods (regression, correlation, hypothesis testing) when quantifying relationships, "
+        "AI functions (ai_query, ai_classify, ai_extract) when semantic understanding is the primary requirement. "
+        "The approach MUST be a HYBRID: statistical pre-processing and feature engineering to prepare the data, "
+        "followed by the most appropriate ML or AI technique for the core analysis, "
+        "with ai_query providing final business interpretation and recommendation generation. "
+        "MINIMUM BAR: Pure SQL aggregation wrapped in ai_query is insufficient for AI Analysis -- "
+        "there must be genuine analytical depth (multi-dimensional feature engineering, statistical testing, "
+        "or ML model training) in the pre-ai_query pipeline."
+    ),
+    "Simulation": (
+        "ANALYTICAL APPROACH MANDATE -- SIMULATION:\n"
+        "Genie MUST use computational simulation techniques as the PRIMARY analytical engine. "
+        "Recommended approaches: "
+        "Monte Carlo simulation (generate 1000+ random scenarios from estimated input distributions), "
+        "Sensitivity analysis (systematically vary each input parameter +/- 10-50% to measure output elasticity), "
+        "Scenario modeling (define optimistic/baseline/pessimistic parameter sets with business justification, compute outcomes for each), "
+        "What-If analysis with parameter sweeps across business-relevant ranges, "
+        "Bootstrap resampling for confidence interval estimation on business metrics. "
+        "Pipeline MUST include: input distribution estimation from historical data, "
+        "scenario generation (1000+ iterations for Monte Carlo, 3-5 named scenarios for scenario modeling), "
+        "outcome computation for each scenario, probability distribution of outcomes, "
+        "sensitivity ranking of input parameters by impact on output variance. "
+        "ai_query then INTERPRETS simulation results, explains which factors drive outcome uncertainty, "
+        "quantifies risk probabilities (e.g., P(loss > $1M) = 12%), and recommends risk mitigation strategies. "
+        "MINIMUM BAR: SQL CASE WHEN with 2-3 hardcoded scenarios is a FAILURE for Simulation."
+    ),
+    "Geospatial Analysis": (
+        "ANALYTICAL APPROACH MANDATE -- GEOSPATIAL ANALYSIS:\n"
+        "Genie MUST use spatial analysis techniques as the PRIMARY analytical engine. "
+        "Recommended approaches: "
+        "H3 hexagonal indexing for spatial aggregation and region-to-region comparison, "
+        "Geohash encoding for efficient spatial grouping and proximity queries, "
+        "DBSCAN spatial clustering for identifying geographic hotspots and coldspots, "
+        "Haversine/Vincenty distance computation for accurate distance-based analysis, "
+        "Spatial autocorrelation (Moran's I) for detecting geographic clustering patterns, "
+        "Kernel density estimation for continuous spatial density surfaces. "
+        "Pipeline MUST include: coordinate normalization and validation, spatial indexing, "
+        "proximity analysis, density estimation, spatial clustering, "
+        "distance matrix computation where relevant, spatial statistics. "
+        "ai_query then INTERPRETS spatial patterns in business terms, explains geographic concentrations, "
+        "identifies underserved areas or coverage gaps, and recommends location-based strategies. "
+        "MINIMUM BAR: Simple latitude/longitude column inclusion without spatial computation is a FAILURE."
+    ),
+    "Survival Analysis": (
+        "ANALYTICAL APPROACH MANDATE -- SURVIVAL ANALYSIS:\n"
+        "Genie MUST use time-to-event statistical or ML models as the PRIMARY analytical engine. "
+        "Recommended approaches: "
+        "Kaplan-Meier estimator for non-parametric survival curves per group, "
+        "Cox Proportional Hazards model for identifying risk factors affecting survival time, "
+        "Accelerated Failure Time / AFT models for parametric survival modeling, "
+        "ML-based survival: Random Survival Forests, XGBoost with survival objectives (via scikit-survival). "
+        "Use lifelines Python library (works on Databricks Serverless) or sklearn-compatible survival packages. "
+        "Pipeline MUST include: survival time computation, censoring handling (right-censored observations), "
+        "Kaplan-Meier curves with confidence bands, hazard ratio estimation, "
+        "covariate significance testing (log-rank test for group comparisons). "
+        "ai_query then INTERPRETS survival curves and hazard ratios in business terms, "
+        "explains which factors accelerate or delay the event, and recommends intervention timing. "
+        "MINIMUM BAR: SQL DATEDIFF to compute time-to-event without survival modeling is a FAILURE."
+    ),
+    "Recommendation": (
+        "ANALYTICAL APPROACH MANDATE -- RECOMMENDATION:\n"
+        "Genie MUST use recommendation algorithms as the PRIMARY analytical engine. "
+        "Recommended approaches: "
+        "ALS (Alternating Least Squares) collaborative filtering via spark.ml for implicit/explicit feedback, "
+        "Cosine similarity or Pearson correlation for item-based or user-based collaborative filtering, "
+        "Content-based filtering using TF-IDF or feature vectors with similarity metrics, "
+        "Hybrid approaches combining collaborative and content-based signals with weighted scoring, "
+        "Matrix factorization (SVD, NMF) for latent factor discovery. "
+        "Pipeline MUST include: interaction matrix construction, train/test split, model training, "
+        "recommendation generation with relevance scores, diversity/novelty metrics, cold-start handling strategy. "
+        "ai_query then EXPLAINS why each item is recommended, provides business context for the recommendation, "
+        "and generates personalized recommendation narratives with expected impact. "
+        "MINIMUM BAR: SQL-based top-N by simple COUNT/SUM without learned similarity is a FAILURE."
+    ),
+    "Network Analysis": (
+        "ANALYTICAL APPROACH MANDATE -- NETWORK ANALYSIS:\n"
+        "Genie MUST use graph-based analysis as the PRIMARY analytical engine. "
+        "Recommended approaches: "
+        "GraphFrames on Spark for scalable graph processing (available on Databricks), "
+        "PageRank for influence/importance scoring of nodes, "
+        "Community detection (Label Propagation, Connected Components, Louvain) for group discovery, "
+        "Centrality metrics (betweenness, closeness, degree, eigenvector) for node importance ranking, "
+        "Shortest path algorithms for relationship distance computation, "
+        "networkx for smaller graphs that fit in driver memory. "
+        "Pipeline MUST include: graph construction from relational data (nodes and edges), "
+        "centrality computation, community detection, influence propagation analysis, "
+        "graph-level statistics (density, diameter, clustering coefficient). "
+        "ai_query then INTERPRETS network structure in business terms, identifies key influencers and brokers, "
+        "explains community composition, and recommends network-based strategies. "
+        "MINIMUM BAR: SQL self-joins without graph metrics is a FAILURE for Network Analysis."
+    ),
+    "Optimization": (
+        "ANALYTICAL APPROACH MANDATE -- OPTIMIZATION:\n"
+        "Genie MUST use mathematical optimization or heuristic algorithms as the PRIMARY engine. "
+        "Recommended approaches: "
+        "Linear Programming / LP via scipy.optimize.linprog for linear objective with linear constraints, "
+        "Mixed Integer Programming / MIP via PuLP or scipy for discrete decisions, "
+        "Constraint satisfaction via scipy.optimize.minimize for non-linear optimization, "
+        "Genetic algorithms or simulated annealing for complex combinatorial problems, "
+        "Multi-objective optimization with Pareto frontier identification. "
+        "Pipeline MUST include: objective function definition, constraint specification, "
+        "feasibility checking, optimal solution computation, sensitivity analysis on constraints, "
+        "comparison of optimal vs current state to quantify improvement potential. "
+        "ai_query then INTERPRETS the optimal solution in business terms, explains tradeoffs, "
+        "quantifies improvement over current state, and recommends implementation steps. "
+        "MINIMUM BAR: SQL-based ranking or sorting without mathematical optimization is a FAILURE."
+    ),
+}
+
 PROMPT_TEMPLATES["USE_CASE_GENIE_CODE_INSTRUCTION_GEN_PROMPT"] = """You are generating a **goal-oriented instruction** for Databricks Genie Code.
 
-**ABSOLUTE RULE -- NO CODE, NO SQL, NO FORMULAS:**
-The instruction you generate must contain ZERO lines of SQL, Python, PySpark, or any code. No SELECT, no JOIN, no CASE WHEN, no window functions, no column formulas, no algorithm configurations. Genie is an expert AI agent that knows Databricks, Spark, SQL, Python, ML, MLflow, AI functions, and Lakeview. It does NOT need implementation guidance. It needs the BUSINESS GOAL, the INPUT tables, the OUTPUT column categories, and the ai_query contract. NOTHING ELSE. If your output contains SQL or code (other than the tiny ai_query prompt structure template in Section 4), you have FAILED the task.
+**ABSOLUTE RULE -- NO RAW CODE, BUT YOU MUST SPECIFY THE ANALYTICAL APPROACH:**
+The instruction you generate must contain ZERO lines of executable code -- no SELECT statements, no Python functions, no PySpark code, no column formulas, no algorithm hyperparameter configurations. However, you MUST specify the CATEGORY of analytical approach and MAY name specific algorithm families (e.g., "Isolation Forest family", "tree-based ensemble models", "K-Means clustering", "Prophet time-series modeling") without writing code or specifying hyperparameters. Genie is an expert AI agent that knows Databricks, Spark, SQL, Python, ML, MLflow, AI functions, and Lakeview. It needs the BUSINESS GOAL, the ANALYTICAL APPROACH DIRECTIVE (which technique category and algorithm family to use), the INPUT tables, the OUTPUT column categories, and the ai_query contract. If your output contains executable code (other than the tiny ai_query prompt structure template in Section 4), you have FAILED the task. If your output fails to specify an analytical approach appropriate to the analytics technique, you have ALSO FAILED the task.
+
+**CRITICAL -- ai_query IS NOT THE ANALYTICAL ENGINE:**
+ai_query is the FINAL EXPLANATION AND RECOMMENDATION layer. It does NOT perform core statistical analysis, anomaly detection, clustering, forecasting, or predictive modeling. The core analysis MUST use the technique-appropriate approach (trained ML models, statistical methods, AI functions, simulation, or hybrid pipelines) BEFORE ai_query. ai_query receives pre-computed analytical results (scores, predictions, clusters, anomaly flags, statistical measures) and generates business narratives, root cause diagnoses, and actionable recommendations. This is NON-NEGOTIABLE.
 
 Your job:
 1. Tell Genie the BUSINESS GOAL and WHY it matters (Sections 1-2)
 2. Tell Genie the INPUT tables by name only -- NO column expansion (Section 3). Genie has direct access to all table schemas and will inspect columns autonomously.
-3. Tell Genie the OUTPUT table column CATEGORIES and naming conventions -- NOT an exhaustive column listing (Section 5). Genie will determine the specific columns.
-4. Tell Genie the ai_query contract -- syntax rules and per-record prompt structure (Section 4)
-5. Everything else -- joins, algorithms, feature engineering, ML models, SQL vs Python, column selection -- is 100% Genie's decision
+3. Tell Genie the ANALYTICAL APPROACH DIRECTIVE -- which technique category and algorithm family to use (Section 4 Part A). This is the technique-specific guidance that ensures Genie uses ML when ML is appropriate, statistical methods when statistics are appropriate, etc.
+4. Tell Genie the OUTPUT table column CATEGORIES and naming conventions -- NOT an exhaustive column listing (Section 5). Genie will determine the specific columns.
+5. Tell Genie the ai_query contract -- syntax rules and per-record prompt structure (Section 4 Part C)
+6. Everything else -- exact joins, feature engineering specifics, hyperparameters, SQL vs Python choice, column selection -- is 100% Genie's decision
 
-The instruction will be pasted directly into Genie Code. It must be detailed on the WHAT and WHY so Genie can execute autonomously. It must NOT dictate the HOW. Do NOT expand table columns or list full schemas -- Genie inspects schemas directly.
+The instruction will be pasted directly into Genie Code. It must be detailed on the WHAT, WHY, and WHICH ANALYTICAL APPROACH so Genie can execute autonomously with the right technique. It must NOT dictate low-level implementation details. Do NOT expand table columns or list full schemas -- Genie inspects schemas directly.
 
 **BUSINESS CONTEXT:**
 - Company: {business_name}
@@ -5756,50 +6194,69 @@ Do NOT describe join paths, foreign keys, column names, column schemas, or SQL l
 
 ## 4. Implementation Strategy
 
-**THIS SECTION HAS EXACTLY 4 PARTS. NOTHING ELSE.**
+**THIS SECTION HAS EXACTLY 5 PARTS. NOTHING ELSE.**
 
-Genie is an expert AI agent -- it will decide the joins, algorithms, feature engineering, ML models, SQL vs Python, and every implementation detail. You are ONLY providing: (A) the mission goal, (B) the ai_query contract, (C) the MLflow experiment contract, and (D) the Lakeview dashboard spec.
+Genie is an expert AI agent -- it will decide the exact joins, feature engineering specifics, hyperparameters, SQL vs Python implementation, and low-level code structure. You are providing: (A) the analytical approach directive, (B) the mission goal, (C) the ai_query contract, (D) the MLflow experiment contract, and (E) the Lakeview dashboard spec.
 
 **DO NOT GENERATE ANY OF THE FOLLOWING IN THIS SECTION:**
-- SQL queries, SELECT statements, JOINs, CTEs, CASE WHEN, window functions
+- Executable code in SQL, Python, PySpark, or any other language (no SELECT, no def, no import)
 - Column formulas or derivation logic (e.g., "buffer = X - Y", "UNIX_SECONDS(...)")
-- Algorithm names, hyperparameters, or model configurations (e.g., "XGBoost with max_depth=6")
-- Data exploration steps (e.g., "Profile column X", "Filter where status = canceled")
-- Feature engineering details (e.g., "Compute rolling average", "Calculate Z-score")
-- Any code in SQL, Python, PySpark, or any other language
+- Specific hyperparameter values (e.g., "max_depth=6", "n_estimators=100", "contamination=0.1")
+- Exact feature engineering formulas (e.g., "rolling_avg = SUM(x) OVER (ROWS 7 PRECEDING)")
 
-If you find yourself writing something that looks like code or a formula, STOP and delete it. Genie does NOT need implementation guidance -- it needs the GOAL.
+**YOU MUST GENERATE THE FOLLOWING IN THIS SECTION:**
+- The CATEGORY of analytical approach: ML model training, statistical analysis, AI function, simulation, or hybrid
+- Algorithm FAMILY names appropriate to the analytics technique (e.g., "Isolation Forest family", "tree-based ensemble models", "K-Means clustering", "Prophet time-series modeling", "Cox Proportional Hazards")
+- The role separation between the core analytical engine and ai_query (ai_query EXPLAINS results, it does NOT perform the core analysis)
 
-**PART A -- Mission Goal (3-5 sentences MAXIMUM):**
-State what this use case must achieve in plain business language. What decision does the output enable? Who benefits? What is the expected outcome? Do NOT describe HOW to get there -- only WHAT the end result must be. Genie will figure out the HOW.
+If you find yourself writing executable code, STOP and delete it. But if you find yourself NOT naming the algorithm family or analytical approach, you are being TOO VAGUE -- Genie needs to know WHICH class of technique to apply.
 
-**PART B -- ai_query Contract (Genie must follow these rules EXACTLY):**
+**PART A -- Analytical Approach Directive (THIS IS THE MOST CRITICAL PART):**
+
+The analytics technique for this use case is: `{analytics_technique}`
+
+{technique_implementation_guidance}
+
+Based on the above technique guidance, state in 3-5 sentences:
+1. What CATEGORY of analytical approach Genie must use (ML model training, statistical modeling, AI function, simulation, hybrid)
+2. Which ALGORITHM FAMILY or FAMILIES are appropriate (name them explicitly -- e.g., "Isolation Forest or Local Outlier Factor for anomaly detection", "XGBoost or Random Forest for prediction", "K-Means or DBSCAN for clustering")
+3. What the ML/statistical pipeline produces (anomaly scores, predictions, cluster assignments, forecasts, etc.)
+4. That ai_query receives these pre-computed results and generates ONLY business explanations, root cause diagnoses, and recommendations -- it does NOT perform the core analysis
+5. What constitutes a FAILURE for this technique (e.g., "Using only z-score thresholds without ML-based detection is a failure for Anomaly Detection")
+
+Genie has full freedom to choose the specific algorithm within the named family, select hyperparameters, design features, and structure the code. You are directing the TECHNIQUE CLASS, not the implementation details.
+
+**PART B -- Mission Goal (3-5 sentences MAXIMUM):**
+State what this use case must achieve in plain business language. What decision does the output enable? Who benefits? What is the expected outcome? Reference the analytical approach from Part A: "Using [technique] to [detect/predict/cluster/forecast], this system enables [decision] for [beneficiary]."
+
+**PART C -- ai_query Contract (Genie must follow these rules EXACTLY):**
 - Model: `'databricks-gpt-oss-120b'`
 - Prompt construction: `format_string(...)` only -- never concatenation, f-strings, or CONCAT()
 - Temperature: `modelParameters => named_struct('temperature', CAST(0.1 AS DOUBLE))`
 - Banned: systemPrompt, system_prompt, temperature as direct param
-- ai_query must be the FINAL pipeline stage that generates all `ai_cat_*`, `ai_txt_*`, and `ai_sys_*` columns
+- ai_query is the FINAL pipeline stage -- it receives pre-computed analytical results (ML scores, predictions, clusters, statistical measures) and generates all `ai_cat_*`, `ai_txt_*`, and `ai_sys_*` columns
+- ai_query does NOT perform core analysis -- it EXPLAINS and RECOMMENDS based on results computed upstream by the ML/statistical pipeline
 - The SAME format_string expression must populate both the ai_query call AND the `ai_sys_prompt` auditability column
 - No deep learning (no TensorFlow/PyTorch/Keras)
 
 The per-record prompt inside format_string must follow this structure:
 ```
 # Persona -- [Same role from Section 1, condensed for per-record analysis]
-# Task -- [1 sentence: what to analyze, classify, quantify, recommend]
-# Input -- [ALL analytical fields injected via %s placeholders, CAST non-strings to STRING]
+# Task -- [1 sentence: EXPLAIN the pre-computed analytical results, diagnose root causes, recommend actions]
+# Input -- [ALL analytical fields AND ML/statistical scores injected via %s placeholders, CAST non-strings to STRING]
 # Output -- JSON with every ai_cat_, ai_txt_, ai_sys_ field from the Output schema
 # Constraints -- Zero hallucination, quantify everything, output ONLY valid JSON
 ```
-List the specific ai_cat_, ai_txt_, ai_sys_ field names the prompt must request.
+The Input section MUST include the pre-computed ML/statistical outputs (anomaly scores, prediction probabilities, cluster assignments, forecast values, regression coefficients, etc.) so ai_query can reference them in its explanation. List the specific ai_cat_, ai_txt_, ai_sys_ field names the prompt must request.
 
-**PART C -- MLflow Experiment Registration (MANDATORY):**
+**PART D -- MLflow Experiment Registration (MANDATORY):**
 Genie MUST generate code that registers the analytical pipeline as an MLflow experiment. This is NON-NEGOTIABLE regardless of whether the use case uses traditional ML or not -- every use case must be tracked as an experiment.
 
 Genie must generate code that does ALL of the following:
 - Set or create the MLflow experiment with name: `{use_case_id}_<descriptive_name>` (e.g., "{use_case_id}_Flight_Disruption_Severity")
 - Start an MLflow run within that experiment
-- Log parameters: all key configuration choices Genie made (data filters, time windows, feature count, model type if ML is used, ai_query model name, temperature, row count processed)
-- Log metrics: data quality metrics (record count, completeness score, outlier count), and if ML is used, log evaluation metrics (accuracy, F1, AUC, RMSE, etc. as appropriate)
+- Log parameters: all key configuration choices Genie made (data filters, time windows, feature count, model type, algorithm family used, ai_query model name, temperature, row count processed)
+- Log metrics: data quality metrics (record count, completeness score, outlier count), and if ML is used, log evaluation metrics (accuracy, F1, AUC, RMSE, silhouette score, etc. as appropriate for the technique)
 - Log the ai_query prompt template as an artifact (the format_string template text)
 - Log the output table name and use_case_id as tags
 - Register the model in the MLflow Model Registry if ML is used (model name: "{use_case_id}_model")
@@ -5807,7 +6264,7 @@ Genie must generate code that does ALL of the following:
 
 Genie decides the exact MLflow API calls (mlflow.set_experiment, mlflow.start_run, mlflow.log_param, mlflow.log_metric, mlflow.log_artifact, mlflow.register_model, etc.) and the code structure. The instruction above defines WHAT must be tracked, not HOW to code it.
 
-**PART D -- Lakeview Dashboard:**
+**PART E -- Lakeview Dashboard:**
 - Dashboard name: include "{use_case_id}" for traceability
 - Specify 8-15 widgets by NAME, chart type, and which output columns they visualize
 - Each widget must answer a specific business question
@@ -5828,7 +6285,7 @@ Genie decides HOW to populate this table AND which specific columns to include. 
 
 1. **Business & Entity Columns (expect 5-15 columns)** -- Entity identifiers (IDs, codes, names), geographic dimensions, temporal dimensions, and categorical attributes from the source tables. Describe what KINDS of entity attributes matter for this use case (e.g., "customer identifiers and segmentation attributes", "asset IDs and location hierarchies"). Genie inspects input schemas and selects the relevant columns.
 
-2. **Analytical & Statistical Columns (expect 5-10 columns)** -- Computed metrics, scores, rankings, statistical measures, and derived features. If ML is used: predictions and model metadata. Describe what KINDS of analytics this use case needs (e.g., "trend metrics, volatility measures, peer comparisons"). Genie decides the specific computations.
+2. **Analytical & Statistical Columns (expect 8-15 columns)** -- Pre-computed analytical outputs from the ML/statistical pipeline that feed into ai_query. These MUST include the technique-appropriate model outputs: anomaly scores and anomaly flags (for Anomaly Detection), prediction probabilities and feature importance scores (for Classification/Predictive Modeling), cluster assignments and distance-to-centroid (for Clustering/Segmentation), forecast values and confidence intervals (for Forecasting), regression coefficients and residuals (for Regression Analysis), survival probabilities and hazard ratios (for Survival Analysis), recommendation scores (for Recommendation), centrality metrics (for Network Analysis), optimal values (for Optimization), scenario outcomes (for Simulation). Also include computed business metrics, statistical measures (z-scores, percentiles, standard deviations), peer comparison scores, and derived features. Genie decides the specific computations within the technique-appropriate framework.
 
 3. **Data Quality Columns (REQUIRED naming convention, 2-4 columns):**
    - `data_sufficiency_flag` (STRING), `data_completeness_score` (DECIMAL), and outlier flags as appropriate for the domain
@@ -5868,8 +6325,9 @@ Generate constraints that are SPECIFIC to this use case -- reference the actual 
 Generate remarks covering these topics with domain-specific detail:
 
 - **Quantification Mandate:** Every ai_txt_ column must cite specific numbers from the input data. Give examples of good vs bad (e.g., "load_volatility of 12.3 percentage points, which is 2.1 standard deviations above cohort mean" vs "high volatility"). Never use vague qualifiers without numbers.
-- **Enrichment Autonomy:** Genie has FULL autonomy over implementation. It may join any table, use any algorithm, engineer any features, and choose SQL or Python or PySpark. The ONLY non-negotiables are: (1) the final output table with the required column categories and naming conventions from Section 5, and (2) the ai_query step using the exact syntax from Section 4. Genie determines the specific columns by inspecting the input schemas.
+- **Analytical Approach Mandate and Implementation Autonomy:** Genie MUST use the technique-appropriate analytical approach specified in Section 4 Part A. The analytics technique for this use case is `{analytics_technique}`. Genie MUST apply the algorithm family directed in Part A -- it has full autonomy over the SPECIFIC algorithm choice within that family, hyperparameters, feature engineering, join strategy, and code structure (SQL, Python, PySpark, or hybrid). The non-negotiables are: (1) the analytical approach MUST match the technique directive from Section 4 Part A -- SQL-only implementations are acceptable ONLY for techniques where SQL is genuinely the best tool (Pareto Analysis, basic Funnel Analysis, Cohort Analysis construction); for all ML-designated techniques (Anomaly Detection, Classification, Predictive Modeling, Clustering, Segmentation, Forecasting, Regression Analysis, Survival Analysis, Recommendation, Network Analysis, Optimization, Simulation), Genie MUST train or apply ML/statistical models -- falling back to SQL thresholds, z-scores, CASE WHEN, or window functions alone is a FAILURE; (2) the final output table with the required column categories and naming conventions from Section 5; (3) ai_query as the final EXPLANATION layer using the exact syntax from Section 4 Part C, receiving pre-computed analytical results and generating business narratives. Genie determines the specific columns by inspecting the input schemas.
 - **End-to-End Execution:** Genie must run the complete pipeline end-to-end: data extraction, analysis, ai_query enrichment, table creation, and dashboard generation. If any step fails, implement error handling (flag affected records with data quality columns, continue processing remaining records).
+- **Query Tag (MANDATORY FINAL STEP -- NON-NEGOTIABLE):** After ALL processing, table creation, verification queries, MLflow registration, and dashboard generation are 100% complete, the absolute last executable statements in the notebook must set a Databricks session QUERY_TAG and then execute a single-row SELECT from the result table. The tag must be: `SET QUERY_TAGS['dbx_inspire_code_run_summary'] = "{{'business':'{business_name}','use_case':'{use_case_id}-{use_case_name}','duration_hrs':'<total_notebook_elapsed_hrs>','ai_input_tokens':<total_ai_input_tokens>,'ai_output_tokens':<total_ai_output_tokens>}}"` where duration_hrs is the wall-clock elapsed time of the entire notebook execution in hours (compute as: (end_time - start_time) / 3600) and ai_input_tokens and ai_output_tokens are the cumulative token counts from all ai_query calls in the notebook (Genie must track these counts as the pipeline runs by summing token usage from each ai_query invocation). Immediately after the SET statement, execute `SELECT * FROM {result_table} LIMIT 1`. Wrap both statements in error handling (try/except in Python or equivalent) so they NEVER cause the notebook to fail under any circumstance (incompatible Databricks runtime, missing table, permission error, syntax error, etc.). Do NOT add any comments, markdown cells, or explanatory text around these two statements -- silent execution only.
 - **Self-Critique:** Write a markdown cell rating the implementation 1-10. Include a Missing Data Table: | Data Source | Impact on Accuracy | What It Would Enable | Priority |. Be SPECIFIC about each missing source and its estimated impact.
 - **Dashboard Idempotency:** Check if dashboard exists before creating. Use semantically meaningful color schemes: red/warm tones for Critical/High urgency or risk, amber/gold for Medium, green/cool tones for Stable/Low. Include filters for key dimensions (entity type, classification, importance, urgency) so users can drill down. Add a text widget at the top with use case context, last refresh timestamp, and usage instructions for the consuming team.
 - No `ai_sys_missing_data` column -- missing data commentary belongs in ai_sys_feedback and the self-critique cell.
@@ -10593,9 +11051,9 @@ class DatabricksInspire:
         if self.table_election_mode not in ("Let Inspire Decides", "All Tables", "Transactional Only"):
             self.table_election_mode = "Let Inspire Decides"
         
-        self.use_cases_quality = kwargs.get("use_cases_quality", "High Quality")
+        self.use_cases_quality = kwargs.get("use_cases_quality", "Good Quality")
         if self.use_cases_quality not in ("Good Quality", "High Quality", "Very High Quality"):
-            self.use_cases_quality = "High Quality"
+            self.use_cases_quality = "Good Quality"
         
 
         self.generate_genie_instructions = "Genie Code Instructions" in self.generate_choices
@@ -13110,6 +13568,8 @@ Start your response with the CSV header line: use_case_id,domain
         self.logger.info("All artifact writing jobs completed.")
 
     def run(self):
+        import time
+        self._run_start_time = time.time()
         self.logger.info(f"Starting tasks: {self.generate_choices}, Operation Mode: {self.operation_mode}")
         self.logger.info(f"🔑 Session ID: {self.session_id}")
         log_print(f"🔑 Inspire Session ID: {self.session_id}")
@@ -13374,9 +13834,9 @@ Start your response with the CSV header line: use_case_id,domain
                 accumulated_schema_size = 0
                 batches_to_process = []  # List of (batch_num, column_details) tuples
                 
-                # Get the base prompt template size estimate
                 base_prompt_template = PROMPT_TEMPLATES.get("BASE_USE_CASE_GEN_PROMPT", "")
-                base_template_size = len(base_prompt_template) + len(document_context_markdown)
+                _quality_gate_size = len(QUALITY_GATE_GENERATION_BLOCKS.get(self.use_cases_quality, QUALITY_GATE_GOOD))
+                base_template_size = len(base_prompt_template) + len(document_context_markdown) + _quality_gate_size
                 base_prompt_size = base_template_size + 2000
                 self.logger.debug(f"Base prompt template size: {base_template_size} chars, context limit: {use_case_gen_context_limit}")
                 
@@ -13512,8 +13972,8 @@ Start your response with the CSV header line: use_case_id,domain
                 
                 self._business_column_details_global = business_details
                 self.global_table_names = {f"{c}.{s}.{t}" for (c, s, t, _, _, _) in business_details}
+                self._known_hallucinated_tables = set()
                 
-                # Store business_scores for later use in truncation
                 self.business_scores = business_scores
                 self.data_category_map = data_category_map
                 
@@ -13914,7 +14374,7 @@ Start your response with the CSV header line: use_case_id,domain
                     del transactional_batches
                     gc.collect()
                     self.logger.debug("🧹 Memory cleanup after PASS 2")
-                elif not transactional_batches:
+                elif not transactional_batches and not _pass1_already_tx_only:
                     self.logger.info("⚠️ PASS 2 skipped: No transactional tables found for ensemble pass")
                 
                 log_print(f"\n{'='*60}")
@@ -14434,7 +14894,88 @@ Start your response with the CSV header line: use_case_id,domain
         self.ai_agent.get_manager_stats_report()
             
 
-    # === MODIFIED: _get_salesy_summary (Req 2) ===
+    def _find_sql_warehouse(self):
+        try:
+            from databricks.sdk.service.sql import State as WarehouseState
+            warehouses = list(self.workspace.warehouses.list())
+            running_serverless = [
+                w for w in warehouses
+                if getattr(w, "state", None) == WarehouseState.RUNNING
+                and getattr(w, "enable_serverless_compute", False)
+            ]
+            if running_serverless:
+                return running_serverless[0].id
+            running_any = [
+                w for w in warehouses
+                if getattr(w, "state", None) == WarehouseState.RUNNING
+            ]
+            if running_any:
+                return running_any[0].id
+            if warehouses:
+                return warehouses[0].id
+        except Exception as e:
+            self.logger.debug(f"Could not list SQL warehouses: {get_clean_error_message(e)}")
+        return None
+
+    def _emit_run_summary_query_tag(self):
+        import json
+        import time
+
+        _runtime = TECHNICAL_CONTEXT.get("runtime", {})
+        _tag_label = _runtime.get("query_tag_label", "dbx_inspire_agent_run_summary")
+
+        duration_hrs = 0.0
+        if hasattr(self, '_run_start_time') and self._run_start_time:
+            duration_hrs = round((time.time() - self._run_start_time) / 3600, 3)
+
+        ai_input_tokens = int(AIAgent._total_input_chars / 4)
+        ai_output_tokens = int(AIAgent._total_output_chars / 4)
+
+        business = str(self.business_name or "").replace("'", "").replace('"', '').replace("\\", "")[:100]
+
+        tag_dict = {
+            "business": business,
+            "duration_hrs": str(duration_hrs),
+            "ai_input_tokens": ai_input_tokens,
+            "ai_output_tokens": ai_output_tokens,
+        }
+        tag_json = json.dumps(tag_dict, separators=(",", ":"))
+
+        select_sql = f"SELECT * FROM {self._tracking_table_name} LIMIT 1" if self._tracking_table_name else "SELECT 1"
+
+        tag_emitted = False
+        try:
+            from databricks.sdk.service.sql import QueryTag
+            wh_id = self._find_sql_warehouse()
+            if wh_id:
+                self.workspace.statement_execution.execute_statement(
+                    warehouse_id=wh_id,
+                    statement=select_sql,
+                    query_tags=[QueryTag(key=_tag_label, value=tag_json)],
+                    wait_timeout="30s",
+                )
+                tag_emitted = True
+                self.logger.info(f"Query tag emitted via Statement Execution API (warehouse={wh_id}, tag={_tag_label})")
+            else:
+                self.logger.warning("No SQL warehouse found — cannot emit query tag via Statement Execution API")
+        except Exception as e:
+            self.logger.warning(f"Statement Execution API tag emission failed: {get_clean_error_message(e)}")
+
+        if not tag_emitted:
+            safe_value = tag_json.replace("'", "''")
+            try:
+                self.spark.sql(f"SET QUERY_TAGS['{_tag_label}'] = '{safe_value}'")
+                self.spark.sql(select_sql)
+                tag_emitted = True
+                self.logger.info(f"Query tag emitted via SET QUERY_TAGS (spark.sql)")
+            except Exception as e:
+                self.logger.warning(f"SET QUERY_TAGS fallback also failed: {get_clean_error_message(e)}")
+
+        if not tag_emitted:
+            self.logger.warning(
+                f"Could not emit query tag via any method. Tag payload: {_tag_label}={tag_json}"
+            )
+
     def _get_salesy_summary(self, grouped_data: dict, business_name: str, language: str, translations: dict) -> tuple:
         self.logger.debug(f"Calling LLM for executive and domain summaries in {language}...")
         t = translations
@@ -15627,7 +16168,49 @@ Start your response with: {{{{"honesty_score":
                                     for uc in subdomain_assigned_use_cases:
                                         if uc.get('Subdomain', '').strip() == small_sd:
                                             uc['Subdomain'] = largest_subdomain
-                            remaining_violations = [v for v in violations if "has only" not in v]
+                                    subdomain_usecases[largest_subdomain].extend(subdomain_usecases.pop(small_sd))
+                            
+                            max_subdomains = 10
+                            
+                            def _find_best_merge_target(src_sd, candidates, sd_usecases):
+                                src_words = set(src_sd.lower().split())
+                                src_uc_names = {uc.get('Name', '').lower() for uc in sd_usecases[src_sd]}
+                                best_target = None
+                                best_score = -1
+                                for cand in candidates:
+                                    if cand == src_sd:
+                                        continue
+                                    cand_words = set(cand.lower().split())
+                                    name_overlap = sum(
+                                        1 for uc in sd_usecases[cand]
+                                        if any(w in uc.get('Name', '').lower() for w in src_words)
+                                    )
+                                    word_overlap = len(src_words & cand_words)
+                                    score = word_overlap * 10 + name_overlap
+                                    if score > best_score:
+                                        best_score = score
+                                        best_target = cand
+                                if best_target is None:
+                                    best_target = min(
+                                        (c for c in candidates if c != src_sd),
+                                        key=lambda c: len(sd_usecases[c])
+                                    )
+                                return best_target
+                            
+                            while len(subdomain_usecases) > max_subdomains:
+                                sorted_sds = sorted(subdomain_usecases.keys(), key=lambda sd: len(subdomain_usecases[sd]))
+                                smallest_sd = sorted_sds[0]
+                                merge_target = _find_best_merge_target(smallest_sd, list(subdomain_usecases.keys()), subdomain_usecases)
+                                self.logger.warning(
+                                    f"{log_prefix} Too many subdomains ({len(subdomain_usecases)}>{max_subdomains}). "
+                                    f"Merging '{smallest_sd}' ({len(subdomain_usecases[smallest_sd])} UCs) into '{merge_target}' ({len(subdomain_usecases[merge_target])} UCs)"
+                                )
+                                for uc in subdomain_assigned_use_cases:
+                                    if uc.get('Subdomain', '').strip() == smallest_sd:
+                                        uc['Subdomain'] = merge_target
+                                subdomain_usecases[merge_target].extend(subdomain_usecases.pop(smallest_sd))
+                            
+                            remaining_violations = [v for v in violations if "has only" not in v and "Too many subdomains" not in v]
                             if remaining_violations:
                                 self.logger.warning(f"{log_prefix} Remaining violations after auto-fix: {'; '.join(remaining_violations[:3])}")
                             return subdomain_assigned_use_cases
@@ -15929,22 +16512,23 @@ Start your response with: {{{{"honesty_score":
     
     def _priority_sort_key(self, use_case: dict) -> tuple:
         """
-        Returns a tuple for sorting use cases by priority (descending).
-        Very High -> High -> Medium -> Low -> Very Low
+        Returns a tuple for sorting use cases by Quality label (descending).
+        Ultra High -> Very High -> High -> Medium -> Low -> Very Low -> Ultra Low
         """
-        priority_map = {
-            "Very High": 0,
-            "High": 1,
-            "Medium": 2,
-            "Low": 3,
-            "Very Low": 4,
-            "N/A": 5
+        quality_map = {
+            "Ultra High": 0,
+            "Very High": 1,
+            "High": 2,
+            "Medium": 3,
+            "Low": 4,
+            "Very Low": 5,
+            "Ultra Low": 6,
+            "N/A": 7
         }
         quality_label = use_case.get('Quality', 'N/A')
-        priority_order = priority_map.get(quality_label, 5)
-        # Secondary sort by use case number for stability
+        quality_order = quality_map.get(quality_label, 7)
         use_case_no = use_case.get('No', 'N-999-AI')
-        return (priority_order, use_case_no)
+        return (quality_order, use_case_no)
     
     def _natural_sort_key(self, use_case: dict) -> tuple:
         """
@@ -17157,6 +17741,8 @@ Start your response with: {{{{"honesty_score":
                     return default
                 return str(value)
             
+            _quality_sort_order = {'Ultra High': 0, 'Very High': 1, 'High': 2, 'Medium': 3, 'Low': 4, 'Very Low': 5, 'Ultra Low': 6, 'N/A': 7}
+            
             for domain, use_cases in grouped_data.items():
                 for uc in use_cases:
                     data_rows.append([
@@ -17165,41 +17751,40 @@ Start your response with: {{{{"honesty_score":
                         safe_str(uc.get('Subdomain'), 'N/A'),                          # 2 - Subdomain (C)
                         safe_str(self._normalize_usecase(uc.get('usecase', ''), uc.get('Name', '')), 'N/A'),  # 3 - Use Case (D)
                         safe_str(uc.get('Name'), 'N/A'),                               # 4 - Description (E)
-                        safe_str(uc.get('generated', 'N/A'), 'N/A'),                   # 5 - SQL Generated (F)
-                        safe_str(uc.get('type'), 'N/A'),                               # 6 - Type (G)
-                        safe_str(uc.get('Analytics Technique'), 'N/A'),                # 7 - Analytics Technique (H)
-                        safe_str(uc.get('Business Priority Alignment'), 'General Improvement'),  # 8 - Business Priority Alignment (I)
-                        safe_str(uc.get('Strategic Goals Alignment'), 'General Improvement'),    # 9 - Strategic Goals Alignment (J)
-                        safe_str(uc.get('Statement'), 'N/A'),                          # 10 - Statement (K)
-                        safe_str(uc.get('Solution'), 'N/A'),                           # 11 - Solution (L)
-                        safe_str(uc.get('Business Value'), 'N/A'),                     # 12 - Business Value (M)
-                        safe_str(uc.get('Beneficiary'), 'N/A'),                        # 13 - Beneficiary (N)
-                        safe_str(uc.get('Sponsor'), 'N/A'),                            # 14 - Sponsor (O)
-                        safe_str(uc.get('Tables Involved'), 'N/A'),                    # 15 - Tables Involved (P)
-                        safe_str(uc.get('Primary Table'), 'N/A'),                      # 16 - Primary Table (Q)
-                        uc.get('Strategic Alignment', 0),                              # 17 - Strategic Alignment (R)
-                        uc.get('Return on Investment', 0),                             # 18 - ROI (S)
-                        uc.get('Reusability', 0),                                      # 19 - Reusability (T)
-                        uc.get('Time to Value', 0),                                    # 20 - Time to Value (U)
-                        uc.get('Data Availability', 0),                                # 21 - Data Availability (V)
-                        uc.get('Data Accessibility', 0),                               # 22 - Data Accessibility (W)
-                        uc.get('Architecture Fitness', 0),                             # 23 - Architecture Fitness (X)
-                        uc.get('Team Skills', 0),                                      # 24 - Team Skills (Y)
-                        uc.get('Domain Knowledge', 0),                                 # 25 - Domain Knowledge (Z)
-                        uc.get('People Allocation', 0),                                # 26 - People Allocation (AA)
-                        uc.get('Budget Allocation', 0),                                # 27 - Budget Allocation (AB)
-                        uc.get('Time to Production', 0),                               # 28 - Time to Production (AC)
-                        uc.get('Value', 0),                                            # 29 - Value (AD)
-                        uc.get('Feasibility', 0),                                      # 30 - Feasibility (AE)
-                        uc.get('Priority', 0),                                         # 31 - Priority (AF)
-                        safe_str(uc.get('Quality'), 'N/A'),                            # 32 - Quality (AG)
-                        safe_str(uc.get('Justification'), 'N/A'),                      # 33 - Priority Reasons (AH)
-                        safe_str(uc.get('Quality Summary'), 'N/A'),                    # 34 - Quality Reasons (AI)
-                        safe_str(uc.get('result_table'), 'N/A'),                       # 35 - Result Database (AJ)
+                        safe_str(uc.get('type'), 'N/A'),                               # 5 - Type (F)
+                        safe_str(uc.get('Analytics Technique'), 'N/A'),                # 6 - Analytics Technique (G)
+                        safe_str(uc.get('Business Priority Alignment'), 'General Improvement'),  # 7 - Business Priority Alignment (H)
+                        safe_str(uc.get('Strategic Goals Alignment'), 'General Improvement'),    # 8 - Strategic Goals Alignment (I)
+                        safe_str(uc.get('Statement'), 'N/A'),                          # 9 - Statement (J)
+                        safe_str(uc.get('Solution'), 'N/A'),                           # 10 - Solution (K)
+                        safe_str(uc.get('Business Value'), 'N/A'),                     # 11 - Business Value (L)
+                        safe_str(uc.get('Beneficiary'), 'N/A'),                        # 12 - Beneficiary (M)
+                        safe_str(uc.get('Sponsor'), 'N/A'),                            # 13 - Sponsor (N)
+                        safe_str(uc.get('Tables Involved'), 'N/A'),                    # 14 - Tables Involved (O)
+                        safe_str(uc.get('Primary Table'), 'N/A'),                      # 15 - Primary Table (P)
+                        uc.get('Strategic Alignment', 0),                              # 16 - Strategic Alignment (Q)
+                        uc.get('Return on Investment', 0),                             # 17 - ROI (R)
+                        uc.get('Reusability', 0),                                      # 18 - Reusability (S)
+                        uc.get('Time to Value', 0),                                    # 19 - Time to Value (T)
+                        uc.get('Data Availability', 0),                                # 20 - Data Availability (U)
+                        uc.get('Data Accessibility', 0),                               # 21 - Data Accessibility (V)
+                        uc.get('Architecture Fitness', 0),                             # 22 - Architecture Fitness (W)
+                        uc.get('Team Skills', 0),                                      # 23 - Team Skills (X)
+                        uc.get('Domain Knowledge', 0),                                 # 24 - Domain Knowledge (Y)
+                        uc.get('People Allocation', 0),                                # 25 - People Allocation (Z)
+                        uc.get('Budget Allocation', 0),                                # 26 - Budget Allocation (AA)
+                        uc.get('Time to Production', 0),                               # 27 - Time to Production (AB)
+                        uc.get('Value', 0),                                            # 28 - Value (AC)
+                        uc.get('Feasibility', 0),                                      # 29 - Feasibility (AD)
+                        uc.get('Priority', 0),                                         # 30 - Priority (AE)
+                        safe_str(uc.get('Quality'), 'N/A'),                            # 31 - Quality (AF)
+                        safe_str(uc.get('Justification'), 'N/A'),                      # 32 - Priority Reasons (AG)
+                        safe_str(uc.get('Quality Summary'), 'N/A'),                    # 33 - Quality Reasons (AH)
+                        safe_str(uc.get('result_table'), 'N/A'),                       # 34 - Result Database (AI)
                     ])
             
-            priority_score_idx = 31
-            data_rows.sort(key=lambda row: float(row[priority_score_idx]) if isinstance(row[priority_score_idx], (int, float)) else 0, reverse=True)
+            quality_label_idx = 31
+            data_rows.sort(key=lambda row: _quality_sort_order.get(str(row[quality_label_idx]), 7))
             
             if not data_rows:
                 self.logger.warning(f"No data to write to Excel for {language}. Skipping.")
@@ -17250,7 +17835,7 @@ Start your response with: {{{{"honesty_score":
             })
             
             headers = [
-                "ID", "Business Domain", "Subdomain", "Use Case", "Description", "SQL Generated",
+                "ID", "Business Domain", "Subdomain", "Use Case", "Description",
                 "Type", "Analytics Technique",
                 "Business Priority Alignment", "Strategic Goals Alignment",
                 "Statement", "Solution", "Business Value", "Beneficiary", "Sponsor",
@@ -17263,16 +17848,38 @@ Start your response with: {{{{"honesty_score":
                 "Result Database",
             ]
             
+            _quality_color_map = {
+                'Ultra High': '#196F3D',
+                'Very High':  '#27AE60',
+                'High':       '#52BE80',
+                'Medium':     '#F4D03F',
+                'Low':        '#E67E22',
+                'Very Low':   '#E74C3C',
+                'Ultra Low':  '#922B21',
+            }
+            
             # Write headers
             for col_num, header in enumerate(headers):
                 worksheet.write(0, col_num, header, header_format)
             
             # Write data rows
             for row_num, row_data in enumerate(data_rows, start=1):
-                numeric_start = 17  # Strategic Alignment score (index 17)
-                numeric_end = 31    # Priority (index 31)
+                numeric_start = 16  # Strategic Alignment score (index 16)
+                numeric_end = 30    # Priority (index 30)
                 for col_num, cell_data in enumerate(row_data):
-                    if col_num >= numeric_start and col_num <= numeric_end:
+                    if col_num == quality_label_idx:
+                        quality_val = str(cell_data) if cell_data else 'N/A'
+                        bg_color = _quality_color_map.get(quality_val)
+                        if bg_color:
+                            quality_fmt = workbook.add_format({
+                                'border': 1, 'align': 'center', 'valign': 'vcenter',
+                                'text_wrap': True, 'font_size': 10, 'bold': True,
+                                'font_color': 'white', 'bg_color': bg_color,
+                            })
+                            worksheet.write(row_num, col_num, quality_val, quality_fmt)
+                        else:
+                            worksheet.write(row_num, col_num, quality_val, cell_format)
+                    elif col_num >= numeric_start and col_num <= numeric_end:
                         try:
                             numeric_value = float(cell_data) if cell_data not in ['N/A', '', None] else 0
                             worksheet.write_number(row_num, col_num, numeric_value, numeric_format)
@@ -17306,20 +17913,20 @@ Start your response with: {{{{"honesty_score":
             })
             
             scoring_columns = [
-                (17, '#4472C4'),  # Strategic Alignment
-                (18, '#ED7D31'),  # ROI
-                (19, '#A5A5A5'),  # Reusability
-                (20, '#FFC000'),  # Time to Value
-                (21, '#5B9BD5'),  # Data Availability
-                (22, '#70AD47'),  # Data Accessibility
-                (23, '#264478'),  # Architecture Fitness
-                (24, '#9E480E'),  # Team Skills
-                (25, '#636363'),  # Domain Knowledge
-                (26, '#997300'),  # People Allocation
-                (27, '#255E91'),  # Budget Allocation
-                (28, '#43682B'),  # Time to Production
-                (29, ACCENT),     # Value
-                (30, SECONDARY),  # Feasibility
+                (16, '#4472C4'),  # Strategic Alignment
+                (17, '#ED7D31'),  # ROI
+                (18, '#A5A5A5'),  # Reusability
+                (19, '#FFC000'),  # Time to Value
+                (20, '#5B9BD5'),  # Data Availability
+                (21, '#70AD47'),  # Data Accessibility
+                (22, '#264478'),  # Architecture Fitness
+                (23, '#9E480E'),  # Team Skills
+                (24, '#636363'),  # Domain Knowledge
+                (25, '#997300'),  # People Allocation
+                (26, '#255E91'),  # Budget Allocation
+                (27, '#43682B'),  # Time to Production
+                (28, ACCENT),     # Value
+                (29, SECONDARY),  # Feasibility
             ]
             
             for col_idx, bar_color in scoring_columns:
@@ -17328,13 +17935,6 @@ Start your response with: {{{{"honesty_score":
                     'bar_color': bar_color,
                     'bar_only': False
                 })
-            
-            worksheet.conditional_format(1, 31, last_row, 31, {
-                'type': '3_color_scale',
-                'min_color': '#F8696B',
-                'mid_color': '#FFEB84',
-                'max_color': '#63BE7B'
-            })
             
             # Graph sheet removed per user request - no longer needed
             
@@ -17461,7 +18061,7 @@ Start your response with: {{{{"honesty_score":
         try:
             data_rows = []
             headers = [
-                "ID", "Business Domain", "Subdomain", "Use Case", "Description", "SQL Generated",
+                "ID", "Business Domain", "Subdomain", "Use Case", "Description",
                 "Type", "Analytics Technique",
                 "Business Priority Alignment", "Strategic Goals Alignment",
                 "Statement", "Solution", "Business Value", "Beneficiary", "Sponsor",
@@ -17474,6 +18074,8 @@ Start your response with: {{{{"honesty_score":
                 "Result Database",
             ]
             
+            _quality_sort_order = {'Ultra High': 0, 'Very High': 1, 'High': 2, 'Medium': 3, 'Low': 4, 'Very Low': 5, 'Ultra Low': 6, 'N/A': 7}
+            
             for domain, use_cases in grouped_data.items():
                 for uc in use_cases:
                     data_rows.append([
@@ -17482,7 +18084,6 @@ Start your response with: {{{{"honesty_score":
                         uc.get('Subdomain', 'N/A'),
                         self._normalize_usecase(uc.get('usecase', ''), uc.get('Name', '')),
                         uc.get('Name', 'N/A'),
-                        uc.get('generated', 'N/A'),
                         uc.get('type', 'N/A'),
                         uc.get('Analytics Technique', 'N/A'),
                         uc.get('Business Priority Alignment', 'General Improvement'),
@@ -17515,8 +18116,7 @@ Start your response with: {{{{"honesty_score":
                         uc.get('result_table', 'N/A'),
                     ])
             
-            # Sort by Priority descending (index 31)
-            data_rows.sort(key=lambda row: float(row[31]) if isinstance(row[31], (int, float)) else 0, reverse=True)
+            data_rows.sort(key=lambda row: _quality_sort_order.get(str(row[31]), 7))
             
             if not data_rows:
                 self.logger.warning(f"No data to write to CSV for {language}. Skipping.")
@@ -18911,10 +19511,22 @@ Start your response with: {{{{"honesty_score":
                         self.logger.warning(f"{log_prefix} Skipping row with invalid No field: {use_case_no}")
                         continue
                     
+                    _honesty_noise = ('honesty', 'self-assessment', 'score:', 'justification')
                     _no_lower = use_case_no.lower()
-                    _honesty_noise = ('honesty', 'self-assessment', 'score:', 'justification', '**')
                     if any(marker in _no_lower for marker in _honesty_noise):
                         self.logger.warning(f"{log_prefix} Skipping non-data row (honesty/meta text in No field): {use_case_no[:80]}")
+                        continue
+                    
+                    _all_values_concat = ' '.join(
+                        str(v).lower() for v in row_dict.values() if v
+                    )
+                    _meta_line_markers = ('honesty_score:', 'honesty_justification:', 'honesty self-assessment', '**honesty self-assessment')
+                    if any(m in _all_values_concat for m in _meta_line_markers):
+                        _meta_fields = [
+                            f"{k}={str(v)[:40]}" for k, v in row_dict.items()
+                            if v and any(m in str(v).lower() for m in _meta_line_markers)
+                        ]
+                        self.logger.warning(f"{log_prefix} Skipping non-data row (honesty/meta text leaked into fields: {', '.join(_meta_fields[:3])})")
                         continue
                     
                     # Extract Analytics Technique from LLM response (with fallback)
@@ -19311,7 +19923,8 @@ The user provided Strategic Goals that MUST be followed during generation.
    * The Business Domain field MUST exactly match one of these domains."""
         else:
             focus_areas_instruction = ""
-        base_prompt_size = len(prompt_template) + len(business_context) + len(business_priorities_text) + len(strategic_initiative) + len(value_chain) + len(revenue_model) + len(strategic_goals_text) + len(additional_context_section) + len(focus_areas_instruction) + len(previous_use_cases_feedback) + 1000
+        _quality_gate_size = len(QUALITY_GATE_GENERATION_BLOCKS.get(self.use_cases_quality, QUALITY_GATE_GOOD))
+        base_prompt_size = len(prompt_template) + _quality_gate_size + len(business_context) + len(business_priorities_text) + len(strategic_initiative) + len(value_chain) + len(revenue_model) + len(strategic_goals_text) + len(additional_context_section) + len(focus_areas_instruction) + len(previous_use_cases_feedback) + 1000
         
         self.logger.info(f"{log_prefix} Starting batch processing with {len(column_details)} columns from {len(set([c[2] for c in column_details]))} tables")
         all_tables_in_call = sorted({f"{c[0]}.{c[1]}.{c[2]}" for c in column_details})
@@ -19324,6 +19937,7 @@ The user provided Strategic Goals that MUST be followed during generation.
         if _ctx_tables:
             log_print(f"{log_prefix} CONTEXT tables ({len(_ctx_tables)}): {', '.join(_ctx_tables)}")
         
+        _hallucination_feedback = ""
         for attempt in range(1, max_attempts + 1):
             try:
                 if attempt > 1:
@@ -19429,6 +20043,14 @@ The user provided Strategic Goals that MUST be followed during generation.
                         table_lines.append(f"- `{t}` (FK-RELATED — available for JOINs)")
                 
                 all_allowed_tables = sorted(set(all_batch_tables) | fk_only_tables)
+                _known_bad = getattr(self, '_known_hallucinated_tables', set())
+                _known_bad_block = ""
+                if _known_bad:
+                    _known_bad_block = (
+                        "\n\n**⛔ KNOWN HALLUCINATED TABLES (from other batches — DO NOT USE):**\n"
+                        + "\n".join(f"- ❌ `{t}` — DOES NOT EXIST" for t in sorted(_known_bad))
+                        + "\n"
+                    )
                 allowed_tables_block = (
                     "\n\n### 🚨 ALLOWED TABLES REGISTRY (EXHAUSTIVE LIST) 🚨\n"
                     "**You may ONLY use tables from this list. ANY other table name is HALLUCINATION and will be REJECTED.**\n"
@@ -19437,8 +20059,17 @@ The user provided Strategic Goals that MUST be followed during generation.
                     "**The analytical question must always derive from EVENTS in transactional data, not from static entity attributes.**\n\n"
                     + "\n".join(table_lines)
                     + "\n\n**Total allowed tables: " + str(len(all_allowed_tables)) + ". NO OTHER TABLES EXIST.**\n"
+                    + _known_bad_block
                 )
                 schema_markdown = schema_markdown + allowed_tables_block
+                
+                _effective_additional_context = additional_context_section
+                if _hallucination_feedback:
+                    _effective_additional_context = additional_context_section + _hallucination_feedback
+                
+                _quality_gate_text = QUALITY_GATE_GENERATION_BLOCKS.get(
+                    self.use_cases_quality, QUALITY_GATE_GOOD
+                )
                 
                 prompt_vars = {
                     "schema_markdown": schema_markdown,
@@ -19449,9 +20080,10 @@ The user provided Strategic Goals that MUST be followed during generation.
                     "value_chain": value_chain,
                     "revenue_model": revenue_model,
                     "strategic_goals": strategic_goals_text,
-                    "additional_context_section": additional_context_section,
+                    "additional_context_section": _effective_additional_context,
                     "focus_areas_instruction": focus_areas_instruction,
-                    "previous_use_cases_feedback": previous_use_cases_feedback
+                    "previous_use_cases_feedback": previous_use_cases_feedback,
+                    "quality_gate_block": _quality_gate_text,
                 }
                 
                 # PROACTIVE CHECK: Estimate prompt size and split BEFORE attempting LLM call
@@ -19524,6 +20156,28 @@ The user provided Strategic Goals that MUST be followed during generation.
                         for i, uc in enumerate(hallucinated_use_cases[:3]):
                             self.logger.warning(f"{log_prefix}    Example {i+1}: {uc.get('No')}: {uc.get('Name')} - {uc.get('hallucination_reason')}")
                         if attempt < max_attempts:
+                            _bad_tables = set()
+                            for uc in hallucinated_use_cases:
+                                reason = uc.get('hallucination_reason', '')
+                                if 'Tables not found' in reason:
+                                    for t in reason.replace('Tables not found in schema: ', '').split(', '):
+                                        t = t.strip()
+                                        if t:
+                                            _bad_tables.add(t)
+                            _cross_batch_tracker = getattr(self, '_known_hallucinated_tables', None)
+                            if _cross_batch_tracker is not None:
+                                _bad_tables.update(_cross_batch_tracker)
+                                _cross_batch_tracker.update(_bad_tables)
+                            if _bad_tables:
+                                _hallucination_feedback = (
+                                    "\n\n### 🚨 PREVIOUS ATTEMPT REJECTED — HALLUCINATED TABLES 🚨\n"
+                                    "Your previous response was REJECTED because you used tables that DO NOT EXIST.\n"
+                                    "The following table names are HALLUCINATIONS — they are NOT in the schema:\n"
+                                    + "\n".join(f"- ❌ `{t}` — DOES NOT EXIST" for t in sorted(_bad_tables))
+                                    + "\n\nYou MUST only use tables from the ALLOWED TABLES REGISTRY above. "
+                                    "Double-check EVERY table name against the registry before including it.\n"
+                                )
+                                self.logger.info(f"{log_prefix} Injecting hallucination feedback for retry: {len(_bad_tables)} hallucinated table(s)")
                             self.logger.warning(f"{log_prefix}    Retrying batch (attempt {attempt + 1}/{max_attempts}) because no valid use cases were returned")
                             continue
                         self.logger.error(f"{log_prefix} ❌ No valid use cases after {max_attempts} attempts due to hallucinated tables")
@@ -19532,6 +20186,15 @@ The user provided Strategic Goals that MUST be followed during generation.
                     self.logger.warning(f"{log_prefix} ⚠️ Table hallucination detected: {hallucinated_count}/{len(parsed_rows)} use cases ({hallucination_rate:.1f}%). Dropping hallucinated use cases and continuing with {valid_count} valid use cases.")
                     for i, uc in enumerate(hallucinated_use_cases[:3]):
                         self.logger.warning(f"{log_prefix}    Example {i+1}: {uc.get('No')}: {uc.get('Name')} - {uc.get('hallucination_reason')}")
+                    _cross_batch_tracker = getattr(self, '_known_hallucinated_tables', None)
+                    if _cross_batch_tracker is not None:
+                        for uc in hallucinated_use_cases:
+                            reason = uc.get('hallucination_reason', '')
+                            if 'Tables not found' in reason:
+                                for t in reason.replace('Tables not found in schema: ', '').split(', '):
+                                    t = t.strip()
+                                    if t:
+                                        _cross_batch_tracker.add(t)
                     parsed_rows = valid_use_cases
                 
                 # Re-number use cases with batch prefix
@@ -20223,13 +20886,19 @@ The user provided Strategic Goals that MUST be followed during generation.
             raw_revenue_model = enriched_ctx.get('revenue_model', '')
             enriched_revenue_model = str(raw_revenue_model).strip() if raw_revenue_model else 'Diversified revenue streams'
             
+            technique = use_case.get('Analytics Technique', 'AI Analysis')
+            technique_guidance = TECHNIQUE_IMPLEMENTATION_GUIDANCE.get(
+                technique, TECHNIQUE_IMPLEMENTATION_GUIDANCE.get('AI Analysis', '')
+            )
+            
             prompt_vars = {
                 "use_case_id": use_case_id,
                 "use_case_name": use_case.get('Name', ''),
                 "business_domain": use_case.get('Business Domain', ''),
                 "subdomain": use_case.get('Subdomain', ''),
                 "use_case_type": use_case.get('type', ''),
-                "analytics_technique": use_case.get('Analytics Technique', ''),
+                "analytics_technique": technique,
+                "technique_implementation_guidance": technique_guidance,
                 "statement": use_case.get('Statement', ''),
                 "solution": use_case.get('Solution', ''),
                 "business_value": use_case.get('Business Value', ''),
@@ -20570,7 +21239,9 @@ The user provided Strategic Goals that MUST be followed during generation.
                 is_llm_operation=True, logger=self.logger,
                 estimated_mb_per_worker=5.0
             )
-            base_workers = max(2, min(genie_parallelism, len(all_use_cases), 4))
+            _genie_adaptive_cap = 8 if len(all_use_cases) >= 30 else 6 if len(all_use_cases) >= 15 else 4
+            base_workers = max(2, min(genie_parallelism, len(all_use_cases), _genie_adaptive_cap))
+            self.logger.info(f"🔧 Genie parallelism: adaptive_cap={_genie_adaptive_cap} (for {len(all_use_cases)} UCs), base_workers={base_workers}")
             
             wave_parallelism = [
                 (1, base_workers),

@@ -69,7 +69,7 @@ def create_widgets():
             "High Quality",
             "Very High Quality"
         ]
-        dbutils.widgets.dropdown("05_use_cases_quality", "High Quality", use_cases_quality_options, "06. Use Cases Quality")
+        dbutils.widgets.dropdown("05_use_cases_quality", "Good Quality", use_cases_quality_options, "06. Use Cases Quality")
     except Exception as e:
         widget_errors.append(f"Use Cases Quality: {e}")
     

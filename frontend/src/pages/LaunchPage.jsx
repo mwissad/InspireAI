@@ -65,7 +65,7 @@ export default function LaunchPage({ settings, update, onLaunched }) {
     '06_business_domains': '',
     '07_business_priorities': '',
     '08_strategic_goals': '',
-    '09_generation_options': 'PDF Catalog',
+    '09_generation_options': 'Genie Code Instructions,PDF Catalog',
     '11_generation_path': './inspire_gen/',
     '12_documents_languages': 'English',
     '14_session_id': '',
@@ -97,7 +97,7 @@ export default function LaunchPage({ settings, update, onLaunched }) {
   const [metadataPreviewExpanded, setMetadataPreviewExpanded] = useState(false);
 
   // ── Multiselects ──
-  const [genChecks, setGenChecks] = useState({ 'PDF Catalog': true });
+  const [genChecks, setGenChecks] = useState({ 'Genie Code Instructions': true, 'PDF Catalog': true });
   const [priorityChecks, setPriorityChecks] = useState({});
 
 
@@ -618,12 +618,15 @@ export default function LaunchPage({ settings, update, onLaunched }) {
                       <button
                         key={opt.key}
                         type="button"
-                        onClick={() => setGenChecks((p) => ({ ...p, [opt.key]: !p[opt.key] }))}
+                        onClick={() => {
+                          if (opt.key === 'Genie Code Instructions') return; // always on
+                          setGenChecks((p) => ({ ...p, [opt.key]: !p[opt.key] }));
+                        }}
                         className={`relative p-3.5 rounded-xl text-left transition-smooth border group ${
                           active
                             ? 'border-db-red/30 bg-db-red-50 shadow-sm'
                             : 'border-border hover:border-border-strong hover:shadow-sm'
-                        }`}
+                        } ${opt.key === 'Genie Code Instructions' ? 'cursor-default' : ''}`}
                       >
                         <div className="flex items-center gap-2 mb-1.5">
                           <div className={`w-7 h-7 rounded-lg flex items-center justify-center ${
@@ -636,7 +639,10 @@ export default function LaunchPage({ settings, update, onLaunched }) {
                           {opt.key}
                         </span>
                         <p className="text-[10px] text-text-tertiary leading-snug mt-0.5">{opt.desc}</p>
-                        {active && (
+                        {active && opt.key === 'Genie Code Instructions' && (
+                          <span className="absolute top-2.5 right-2.5 text-[9px] font-semibold text-db-red bg-db-red/10 px-1.5 py-0.5 rounded-full">Always on</span>
+                        )}
+                        {active && opt.key !== 'Genie Code Instructions' && (
                           <CheckCircle2 size={14} className="absolute top-2.5 right-2.5 text-db-red" />
                         )}
                       </button>

@@ -280,7 +280,31 @@ export default function SettingsPanel({ settings, update, onClose }) {
               </div>
               <div>Warehouse: {settings.warehouseId || 'Not set'}</div>
               <div>Database: {settings.inspireDatabase || 'Not set'}</div>
-              <div>Notebook: {settings.notebookPath || 'Not set'}</div>
+              <div className="flex items-center gap-2">
+                <span>Notebook: {settings.notebookPath || 'Not set'}</span>
+                {settings.notebookPath && settings.token && (
+                  <button
+                    onClick={async () => {
+                      try {
+                        const headers = { Authorization: `Bearer ${settings.token}`, 'X-DB-PAT-Token': settings.token };
+                        if (settings.databricksHost) headers['X-Databricks-Host'] = settings.databricksHost;
+                        const resp = await fetch('/api/notebook?force=true', { headers });
+                        if (resp.ok) {
+                          const data = await resp.json();
+                          if (data.path) update('notebookPath', data.path);
+                          alert('Notebook re-published successfully!');
+                        } else {
+                          alert('Failed to re-publish notebook.');
+                        }
+                      } catch { alert('Error re-publishing notebook.'); }
+                    }}
+                    className="text-[10px] text-db-red hover:underline font-medium"
+                    title="Force re-upload the latest DBC to your workspace"
+                  >
+                    Re-publish
+                  </button>
+                )}
+              </div>
             </div>
           </div>
         </div>
