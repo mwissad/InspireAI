@@ -57,7 +57,7 @@ else
 fi
 
 # ─── 4. Verify DBC notebook bundle ───
-if [ -f "databricks_inspire_v45.dbc" ] || [ -f "backend/dbc_bundle.js" ]; then
+if [ -f "databricks_inspire_v46.dbc" ] || [ -f "backend/dbc_bundle.js" ]; then
   echo "✅ Notebook bundle found."
 else
   echo "⚠️  WARNING: No DBC notebook found. Publish feature will be unavailable."

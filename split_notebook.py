@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Split databricks_inspire_v45.dbc into independent phase notebooks
+Split databricks_inspire_v46.dbc into independent phase notebooks
 for a Databricks Lakeflow (Workflows) multi-task job.
 
 Architecture:
@@ -27,7 +27,7 @@ import zipfile
 import shutil
 
 # ─── Configuration ───
-DBC_PATH = "databricks_inspire_v45.dbc"
+DBC_PATH = "databricks_inspire_v46.dbc"
 OUTPUT_DIR = "notebooks"
 
 # ─── Extract notebook from DBC ───
@@ -56,8 +56,8 @@ def main():
     print("📂 Extracting notebook from DBC...")
     nb = extract_notebook_source(DBC_PATH)
     
-    # v45: main code is in commands[1] (commands[0] is entry point, commands[2] is markdown)
-    main_code = nb['commands'][1]['command']
+    # Find the main code command (largest command, contains the Python source)
+    main_code = max((cmd['command'] for cmd in nb['commands']), key=len)
     lines = main_code.split('\n')
     total_lines = len(lines)
     print(f"   Total lines: {total_lines}")

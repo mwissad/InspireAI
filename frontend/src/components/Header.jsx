@@ -1,5 +1,6 @@
-import { Settings } from 'lucide-react';
+import { Settings, Sun, Moon } from 'lucide-react';
 import DatabricksLogo from './DatabricksLogo';
+import { useTheme } from '../ThemeContext';
 
 const NAV = [
   { id: 'launch',  label: 'Launch',  step: 1 },
@@ -16,6 +17,7 @@ export default function Header({
   canMonitor,
   canResults,
 }) {
+  const { theme, toggle } = useTheme();
   const enabled = {
     launch: true,
     monitor: canMonitor,
@@ -37,7 +39,7 @@ export default function Header({
               Inspire AI
             </span>
             <span className="text-[10px] font-semibold text-db-red border border-db-red/30 bg-db-red-50 rounded-full px-2 py-0.5 ml-0.5">
-              v4.5
+              v4.6
             </span>
           </button>
 
@@ -77,14 +79,23 @@ export default function Header({
             })}
           </nav>
 
-          {/* Settings */}
-          <button
-            onClick={onSettingsClick}
-            className="p-2 rounded-md text-text-secondary hover:text-db-red hover:bg-db-red-50 transition-smooth"
-            title="Settings"
-          >
-            <Settings size={18} />
-          </button>
+          {/* Theme toggle + Settings */}
+          <div className="flex items-center gap-1">
+            <button
+              onClick={toggle}
+              className="p-2 rounded-md text-text-secondary hover:text-db-red hover:bg-db-red-50 transition-smooth"
+              title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+            >
+              {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
+            </button>
+            <button
+              onClick={onSettingsClick}
+              className="p-2 rounded-md text-text-secondary hover:text-db-red hover:bg-db-red-50 transition-smooth"
+              title="Settings"
+            >
+              <Settings size={18} />
+            </button>
+          </div>
         </div>
       </div>
     </header>

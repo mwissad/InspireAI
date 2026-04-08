@@ -62,7 +62,7 @@ databricks apps create inspire-ai
 
 # 3. Sync files to workspace
 databricks sync . "/Workspace/Users/$(databricks current-user me --output json | jq -r .userName)/inspire-ai" \
-  --watch --include "app.yaml,start.sh,backend/**,frontend/dist/**,databricks_inspire_v45.dbc"
+  --watch --include "app.yaml,start.sh,backend/**,frontend/dist/**,databricks_inspire_v46.dbc"
 
 # 4. Deploy
 databricks apps deploy inspire-ai \

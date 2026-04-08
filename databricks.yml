@@ -1,0 +1,67 @@
+bundle:
+  name: inspire-ai
+
+variables:
+  warehouse_id:
+    description: "SQL Warehouse ID for query execution"
+    default: ""
+  inspire_database:
+    description: "Unity Catalog database for Inspire (format: catalog.schema)"
+    default: "main.inspire"
+  notebook_path:
+    description: "Workspace path for the Inspire notebook"
+    default: "/Shared/inspire/databricks_inspire_v46"
+
+targets:
+  # ── Development (local workspace) ──
+  dev:
+    mode: development
+    default: true
+    workspace:
+      root_path: /Shared/inspire-ai-dev
+
+  # ── Production (customer workspace) ──
+  prod:
+    mode: production
+    workspace:
+      root_path: /Shared/inspire-ai
+    run_as:
+      service_principal_name: ${var.service_principal_name}
+    variables:
+      service_principal_name:
+        description: "Service principal for production deployment"
+
+resources:
+  # ── Databricks App ──
+  apps:
+    inspire_ai:
+      name: "inspire-ai"
+      description: "Inspire AI — Data Strategy Copilot powered by Databricks"
+      source_code_path: .
+      config:
+        command:
+          - "bash"
+          - "start.sh"
+        env:
+          - name: NODE_ENV
+            value: production
+
+  # ── Multi-task Workflow (Lakeflow Job) ──
+  jobs:
+    inspire_pipeline:
+      name: "Inspire AI Pipeline"
+      tags:
+        inspire_version: "v4.6"
+        dbx_inspire_ai_type: "discovery"
+      tasks:
+        - task_key: inspire_notebook
+          notebook_task:
+            notebook_path: ${var.notebook_path}
+            source: WORKSPACE
+          timeout_seconds: 14400
+
+artifacts:
+  # ── Notebook to deploy ──
+  inspire_notebook:
+    type: notebook
+    path: ./notebooks/00_inspire_commons.py

@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const multer = require('multer');
 const AdmZip = require('adm-zip');
+const crypto = require('crypto');
 const yaml = require('js-yaml');
 const { SSEServerTransport } = require('@modelcontextprotocol/sdk/server/sse.js');
 const { createInspireMcpServer } = require('./mcp-server');
@@ -30,9 +31,9 @@ const SERVICE_TOKEN = process.env.DATABRICKS_TOKEN || '';
 
 // Path to the bundled DBC file — try several candidate locations
 const DBC_CANDIDATES = [
-  path.resolve(__dirname, '..', 'databricks_inspire_v45.dbc'),
-  path.resolve(__dirname, 'databricks_inspire_v45.dbc'),
-  path.resolve(__dirname, '..', 'notebooks', 'databricks_inspire_v45.dbc'),
+  path.resolve(__dirname, '..', 'databricks_inspire_v46.dbc'),
+  path.resolve(__dirname, 'databricks_inspire_v46.dbc'),
+  path.resolve(__dirname, '..', 'notebooks', 'databricks_inspire_v46.dbc'),
 ];
 let BUNDLED_DBC_PATH = DBC_CANDIDATES.find(p => fs.existsSync(p)) || '';
 
@@ -40,7 +41,7 @@ let BUNDLED_DBC_PATH = DBC_CANDIDATES.find(p => fs.existsSync(p)) || '';
 if (!BUNDLED_DBC_PATH) {
   try {
     const b64 = require('./dbc_bundle');
-    const materializedPath = path.resolve(__dirname, 'databricks_inspire_v45.dbc');
+    const materializedPath = path.resolve(__dirname, 'databricks_inspire_v46.dbc');
     fs.writeFileSync(materializedPath, Buffer.from(b64, 'base64'));
     BUNDLED_DBC_PATH = materializedPath;
     console.log('DBC materialized from embedded bundle.');
@@ -248,41 +249,45 @@ function sqlResultToObjects(result) {
 const NOTEBOOK_DEST = '/Shared/inspire_ai';
 let cachedNotebookPath = DEFAULT_NOTEBOOK_PATH || '';
 
-async function ensureNotebookPublished(host, token) {
-  // 1. If we already know the notebook path, verify it still exists
-  if (cachedNotebookPath) {
-    try {
-      const check = await dbFetch(host, token, `/api/2.0/workspace/get-status?path=${encodeURIComponent(cachedNotebookPath)}`);
-      if (check.ok) return cachedNotebookPath;
-    } catch (_) {}
-    // Path gone — re-publish
-    cachedNotebookPath = '';
-  }
+async function ensureNotebookPublished(host, token, force = false) {
+  if (!force) {
+    // 1. If we already know the notebook path, verify it still exists
+    if (cachedNotebookPath) {
+      try {
+        const check = await dbFetch(host, token, `/api/2.0/workspace/get-status?path=${encodeURIComponent(cachedNotebookPath)}`);
+        if (check.ok) return cachedNotebookPath;
+      } catch (_) {}
+      // Path gone — re-publish
+      cachedNotebookPath = '';
+    }
 
-  // 2. Check if notebook already exists at the destination
-  try {
-    const check = await dbFetch(host, token, `/api/2.0/workspace/get-status?path=${encodeURIComponent(NOTEBOOK_DEST)}`);
-    if (check.ok) {
-      const data = await check.json();
-      if (data.object_type === 'NOTEBOOK') {
-        cachedNotebookPath = NOTEBOOK_DEST;
-        console.log(`📓 Notebook already exists: ${cachedNotebookPath}`);
-        return cachedNotebookPath;
-      }
-      if (data.object_type === 'DIRECTORY') {
-        const listResp = await dbFetch(host, token, `/api/2.0/workspace/list?path=${encodeURIComponent(NOTEBOOK_DEST)}`);
-        if (listResp.ok) {
-          const listData = await listResp.json();
-          const nb = (listData.objects || []).find(o => o.object_type === 'NOTEBOOK');
-          if (nb) {
-            cachedNotebookPath = nb.path;
-            console.log(`📓 Notebook found in folder: ${cachedNotebookPath}`);
-            return cachedNotebookPath;
+    // 2. Check if notebook already exists at the destination
+    try {
+      const check = await dbFetch(host, token, `/api/2.0/workspace/get-status?path=${encodeURIComponent(NOTEBOOK_DEST)}`);
+      if (check.ok) {
+        const data = await check.json();
+        if (data.object_type === 'NOTEBOOK') {
+          cachedNotebookPath = NOTEBOOK_DEST;
+          console.log(`📓 Notebook already exists: ${cachedNotebookPath}`);
+          return cachedNotebookPath;
+        }
+        if (data.object_type === 'DIRECTORY') {
+          const listResp = await dbFetch(host, token, `/api/2.0/workspace/list?path=${encodeURIComponent(NOTEBOOK_DEST)}`);
+          if (listResp.ok) {
+            const listData = await listResp.json();
+            const nb = (listData.objects || []).find(o => o.object_type === 'NOTEBOOK');
+            if (nb) {
+              cachedNotebookPath = nb.path;
+              console.log(`📓 Notebook found in folder: ${cachedNotebookPath}`);
+              return cachedNotebookPath;
+            }
           }
         }
       }
-    }
-  } catch (_) {}
+    } catch (_) {}
+  } else {
+    console.log('🔄 Force re-publish requested — overwriting existing notebook...');
+  }
 
   // 3. Publish the bundled DBC
   if (!BUNDLED_DBC_PATH || !fs.existsSync(BUNDLED_DBC_PATH)) {
@@ -487,11 +492,126 @@ app.get('/api/health', (req, res) => {
   });
 });
 
+// ═══════════════════════════════════════════════════
+//  Setup Verification — validates all prerequisites
+// ═══════════════════════════════════════════════════
+app.post('/api/setup/verify', async (req, res) => {
+  const token = getToken(req);
+  const host = resolveHost(req);
+  const { warehouse_id, inspire_database } = req.body || {};
+
+  const checks = {
+    workspace: { ok: false, message: '' },
+    auth: { ok: false, message: '' },
+    warehouse: { ok: false, message: '' },
+    catalog: { ok: false, message: '' },
+    notebook: { ok: false, message: '' },
+  };
+
+  // 1. Workspace connectivity
+  try {
+    if (!host) throw new Error('No Databricks host configured');
+    const resp = await fetch(`${host}/api/2.0/clusters/spark-versions`, {
+      headers: { Authorization: `Bearer ${token || 'invalid'}` },
+    });
+    checks.workspace = { ok: resp.status !== 0, message: resp.ok ? host : `Host reachable but returned ${resp.status}` };
+  } catch (err) {
+    checks.workspace = { ok: false, message: `Cannot reach ${host || 'no host'}: ${err.message}` };
+  }
+
+  // 2. Authentication
+  if (token && host) {
+    try {
+      const resp = await dbFetch(host, token, '/api/2.0/preview/scim/v2/Me');
+      if (resp.ok) {
+        const me = await resp.json();
+        checks.auth = { ok: true, message: `Authenticated as ${me.displayName || me.userName || 'user'}` };
+      } else {
+        checks.auth = { ok: false, message: `Token invalid (${resp.status})` };
+      }
+    } catch (err) {
+      checks.auth = { ok: false, message: err.message };
+    }
+  } else {
+    checks.auth = { ok: false, message: token ? 'No host configured' : 'No token provided' };
+  }
+
+  // 3. Warehouse access
+  if (checks.auth.ok && warehouse_id) {
+    try {
+      const resp = await dbFetch(host, token, `/api/2.0/sql/warehouses/${warehouse_id}`);
+      if (resp.ok) {
+        const wh = await resp.json();
+        checks.warehouse = { ok: true, message: `${wh.name} (${wh.state})`, state: wh.state };
+      } else {
+        checks.warehouse = { ok: false, message: `Cannot access warehouse ${warehouse_id}` };
+      }
+    } catch (err) {
+      checks.warehouse = { ok: false, message: err.message };
+    }
+  } else if (!warehouse_id) {
+    checks.warehouse = { ok: false, message: 'No warehouse selected' };
+  }
+
+  // 4. Catalog/database access
+  if (checks.auth.ok && inspire_database) {
+    try {
+      const parts = inspire_database.split('.');
+      if (parts.length !== 2) throw new Error('Format must be catalog.schema');
+      const [catalog, schema] = parts;
+      // Test catalog access
+      const catResp = await dbFetch(host, token, `/api/2.1/unity-catalog/catalogs/${encodeURIComponent(catalog)}`);
+      if (!catResp.ok) throw new Error(`Cannot access catalog "${catalog}"`);
+      // Test schema access or creation
+      const schResp = await dbFetch(host, token, `/api/2.1/unity-catalog/schemas/${encodeURIComponent(catalog)}.${encodeURIComponent(schema)}`);
+      if (schResp.ok) {
+        checks.catalog = { ok: true, message: `${inspire_database} exists and accessible` };
+      } else {
+        // Schema doesn't exist — check if we can create it
+        checks.catalog = { ok: true, message: `Catalog "${catalog}" accessible. Schema "${schema}" will be created on first run.` };
+      }
+    } catch (err) {
+      checks.catalog = { ok: false, message: err.message };
+    }
+  } else if (!inspire_database) {
+    checks.catalog = { ok: false, message: 'No inspire database specified' };
+  }
+
+  // 5. Notebook bundle
+  const hasDbc = fs.existsSync(BUNDLED_DBC_PATH);
+  checks.notebook = { ok: hasDbc, message: hasDbc ? 'Notebook bundle found' : 'DBC file not found — notebook publish will fail' };
+
+  const allOk = Object.values(checks).every(c => c.ok);
+  res.json({ ok: allOk, checks });
+});
+
+// Create inspire database schema if it doesn't exist
+app.post('/api/setup/create-database', requireToken, async (req, res) => {
+  try {
+    const { inspire_database, warehouse_id } = req.body;
+    if (!inspire_database || !warehouse_id) return res.status(400).json({ error: 'inspire_database and warehouse_id required' });
+    const parts = inspire_database.split('.');
+    if (parts.length !== 2) return res.status(400).json({ error: 'Format: catalog.schema' });
+    const [catalog, schema] = parts;
+
+    // Create schema if not exists
+    const sql = `CREATE SCHEMA IF NOT EXISTS \`${catalog}\`.\`${schema}\``;
+    const result = await executeSql(req.dbHost, req.dbToken, warehouse_id, sql);
+    res.json({ ok: true, message: `Schema ${inspire_database} ready` });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // Auto-publish and return the notebook path
 app.get('/api/notebook', requireToken, async (req, res) => {
   try {
-    const nbPath = await ensureNotebookPublished(req.dbHost, req.dbToken);
-    res.json({ path: nbPath });
+    const force = req.query.force === 'true';
+    if (force) {
+      cachedNotebookPath = ''; // clear cache to force re-publish
+    }
+    const nbPath = await ensureNotebookPublished(req.dbHost, req.dbToken, force);
+    res.json({ path: nbPath, republished: force });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -815,8 +935,24 @@ app.post('/api/run', requireToken, async (req, res) => {
       console.warn(`⚠️ Path verify failed: ${verifyErr.message}`);
     }
 
-    const payload = {
-      run_name: `Inspire AI - ${params['00_business_name'] || 'Run'} - ${new Date().toISOString().slice(0, 19)}`,
+    const businessName = params['00_business_name'] || 'Run';
+    const sanitizeTag = (v) => String(v || '').replace(/[^A-Za-z0-9._-]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '').slice(0, 255);
+    const sanitizedTag = businessName.toLowerCase().replace(/[^a-z0-9_]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '') || 'run';
+    const jobName = `Inspire AI - ${businessName} - ${new Date().toISOString().slice(0, 19)}`;
+    const jobSessionId = crypto.randomUUID();
+    const notebookFilename = resolvedPath.split('/').pop() || 'inspire_notebook';
+
+    // Step 1: Create a job with tags
+    const createPayload = {
+      name: jobName,
+      tags: {
+        inspire_version: 'v4.6',
+        dbx_inspire_ai_business: sanitizeTag(businessName),
+        dbx_inspire_ai_type: 'discovery',
+        dbx_inspire_ai_session: sanitizeTag(jobSessionId),
+        dbx_inspire_ai_usecases: '0',
+        dbx_inspire_ai_notebook: sanitizeTag(notebookFilename),
+      },
       tasks: [{
           task_key: 'inspire_notebook',
           notebook_task: {
@@ -826,17 +962,33 @@ app.post('/api/run', requireToken, async (req, res) => {
           },
           ...(cluster_id ? { existing_cluster_id: cluster_id } : {}),
       }],
+      max_concurrent_runs: 1,
     };
 
-    console.log(`📋 Submitting run: ${resolvedPath}`);
-    const response = await dbFetch(req.dbHost, req.dbToken, '/api/2.1/jobs/runs/submit', {
+    console.log(`📋 Creating job: ${resolvedPath}`);
+    const createResp = await dbFetch(req.dbHost, req.dbToken, '/api/2.1/jobs/create', {
       method: 'POST',
-      body: JSON.stringify(payload),
+      body: JSON.stringify(createPayload),
+    });
+
+    if (!createResp.ok) {
+      const errText = await createResp.text();
+      console.error(`❌ Job create failed (${createResp.status}): ${errText}`);
+      return res.status(createResp.status).json({ error: `Job creation failed: ${errText}` });
+    }
+
+    const { job_id } = await createResp.json();
+    console.log(`✅ Job created: ${job_id}`);
+
+    // Step 2: Run the job
+    const response = await dbFetch(req.dbHost, req.dbToken, '/api/2.1/jobs/run-now', {
+      method: 'POST',
+      body: JSON.stringify({ job_id }),
     });
 
     if (!response.ok) {
       const errText = await response.text();
-      console.error(`❌ Run submit failed (${response.status}): ${errText}`);
+      console.error(`❌ Job run failed (${response.status}): ${errText}`);
       let errorMsg;
       try { errorMsg = JSON.parse(errText).message || errText; } catch { errorMsg = errText; }
       return res.status(response.status).json({ error: errorMsg });
@@ -1310,7 +1462,7 @@ app.get('/api/inspire/sessions', requireToken, async (req, res) => {
 
     const [catalog, schema] = inspire_database.split('.');
     const table = `\`${catalog}\`.\`${schema}\`.\`__inspire_session\``;
-    const sql = `SELECT session_id, processing_status, completed_percent, create_at, completed_on, business_name, inspire_database_name, operation_mode, generation_path FROM ${table} ORDER BY create_at DESC LIMIT 20`;
+    const sql = `SELECT session_id, processing_status, completed_percent, create_at, completed_on, business_name, inspire_database_name, operation_mode, generation_path, business_domains, catalogs, results_json FROM ${table} ORDER BY create_at DESC LIMIT 20`;
 
     const result = await executeSql(req.dbHost, req.dbToken, warehouse_id, sql);
     const sessions = sqlResultToObjects(result);
@@ -1325,6 +1477,10 @@ app.get('/api/inspire/sessions', requireToken, async (req, res) => {
         generation_path: s.generation_path || '',
       };
       s.completed_percent = parseFloat(s.completed_percent) || 0;
+      // Parse results_json for session summary
+      if (s.results_json && typeof s.results_json === 'string') {
+        try { s.results_json = JSON.parse(s.results_json); } catch { s.results_json = null; }
+      }
     }
 
     res.json({ sessions });
@@ -1332,6 +1488,33 @@ app.get('/api/inspire/sessions', requireToken, async (req, res) => {
     if (err.message.includes('TABLE_OR_VIEW_NOT_FOUND') || err.message.includes('does not exist')) {
       return res.json({ sessions: [], message: 'Session table not found.' });
     }
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Delete a session by session_id
+app.delete('/api/inspire/session', requireToken, async (req, res) => {
+  try {
+    const { inspire_database, warehouse_id, session_id } = req.query;
+    if (!inspire_database || !warehouse_id || !session_id) {
+      return res.status(400).json({ error: 'inspire_database, warehouse_id, and session_id required.' });
+    }
+    const [catalog, schema] = inspire_database.split('.');
+    const sessionTable = `\`${catalog}\`.\`${schema}\`.\`__inspire_session\``;
+    const stepTable = `\`${catalog}\`.\`${schema}\`.\`__inspire_step\``;
+
+    // Delete from step tracking table first (may not exist)
+    try {
+      await executeSql(req.dbHost, req.dbToken, warehouse_id,
+        `DELETE FROM ${stepTable} WHERE session_id = ${session_id}`);
+    } catch { /* step table may not exist */ }
+
+    // Delete from session table
+    await executeSql(req.dbHost, req.dbToken, warehouse_id,
+      `DELETE FROM ${sessionTable} WHERE session_id = ${session_id}`);
+
+    res.json({ success: true, message: `Session ${session_id} deleted.` });
+  } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });

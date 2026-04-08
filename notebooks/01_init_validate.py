@@ -69,7 +69,7 @@ def create_widgets():
             "High Quality",
             "Very High Quality"
         ]
-        dbutils.widgets.dropdown("05_use_cases_quality", "High Quality", use_cases_quality_options, "06. Use Cases Quality")
+        dbutils.widgets.dropdown("05_use_cases_quality", "Good Quality", use_cases_quality_options, "06. Use Cases Quality")
     except Exception as e:
         widget_errors.append(f"Use Cases Quality: {e}")
     
@@ -163,6 +163,21 @@ def create_widgets():
 
 create_widgets()
 
+_NOTEBOOK_WIDGET_NAMES = [
+    "00_business_name",
+    "01_uc_metadata",
+    "02_inspire_database",
+    "04_table_election",
+    "05_use_cases_quality",
+    "06_business_domains",
+    "07_business_priorities",
+    "08_strategic_goals",
+    "09_generation_options",
+    "11_generation_path",
+    "12_documents_languages",
+    "14_session_id",
+]
+
 # COMMAND ----------
 
 # DBTITLE 1,Imports & Commons
@@ -219,6 +234,60 @@ def main():
     print_ascii_banner()
 
     # --- Read all widget values ---
+    # ── Job Launch Gate ──────────────────────────────────────────────────
+    _raw_session_id_from_widget = ""
+    try:
+        _raw_session_id_from_widget = dbutils.widgets.get("14_session_id").strip()
+    except Exception:
+        pass
+
+    if not _raw_session_id_from_widget:
+        try:
+            import uuid as _jl_uuid
+            _generated_sid = str((_jl_uuid.uuid4().int >> 64) & 9223372036854775807)
+            _job_widgets = {}
+            for _wn in _NOTEBOOK_WIDGET_NAMES:
+                try:
+                    _job_widgets[_wn] = dbutils.widgets.get(_wn)
+                except Exception:
+                    pass
+            _job_widgets["14_session_id"] = _generated_sid
+
+            _biz = _job_widgets.get("00_business_name", "").strip()
+            _nb_path = JobLauncher.get_current_notebook_path()
+            _nb_name = _nb_path.rsplit("/", 1)[-1] if _nb_path else "unknown"
+            _job_tags = {
+                "dbx_inspire_ai_business": _biz,
+                "dbx_inspire_ai_type": "discovery",
+                "dbx_inspire_ai_session": _generated_sid,
+                "dbx_inspire_ai_usecases": "0",
+                "dbx_inspire_ai_domains": "0",
+                "dbx_inspire_ai_subdomains": "0",
+                "dbx_inspire_ai_notebook": _nb_name,
+            }
+
+            if _nb_path:
+                import re
+                _sanitized_biz = re.sub(r'[^a-z0-9_]', '_', _biz.lower().strip())
+                _sanitized_biz = re.sub(r'_+', '_', _sanitized_biz).strip('_') or "unknown"
+                _job_name = f"dbx_inspire_ai_{_sanitized_biz}"
+                _launcher = JobLauncher(_nb_path, _job_widgets, _job_tags)
+                _launch_result = _launcher.launch(job_name=_job_name, run_name=_job_name)
+                if _launch_result["success"]:
+                    return
+                else:
+                    print(f"\n  Job launch failed: {_launch_result['error']}")
+                    print("  Continuing with local notebook execution...\n")
+            else:
+                print("\n  Could not determine current notebook path for job launch.")
+                print("  Continuing with local notebook execution...\n")
+        except Exception as _jl_gate_err:
+            print(f"\n  Job launch gate error: {_jl_gate_err}")
+            print("  Continuing with local notebook execution...\n")
+
+    _user_provided_session_id = bool(_raw_session_id_from_widget)
+    # ── End Job Launch Gate ──────────────────────────────────────────────
+
     # --- 1. Get Widget Values ---
     
     # --- Business Name ---
@@ -403,60 +472,6 @@ def main():
     else:
         # Default to English for notebooks-only mode (no PDF/Presentation)
         if not output_language_str:
-            output_language_str = "English"
-            languages = ["English"]
-            log_print(f"ℹ️ Documents Languages: Not required (no PDF/Presentation selected), defaulting to English")
-        else:
-            languages = [lang.strip() for lang in output_language_str.split(',') if lang.strip()]
-            log_print(f"ℹ️ Documents Languages: {', '.join(languages)} (optional for notebooks-only)")
-    
-    # Log derived options
-    generate_genie_instructions = "Genie Code Instructions" in generate_options_list
-    log_print(f"ℹ️ Genie Code Instructions: {'ENABLED (will generate per-use-case Genie notebooks)' if generate_genie_instructions else 'Disabled'}")
-    log_print("ℹ️ Technical table filtering: Aggressive (mandatory)")
-    
-    if user_session_id:
-        log_print(f"✅ Inspire Session ID: '{user_session_id}' (user-provided)")
-    else:
-        log_print(f"ℹ️ Inspire Session ID: Not provided (will be auto-generated)")
-    
-    if validation_errors:
-        import sys as _sys
-        error_count = len(validation_errors)
-        error_summary = "\n".join(validation_errors)
-        
-        log_print("=" * 80, level="ERROR")
-        log_print(f"❌ VALIDATION FAILED - {error_count} ERROR(S) FOUND:", level="ERROR")
-        log_print("=" * 80, level="ERROR")
-        for error in validation_errors:
-            log_print(error, level="ERROR")
-        log_print("=" * 80, level="ERROR")
-        
-        print(f"\n{'='*80}\n❌ VALIDATION ERRORS ({error_count}):\n{error_summary}\n{'='*80}\n", file=_sys.stderr, flush=True)
-        _sys.stdout.flush()
-        _sys.stderr.flush()
-        
-        exit_msg = f"Validation failed with {error_count} error(s):\n{error_summary}"
-        dbutils.notebook.exit(exit_msg)
-    
-    log_print("=" * 80)
-    log_print("✅ ALL VALIDATIONS PASSED - Starting generation...")
-    log_print("=" * 80)
-
-    # --- 3. Pack values and Run ---
-    
-    widget_values = {
-        "business": business_name,
-        "inspire_database": inspire_database,
-        "table_election_mode": table_election_mode,
-        "use_cases_quality": use_cases_quality,
-        "strategic_goals": strategic_goals_str,
-        "business_priorities": business_priorities_str,
-        "business_domains": business_domains_str,
-        "catalogs": catalogs_str,
-        "schemas": schemas_str,
-        "tables": tables_str,
-        "generate": generate_str,
 
     # --- Build config dict from validated widget values ---
     widget_values = {
