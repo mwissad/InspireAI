@@ -52,8 +52,6 @@ TECHNICAL_CONTEXT = {
         "table_election_threshold": 5,
         "table_election_transactional_tables_min": 3,
         "min_use_cases_for_selection": 10,
-        "query_tag_label": "dbx_inspire_agent_run_summary",
-        "genie_query_tag_label": "dbx_inspire_code_run_summary",
         "model_fallback_chain": [
             {"type": "thinker", "size": "large"},
             {"type": "worker", "size": "large"},
@@ -6096,21 +6094,14 @@ TECHNIQUE_IMPLEMENTATION_GUIDANCE = {
 
 PROMPT_TEMPLATES["USE_CASE_GENIE_CODE_INSTRUCTION_GEN_PROMPT"] = """You are generating a **goal-oriented instruction** for Databricks Genie Code.
 
-**ABSOLUTE RULE -- NO RAW CODE, BUT YOU MUST SPECIFY THE ANALYTICAL APPROACH:**
-The instruction you generate must contain ZERO lines of executable code -- no SELECT statements, no Python functions, no PySpark code, no column formulas, no algorithm hyperparameter configurations. However, you MUST specify the CATEGORY of analytical approach and MAY name specific algorithm families (e.g., "Isolation Forest family", "tree-based ensemble models", "K-Means clustering", "Prophet time-series modeling") without writing code or specifying hyperparameters. Genie is an expert AI agent that knows Databricks, Spark, SQL, Python, ML, MLflow, AI functions, and Lakeview. It needs the BUSINESS GOAL, the ANALYTICAL APPROACH DIRECTIVE (which technique category and algorithm family to use), the INPUT tables, the OUTPUT column categories, and the ai_query contract. If your output contains executable code (other than the tiny ai_query prompt structure template in Section 4), you have FAILED the task. If your output fails to specify an analytical approach appropriate to the analytics technique, you have ALSO FAILED the task.
+**RULES:**
+- ZERO executable code in your output (no SELECT, no Python, no PySpark) -- except the ai_query prompt template in Section 4. Code = FAILURE.
+- You MUST name the analytical approach category and algorithm families. Missing approach = FAILURE.
+- ai_query is the FINAL EXPLANATION layer only -- it does NOT perform core analysis. Core analysis uses ML/statistical models BEFORE ai_query.
+- Do NOT expand table columns or list schemas -- Genie inspects schemas directly.
+- Be CONCISE throughout. Every sentence must add value. No filler, no repetition.
 
-**CRITICAL -- ai_query IS NOT THE ANALYTICAL ENGINE:**
-ai_query is the FINAL EXPLANATION AND RECOMMENDATION layer. It does NOT perform core statistical analysis, anomaly detection, clustering, forecasting, or predictive modeling. The core analysis MUST use the technique-appropriate approach (trained ML models, statistical methods, AI functions, simulation, or hybrid pipelines) BEFORE ai_query. ai_query receives pre-computed analytical results (scores, predictions, clusters, anomaly flags, statistical measures) and generates business narratives, root cause diagnoses, and actionable recommendations. This is NON-NEGOTIABLE.
-
-Your job:
-1. Tell Genie the BUSINESS GOAL and WHY it matters (Sections 1-2)
-2. Tell Genie the INPUT tables by name only -- NO column expansion (Section 3). Genie has direct access to all table schemas and will inspect columns autonomously.
-3. Tell Genie the ANALYTICAL APPROACH DIRECTIVE -- which technique category and algorithm family to use (Section 4 Part A). This is the technique-specific guidance that ensures Genie uses ML when ML is appropriate, statistical methods when statistics are appropriate, etc.
-4. Tell Genie the OUTPUT table column CATEGORIES and naming conventions -- NOT an exhaustive column listing (Section 5). Genie will determine the specific columns.
-5. Tell Genie the ai_query contract -- syntax rules and per-record prompt structure (Section 4 Part C)
-6. Everything else -- exact joins, feature engineering specifics, hyperparameters, SQL vs Python choice, column selection -- is 100% Genie's decision
-
-The instruction will be pasted directly into Genie Code. It must be detailed on the WHAT, WHY, and WHICH ANALYTICAL APPROACH so Genie can execute autonomously with the right technique. It must NOT dictate low-level implementation details. Do NOT expand table columns or list full schemas -- Genie inspects schemas directly.
+**Your job:** Tell Genie: (1) business goal and why (Sections 1-2), (2) input tables by name only (Section 3), (3) analytical approach directive (Section 4A), (4) output column categories and naming conventions (Section 5), (5) ai_query contract (Section 4C). Everything else -- joins, features, hyperparameters, code structure -- is Genie's decision.
 
 **BUSINESS CONTEXT:**
 - Company: {business_name}
@@ -6149,32 +6140,25 @@ Generate the instruction using EXACTLY this 7-section structure. Each section st
 
 ## 1. Persona
 
-Generate a deeply contextualized role-based persona for Genie to adopt. Requirements:
-- NO person names (no "Sarah", "Ahmed", "John") -- role titles only (e.g., "You are a Senior Director of ...")
-- An INTERNAL expert at {business_name} in the {business_domain} domain with 15+ years in both the business domain AND data engineering/analytics/ML
-- The persona must demonstrate deep institutional knowledge of {business_name}: its strategic goals, competitive landscape, market position, operational scale, and the specific business processes relevant to this use case
-- Include quantified business awareness -- cite realistic industry-scale numbers for {business_name}'s operations (fleet size, customer base, revenue scale, transaction volumes, etc.) and explain how this use case connects to protecting revenue, reducing costs, or mitigating risk
-- The persona must understand the operational criticality of this use case within {business_name}'s business model
-- This SAME persona (adapted for per-record analysis) must be reused in the ai_query prompt in Section 5
+Generate a compact role-based persona (NO person names -- role titles only). This SAME persona condensed to 1 sentence must be reused in the ai_query prompt.
 
-**QUALITY BAR**: The persona should be 1 full paragraph (8-12 sentences) demonstrating that the analyst lives and breathes {business_name}'s business -- not a generic consultant.
+**QUALITY BAR**: EXACTLY 2-3 sentences, 80 words MAXIMUM:
+- Sentence 1: "You are a [Senior Title] at {business_name} with [N]+ years in [domain] and analytics."
+- Sentence 2: {business_name}'s scale with 3-4 key numbers (e.g., fleet size, revenue, customer count, transaction volume).
+- Sentence 3 (optional): This use case's business criticality quantified in one sentence (e.g., "A 1% improvement saves $XM annually").
+Do NOT elaborate on competitive dynamics, hedging strategies, or institutional knowledge details -- those belong in Section 2.
 
 ## 2. Task
 
 **A. Mission (1-2 sentences):** State the mission with the specific system name and primary business outcome. Include: `CREATE OR REPLACE TABLE {result_table}`
 
-**B. Business Value (1-2 paragraphs):** This is the MOST IMPORTANT sub-section. You must:
-- Quantify the business problem with SPECIFIC dollar estimates using realistic industry benchmarks (e.g., "$120-180M annually", not "significant costs")
-- Break the problem into 2-4 numbered cost/risk categories, each with its own dollar estimate
-- Connect to {business_name}'s strategic goals: "{enriched_strategic_goals}"
-- Estimate the scale: how many entities (customers, assets, transactions, routes, etc.) are affected
-- Estimate the total addressable improvement: what percentage improvement is realistic and what dollar value that represents
+**B. Business Value (1 paragraph, 5-8 sentences max):** Quantify the problem with SPECIFIC dollar estimates (e.g., "$120-180M annually"). Break into 2-4 numbered cost/risk categories with dollar figures each. State entity count affected and total addressable improvement (percentage and dollar value). Connect to {business_name}'s goals: "{enriched_strategic_goals}". No filler -- every sentence must add a new quantified fact.
 
-**C. Success Scenario (1-2 paragraphs):** Describe WHO uses this table (specific job titles, team sizes, and department names at {business_name}), HOW they use it (daily/weekly workflow with specific filters and actions), WHAT enterprise systems they push decisions into (name realistic industry-standard systems for this domain -- e.g., ERP, CRM, RMS, CMMS, MES, WMS, or domain-specific platforms that {business_name} would plausibly use), and WHAT negative outcomes they prevent with dollar quantification. Include specific operational details: "The [team name] team ([N] analysts and [N] directors) opens this table during [specific meeting/review], filters to [criteria], reviews AI recommendations, and immediately [takes action via specific system], preventing [quantified negative outcome]."
+**C. Success Scenario (1 paragraph):** WHO uses it (job titles, team sizes), HOW (workflow with specific filters/actions), WHAT systems they push decisions into (name realistic industry-standard systems), WHAT negative outcomes they prevent (quantified). Pattern: "The [team] ([N] people) opens this during [meeting], filters to [criteria], reviews AI recommendations, pushes to [system], preventing [quantified outcome]."
 
-**D. Failure Scenario (1 paragraph):** Quantify all costs of inaction by referencing the dollar estimates from section B. Name specific competitors who will exploit the gap. End with: "This is a ZERO-FAILURE use case."
+**D. Failure Scenario (3-5 sentences):** Quantify costs of inaction referencing dollar estimates from B. Name competitors who exploit the gap. End: "This is a ZERO-FAILURE use case."
 
-**QUALITY BAR**: Section 2 should be the longest section -- 4-6 substantial paragraphs total across A/B/C/D with multiple specific dollar figures, percentages, and operational details.
+**QUALITY BAR**: Section 2 must be specific and quantified but concise -- no filler or repetition. B: 1 focused paragraph with 2-4 numbered cost categories and dollar figures. C: 1 paragraph with WHO/HOW/WHAT specifics. D: 3-5 sentences. Every sentence must contain specific dollar figures or operational details.
 
 ## 3. Input
 
@@ -6190,26 +6174,15 @@ Structure as:
 
 Do NOT describe join paths, foreign keys, column names, column schemas, or SQL logic here. Do NOT expand or list individual columns from these tables. Genie has direct access to all table schemas and will inspect columns, discover join keys, and figure out the implementation itself.
 
+**Table Discovery (MANDATORY):** Genie must NOT be limited to only the tables listed here. Before implementation, Genie MUST scan all tables in the same schema(s) and catalog(s) as the listed tables (using SHOW TABLES IN, INFORMATION_SCHEMA, or DESCRIBE SCHEMA) to discover additional relevant tables that could improve accuracy, coverage, or enrichment. Any discovered tables used must be documented in ai_sys_feedback and logged as an MLflow artifact.
+
 **External Data Recommendation:** If external data would materially improve accuracy (20%+), mention what data source would help and the estimated accuracy improvement. Genie will decide how to simulate or integrate it.
 
 ## 4. Implementation Strategy
 
-**THIS SECTION HAS EXACTLY 5 PARTS. NOTHING ELSE.**
+**EXACTLY 5 PARTS (A-E). No executable code, no column formulas, no hyperparameters.** You provide: (A) analytical approach directive, (B) mission goal, (C) ai_query contract, (D) MLflow contract, (E) Lakeview dashboard spec. Genie decides joins, features, hyperparameters, and code structure.
 
-Genie is an expert AI agent -- it will decide the exact joins, feature engineering specifics, hyperparameters, SQL vs Python implementation, and low-level code structure. You are providing: (A) the analytical approach directive, (B) the mission goal, (C) the ai_query contract, (D) the MLflow experiment contract, and (E) the Lakeview dashboard spec.
-
-**DO NOT GENERATE ANY OF THE FOLLOWING IN THIS SECTION:**
-- Executable code in SQL, Python, PySpark, or any other language (no SELECT, no def, no import)
-- Column formulas or derivation logic (e.g., "buffer = X - Y", "UNIX_SECONDS(...)")
-- Specific hyperparameter values (e.g., "max_depth=6", "n_estimators=100", "contamination=0.1")
-- Exact feature engineering formulas (e.g., "rolling_avg = SUM(x) OVER (ROWS 7 PRECEDING)")
-
-**YOU MUST GENERATE THE FOLLOWING IN THIS SECTION:**
-- The CATEGORY of analytical approach: ML model training, statistical analysis, AI function, simulation, or hybrid
-- Algorithm FAMILY names appropriate to the analytics technique (e.g., "Isolation Forest family", "tree-based ensemble models", "K-Means clustering", "Prophet time-series modeling", "Cox Proportional Hazards")
-- The role separation between the core analytical engine and ai_query (ai_query EXPLAINS results, it does NOT perform the core analysis)
-
-If you find yourself writing executable code, STOP and delete it. But if you find yourself NOT naming the algorithm family or analytical approach, you are being TOO VAGUE -- Genie needs to know WHICH class of technique to apply.
+**YOU MUST** name the analytical approach CATEGORY (ML, statistical, simulation, hybrid) and algorithm FAMILY (e.g., "Isolation Forest", "XGBoost", "K-Means", "Monte Carlo"). You must NOT write executable code or specify hyperparameter values.
 
 **PART A -- Analytical Approach Directive (THIS IS THE MOST CRITICAL PART):**
 
@@ -6217,14 +6190,7 @@ The analytics technique for this use case is: `{analytics_technique}`
 
 {technique_implementation_guidance}
 
-Based on the above technique guidance, state in 3-5 sentences:
-1. What CATEGORY of analytical approach Genie must use (ML model training, statistical modeling, AI function, simulation, hybrid)
-2. Which ALGORITHM FAMILY or FAMILIES are appropriate (name them explicitly -- e.g., "Isolation Forest or Local Outlier Factor for anomaly detection", "XGBoost or Random Forest for prediction", "K-Means or DBSCAN for clustering")
-3. What the ML/statistical pipeline produces (anomaly scores, predictions, cluster assignments, forecasts, etc.)
-4. That ai_query receives these pre-computed results and generates ONLY business explanations, root cause diagnoses, and recommendations -- it does NOT perform the core analysis
-5. What constitutes a FAILURE for this technique (e.g., "Using only z-score thresholds without ML-based detection is a failure for Anomaly Detection")
-
-Genie has full freedom to choose the specific algorithm within the named family, select hyperparameters, design features, and structure the code. You are directing the TECHNIQUE CLASS, not the implementation details.
+Based on the above technique guidance, state in 3-5 sentences: (1) analytical approach category, (2) algorithm family names, (3) what the pipeline produces, (4) that ai_query ONLY explains pre-computed results -- not performs analysis, (5) what constitutes a FAILURE for this technique.
 
 **PART B -- Mission Goal (3-5 sentences MAXIMUM):**
 State what this use case must achieve in plain business language. What decision does the output enable? Who benefits? What is the expected outcome? Reference the analytical approach from Part A: "Using [technique] to [detect/predict/cluster/forecast], this system enables [decision] for [beneficiary]."
@@ -6239,30 +6205,46 @@ State what this use case must achieve in plain business language. What decision 
 - The SAME format_string expression must populate both the ai_query call AND the `ai_sys_prompt` auditability column
 - No deep learning (no TensorFlow/PyTorch/Keras)
 
-The per-record prompt inside format_string must follow this structure:
+**CRITICAL -- PROMPT FORMATTING FOR USER EDITABILITY:**
+The per-record prompt MUST be defined as a triple-quoted multi-line Python string (using triple quotes: \"\"\"...\"\"\") so that formatting is visually apparent in the notebook cell. Users will read and edit this prompt -- it must look like a well-structured document, NOT a concatenation of single-line strings with escape characters. Each section must start on its own line with a `# Section` header. Blank lines between sections.
+
+The prompt must follow this multi-line structure:
 ```
-# Persona -- [Same role from Section 1, condensed for per-record analysis]
-# Task -- [1 sentence: EXPLAIN the pre-computed analytical results, diagnose root causes, recommend actions]
-# Input -- [ALL analytical fields AND ML/statistical scores injected via %s placeholders, CAST non-strings to STRING]
-# Output -- JSON with every ai_cat_, ai_txt_, ai_sys_ field from the Output schema
-# Constraints -- Zero hallucination, quantify everything, output ONLY valid JSON
+# Persona
+[Same role from Section 1, condensed to 1-2 sentences for per-record context]
+
+# Task
+[1-2 sentences: EXPLAIN the pre-computed analytical results, diagnose root causes, quantify financial impact, recommend actions]
+
+# Input
+[ALL analytical fields AND ML/statistical scores injected via %s placeholders, CAST non-strings to STRING.
+Group related fields logically with line breaks between groups:
+- Entity identifiers (ID, type, name, age, etc.)
+- Operational metrics (utilization, efficiency, volumes, etc.)
+- ML/statistical outputs (scores, predictions, clusters, optimal values, NPVs, etc.)
+- Sensitivity and probability metrics
+- Peer comparison and fleet/cohort metrics]
+
+# Output
+[JSON with every ai_cat_, ai_txt_, ai_sys_ field. List each field on its own line with allowed values:
+- ai_cat_xxx (values: Value1, Value2, Value3, Value4)
+- ai_cat_yyy (values: ...)
+- ai_txt_executive_summary
+- ai_txt_xxx
+- ai_sys_importance (values: Critical, High, Medium, Low)
+- ai_sys_urgency (values: Immediate, Near-Term, Medium-Term, Long-Term)
+- ai_sys_confidence (0.00 to 1.00)
+- ai_sys_feedback]
+
+# Constraints
+- Zero hallucination: reference only the Input data provided.
+- Quantify every statement with specific numbers from Input fields.
+- Output ONLY valid JSON with no markdown, no explanatory text, no code blocks.
 ```
-The Input section MUST include the pre-computed ML/statistical outputs (anomaly scores, prediction probabilities, cluster assignments, forecast values, regression coefficients, etc.) so ai_query can reference them in its explanation. List the specific ai_cat_, ai_txt_, ai_sys_ field names the prompt must request.
+The Input section MUST include ALL pre-computed ML/statistical outputs (anomaly scores, prediction probabilities, cluster assignments, forecast values, regression coefficients, scenario NPVs, sensitivity rankings, etc.) so ai_query can reference them in its explanation. List every specific ai_cat_, ai_txt_, ai_sys_ field name the prompt must request, with allowed values for categorical fields.
 
 **PART D -- MLflow Experiment Registration (MANDATORY):**
-Genie MUST generate code that registers the analytical pipeline as an MLflow experiment. This is NON-NEGOTIABLE regardless of whether the use case uses traditional ML or not -- every use case must be tracked as an experiment.
-
-Genie must generate code that does ALL of the following:
-- Set or create the MLflow experiment with name: `{use_case_id}_<descriptive_name>` (e.g., "{use_case_id}_Flight_Disruption_Severity")
-- Start an MLflow run within that experiment
-- Log parameters: all key configuration choices Genie made (data filters, time windows, feature count, model type, algorithm family used, ai_query model name, temperature, row count processed)
-- Log metrics: data quality metrics (record count, completeness score, outlier count), and if ML is used, log evaluation metrics (accuracy, F1, AUC, RMSE, silhouette score, etc. as appropriate for the technique)
-- Log the ai_query prompt template as an artifact (the format_string template text)
-- Log the output table name and use_case_id as tags
-- Register the model in the MLflow Model Registry if ML is used (model name: "{use_case_id}_model")
-- End the MLflow run
-
-Genie decides the exact MLflow API calls (mlflow.set_experiment, mlflow.start_run, mlflow.log_param, mlflow.log_metric, mlflow.log_artifact, mlflow.register_model, etc.) and the code structure. The instruction above defines WHAT must be tracked, not HOW to code it.
+Genie MUST register the pipeline as an MLflow experiment (NON-NEGOTIABLE for every use case). Experiment name: `{use_case_id}_<descriptive_name>`. Log: parameters (config choices, data filters, model type, row count), metrics (record count, completeness, ML evaluation metrics if applicable), artifacts (ai_query prompt template, discovered tables list), tags (output table, use_case_id). Register model in MLflow Model Registry if ML is used (name: "{use_case_id}_model"). Genie decides exact API calls and code structure.
 
 **PART E -- Lakeview Dashboard:**
 - Dashboard name: include "{use_case_id}" for traceability
@@ -6285,7 +6267,7 @@ Genie decides HOW to populate this table AND which specific columns to include. 
 
 1. **Business & Entity Columns (expect 5-15 columns)** -- Entity identifiers (IDs, codes, names), geographic dimensions, temporal dimensions, and categorical attributes from the source tables. Describe what KINDS of entity attributes matter for this use case (e.g., "customer identifiers and segmentation attributes", "asset IDs and location hierarchies"). Genie inspects input schemas and selects the relevant columns.
 
-2. **Analytical & Statistical Columns (expect 8-15 columns)** -- Pre-computed analytical outputs from the ML/statistical pipeline that feed into ai_query. These MUST include the technique-appropriate model outputs: anomaly scores and anomaly flags (for Anomaly Detection), prediction probabilities and feature importance scores (for Classification/Predictive Modeling), cluster assignments and distance-to-centroid (for Clustering/Segmentation), forecast values and confidence intervals (for Forecasting), regression coefficients and residuals (for Regression Analysis), survival probabilities and hazard ratios (for Survival Analysis), recommendation scores (for Recommendation), centrality metrics (for Network Analysis), optimal values (for Optimization), scenario outcomes (for Simulation). Also include computed business metrics, statistical measures (z-scores, percentiles, standard deviations), peer comparison scores, and derived features. Genie decides the specific computations within the technique-appropriate framework.
+2. **Analytical & Statistical Columns (expect 8-15 columns)** -- Pre-computed outputs from the ML/statistical pipeline that feed into ai_query. MUST include technique-appropriate model outputs (e.g., anomaly scores, predictions, cluster assignments, forecasts, scenario NPVs, sensitivity rankings -- whichever matches the technique from Section 4 Part A). Also include computed business metrics, statistical measures, peer comparisons, and derived features. Genie decides specifics.
 
 3. **Data Quality Columns (REQUIRED naming convention, 2-4 columns):**
    - `data_sufficiency_flag` (STRING), `data_completeness_score` (DECIMAL), and outlier flags as appropriate for the domain
@@ -6304,17 +6286,17 @@ Genie decides HOW to populate this table AND which specific columns to include. 
 
 The total output table should have approximately 25-40 columns across all categories. Genie determines the exact columns by inspecting the input table schemas. You define the CATEGORIES, NAMING CONVENTIONS, and MINIMUM EXPECTATIONS -- not individual column names.
 
-**ai_query Prompt Structure (Genie must use for EVERY record):**
-The prompt via format_string must follow: Persona (condensed from Section 1) -> Task (1 sentence) -> Input (analytical fields via %s placeholders, CAST non-strings) -> Output (JSON with all ai_cat_, ai_txt_, ai_sys_ fields) -> Constraints (zero hallucination, valid JSON only).
+**ai_query Prompt Structure (Genie must use for EVERY record -- USERS WILL EDIT THIS):**
+The prompt MUST be a triple-quoted multi-line Python string (\"\"\"...\"\"\") with visual structure matching Section 4 Part C: `# Section` headers on their own lines, blank lines between sections, logical field grouping in Input, per-field listing with allowed values in Output. Users need to read and modify this prompt -- it must NOT be a concatenated single-line string.
 The SAME format_string must populate both the ai_query call AND the `ai_sys_prompt` column.
 
-**QUALITY BAR**: Describe the column CATEGORIES clearly with naming conventions. Do NOT list 30-50 individual columns -- Genie will determine the specific columns by inspecting the input schemas. Focus on the ai_query contract and naming conventions.
+**QUALITY BAR**: Describe column CATEGORIES with naming conventions. Do NOT list 30-50 individual columns. Focus on the ai_query contract, naming conventions, and ensuring the prompt template is comprehensive and well-formatted for user editing.
 
 ## 6. Constraints
 
 Generate constraints that are SPECIFIC to this use case -- reference the actual table names and business thresholds:
 
-- **Zero Hallucination:** Name the specific tables that Genie must use. Genie will discover available columns by inspecting table schemas directly. If required data doesn't exist in the available tables, flag in ai_sys_feedback with estimated accuracy impact (e.g., "Missing X reduces accuracy by ~Y%")
+- **Zero Hallucination:** Name the specific tables that Genie must use as starting points. Genie will discover available columns by inspecting table schemas directly and MUST also scan nearby tables in the same schema(s) and catalog(s) for additional relevant data (using SHOW TABLES IN, INFORMATION_SCHEMA, or DESCRIBE SCHEMA). If required data doesn't exist in any discovered tables, flag in ai_sys_feedback with estimated accuracy impact (e.g., "Missing X reduces accuracy by ~Y%")
 - **Statistical Integrity:** Define specific sample size thresholds for this use case (e.g., "Flag entities with <10 observations by setting `data_sufficiency_flag = 'Insufficient'` and capping `ai_sys_confidence` at 0.50"). Specify precision requirements: standard deviations to 2 decimal places, correlation coefficients to 3 decimal places, percentages to 1 decimal place, confidence intervals at 95% level. When time-series decomposition requires more cycles than available, flag the metric as "Insufficient Data" rather than computing a misleading value.
 - **ai_query Compliance:** Model `'databricks-gpt-oss-120b'` only, `format_string` only, `modelParameters => named_struct('temperature', CAST(0.1 AS DOUBLE))`. Banned: systemPrompt, temperature as direct param, concatenation.
 - **No Static Images:** Lakeview dashboards only. No matplotlib/plotly/seaborn file exports.
@@ -6325,12 +6307,14 @@ Generate constraints that are SPECIFIC to this use case -- reference the actual 
 Generate remarks covering these topics with domain-specific detail:
 
 - **Quantification Mandate:** Every ai_txt_ column must cite specific numbers from the input data. Give examples of good vs bad (e.g., "load_volatility of 12.3 percentage points, which is 2.1 standard deviations above cohort mean" vs "high volatility"). Never use vague qualifiers without numbers.
-- **Analytical Approach Mandate and Implementation Autonomy:** Genie MUST use the technique-appropriate analytical approach specified in Section 4 Part A. The analytics technique for this use case is `{analytics_technique}`. Genie MUST apply the algorithm family directed in Part A -- it has full autonomy over the SPECIFIC algorithm choice within that family, hyperparameters, feature engineering, join strategy, and code structure (SQL, Python, PySpark, or hybrid). The non-negotiables are: (1) the analytical approach MUST match the technique directive from Section 4 Part A -- SQL-only implementations are acceptable ONLY for techniques where SQL is genuinely the best tool (Pareto Analysis, basic Funnel Analysis, Cohort Analysis construction); for all ML-designated techniques (Anomaly Detection, Classification, Predictive Modeling, Clustering, Segmentation, Forecasting, Regression Analysis, Survival Analysis, Recommendation, Network Analysis, Optimization, Simulation), Genie MUST train or apply ML/statistical models -- falling back to SQL thresholds, z-scores, CASE WHEN, or window functions alone is a FAILURE; (2) the final output table with the required column categories and naming conventions from Section 5; (3) ai_query as the final EXPLANATION layer using the exact syntax from Section 4 Part C, receiving pre-computed analytical results and generating business narratives. Genie determines the specific columns by inspecting the input schemas.
+- **Analytical Approach Mandate:** Genie MUST use the technique from Section 4 Part A (`{analytics_technique}`). Non-negotiables: (1) approach matches the directive -- for ML-designated techniques, SQL-only (thresholds, z-scores, CASE WHEN) is a FAILURE; (2) output table follows Section 5 column categories and naming; (3) ai_query is the final EXPLANATION layer only. Genie has full autonomy over algorithm choice within the family, hyperparameters, features, joins, and code structure.
 - **End-to-End Execution:** Genie must run the complete pipeline end-to-end: data extraction, analysis, ai_query enrichment, table creation, and dashboard generation. If any step fails, implement error handling (flag affected records with data quality columns, continue processing remaining records).
-- **Query Tag (MANDATORY FINAL STEP -- NON-NEGOTIABLE):** After ALL processing, table creation, verification queries, MLflow registration, and dashboard generation are 100% complete, the absolute last executable statements in the notebook must set a Databricks session QUERY_TAG and then execute a single-row SELECT from the result table. The tag must be: `SET QUERY_TAGS['dbx_inspire_code_run_summary'] = "{{'business':'{business_name}','use_case':'{use_case_id}-{use_case_name}','duration_hrs':'<total_notebook_elapsed_hrs>','ai_input_tokens':<total_ai_input_tokens>,'ai_output_tokens':<total_ai_output_tokens>}}"` where duration_hrs is the wall-clock elapsed time of the entire notebook execution in hours (compute as: (end_time - start_time) / 3600) and ai_input_tokens and ai_output_tokens are the cumulative token counts from all ai_query calls in the notebook (Genie must track these counts as the pipeline runs by summing token usage from each ai_query invocation). Immediately after the SET statement, execute `SELECT * FROM {result_table} LIMIT 1`. Wrap both statements in error handling (try/except in Python or equivalent) so they NEVER cause the notebook to fail under any circumstance (incompatible Databricks runtime, missing table, permission error, syntax error, etc.). Do NOT add any comments, markdown cells, or explanatory text around these two statements -- silent execution only.
 - **Self-Critique:** Write a markdown cell rating the implementation 1-10. Include a Missing Data Table: | Data Source | Impact on Accuracy | What It Would Enable | Priority |. Be SPECIFIC about each missing source and its estimated impact.
-- **Dashboard Idempotency:** Check if dashboard exists before creating. Use semantically meaningful color schemes: red/warm tones for Critical/High urgency or risk, amber/gold for Medium, green/cool tones for Stable/Low. Include filters for key dimensions (entity type, classification, importance, urgency) so users can drill down. Add a text widget at the top with use case context, last refresh timestamp, and usage instructions for the consuming team.
+- **Dashboard Idempotency:** Check existence before creating. Colors: red=Critical/High, amber=Medium, green=Stable/Low. Include filters for key dimensions. Add a text widget with use case context, last refresh timestamp, and usage instructions.
 - No `ai_sys_missing_data` column -- missing data commentary belongs in ai_sys_feedback and the self-critique cell.
+- **Table Discovery:** Genie must scan the same schema(s) and catalog(s) as the listed input tables (SHOW TABLES IN, INFORMATION_SCHEMA, DESCRIBE SCHEMA) to find additional relevant tables before implementation. Document any discovered tables in ai_sys_feedback and MLflow artifacts. Do NOT limit analysis to only the explicitly listed tables.
+- **ai_query Prompt Formatting (NON-NEGOTIABLE):** The prompt_tmpl MUST be a triple-quoted multi-line string (\"\"\"...\"\"\") with `# Section` headers, blank lines between sections, logical field grouping in Input, and per-field listing in Output. Users will edit this -- NOT a concatenated single-line string.
+- **Code Structure (MANDATORY -- NON-NEGOTIABLE):** Genie MUST wrap ALL executable code inside a `def main():` function containing ALL processing logic -- data extraction, feature engineering, model training, ai_query enrichment, table creation, MLflow registration, dashboard generation, and verification queries. No top-level executable statements except imports, function/class definitions, and constant definitions. The `main()` function will be called by a Job Launcher cell. Top-level executable code is FORBIDDEN.
 
 **OUTPUT FORMAT**: Generate ONLY the 7-section instruction. Each section starts with `## N. Section Name`. No preamble, no code blocks wrapping the output, no explanation outside the sections.
 """
@@ -14894,88 +14878,6 @@ Start your response with the CSV header line: use_case_id,domain
         self.ai_agent.get_manager_stats_report()
             
 
-    def _find_sql_warehouse(self):
-        try:
-            from databricks.sdk.service.sql import State as WarehouseState
-            warehouses = list(self.workspace.warehouses.list())
-            running_serverless = [
-                w for w in warehouses
-                if getattr(w, "state", None) == WarehouseState.RUNNING
-                and getattr(w, "enable_serverless_compute", False)
-            ]
-            if running_serverless:
-                return running_serverless[0].id
-            running_any = [
-                w for w in warehouses
-                if getattr(w, "state", None) == WarehouseState.RUNNING
-            ]
-            if running_any:
-                return running_any[0].id
-            if warehouses:
-                return warehouses[0].id
-        except Exception as e:
-            self.logger.debug(f"Could not list SQL warehouses: {get_clean_error_message(e)}")
-        return None
-
-    def _emit_run_summary_query_tag(self):
-        import json
-        import time
-
-        _runtime = TECHNICAL_CONTEXT.get("runtime", {})
-        _tag_label = _runtime.get("query_tag_label", "dbx_inspire_agent_run_summary")
-
-        duration_hrs = 0.0
-        if hasattr(self, '_run_start_time') and self._run_start_time:
-            duration_hrs = round((time.time() - self._run_start_time) / 3600, 3)
-
-        ai_input_tokens = int(AIAgent._total_input_chars / 4)
-        ai_output_tokens = int(AIAgent._total_output_chars / 4)
-
-        business = str(self.business_name or "").replace("'", "").replace('"', '').replace("\\", "")[:100]
-
-        tag_dict = {
-            "business": business,
-            "duration_hrs": str(duration_hrs),
-            "ai_input_tokens": ai_input_tokens,
-            "ai_output_tokens": ai_output_tokens,
-        }
-        tag_json = json.dumps(tag_dict, separators=(",", ":"))
-
-        select_sql = f"SELECT * FROM {self._tracking_table_name} LIMIT 1" if self._tracking_table_name else "SELECT 1"
-
-        tag_emitted = False
-        try:
-            from databricks.sdk.service.sql import QueryTag
-            wh_id = self._find_sql_warehouse()
-            if wh_id:
-                self.workspace.statement_execution.execute_statement(
-                    warehouse_id=wh_id,
-                    statement=select_sql,
-                    query_tags=[QueryTag(key=_tag_label, value=tag_json)],
-                    wait_timeout="30s",
-                )
-                tag_emitted = True
-                self.logger.info(f"Query tag emitted via Statement Execution API (warehouse={wh_id}, tag={_tag_label})")
-            else:
-                self.logger.warning("No SQL warehouse found — cannot emit query tag via Statement Execution API")
-        except Exception as e:
-            self.logger.warning(f"Statement Execution API tag emission failed: {get_clean_error_message(e)}")
-
-        if not tag_emitted:
-            safe_value = tag_json.replace("'", "''")
-            try:
-                self.spark.sql(f"SET QUERY_TAGS['{_tag_label}'] = '{safe_value}'")
-                self.spark.sql(select_sql)
-                tag_emitted = True
-                self.logger.info(f"Query tag emitted via SET QUERY_TAGS (spark.sql)")
-            except Exception as e:
-                self.logger.warning(f"SET QUERY_TAGS fallback also failed: {get_clean_error_message(e)}")
-
-        if not tag_emitted:
-            self.logger.warning(
-                f"Could not emit query tag via any method. Tag payload: {_tag_label}={tag_json}"
-            )
-
     def _get_salesy_summary(self, grouped_data: dict, business_name: str, language: str, translations: dict) -> tuple:
         self.logger.debug(f"Calling LLM for executive and domain summaries in {language}...")
         t = translations
@@ -20368,6 +20270,238 @@ The user provided Strategic Goals that MUST be followed during generation.
         # If we exhaust all attempts without success, still return any pending results
         return self._collect_pending_results([])
 
+    _JOB_LAUNCHER_CLASS_SOURCE = r'''
+import re as _jl_re, os as _jl_os
+
+class JobLauncher:
+    _TAG_SAFE_RE = None
+    @staticmethod
+    def _sanitize_tag(value):
+        if JobLauncher._TAG_SAFE_RE is None:
+            JobLauncher._TAG_SAFE_RE = _jl_re.compile(r'[^A-Za-z0-9._-]')
+        s = JobLauncher._TAG_SAFE_RE.sub('_', str(value))
+        s = _jl_re.sub(r'_+', '_', s)
+        s = s.strip('_').strip('.').strip('-')
+        return s
+    def __init__(self, notebook_path, widget_key_values, job_tags=None):
+        self.notebook_path = str(notebook_path)
+        self.widget_key_values = {str(k): str(v) for k, v in widget_key_values.items()}
+        self.job_tags = {self._sanitize_tag(k): self._sanitize_tag(v) for k, v in (job_tags or {}).items()}
+    def launch(self, job_name=None, run_name=None):
+        _fail = {"success": False, "job_id": None, "run_id": None, "job_name": job_name or "", "run_name": run_name or "", "job_url": "", "error": None}
+        try:
+            import time as _jl_time
+            from databricks.sdk import WorkspaceClient as _JL_WC
+            from databricks.sdk.service import jobs as _jl_jobs
+            w = _JL_WC()
+            _job_name = job_name or f"dbx_inspire_job_{int(_jl_time.time())}"
+            _run_name = run_name or _job_name
+            is_serverless, cluster_id = self._detect_compute_type()
+            task = _jl_jobs.Task(task_key="inspire_task", notebook_task=_jl_jobs.NotebookTask(notebook_path=self.notebook_path, base_parameters=self.widget_key_values), timeout_seconds=14400)
+            if not is_serverless and cluster_id:
+                task.existing_cluster_id = cluster_id
+            _existing_job_id = None
+            try:
+                for _candidate in w.jobs.list(name=_job_name):
+                    if _candidate.settings and _candidate.settings.name == _job_name:
+                        _existing_job_id = _candidate.job_id
+                        break
+            except Exception: pass
+            if _existing_job_id:
+                w.jobs.update(job_id=_existing_job_id, new_settings=_jl_jobs.JobSettings(name=_job_name, tags=self.job_tags, tasks=[task]))
+                _job_id = _existing_job_id
+            else:
+                _created = w.jobs.create(name=_job_name, tags=self.job_tags, tasks=[task])
+                _job_id = _created.job_id
+            run = w.jobs.run_now(job_id=_job_id)
+            host, org_id = self._get_workspace_context()
+            job_url = ""
+            if host:
+                _org_param = f"?o={org_id}" if org_id else ""
+                job_url = f"{host}/jobs/{_job_id}/runs/{run.run_id}{_org_param}"
+            result = {"success": True, "job_id": _job_id, "run_id": run.run_id, "job_name": _job_name, "run_name": _run_name, "job_url": job_url, "error": None}
+            self._print_success_banner(result)
+            return result
+        except Exception as _launch_exc:
+            _fail["error"] = str(_launch_exc)
+            return _fail
+    @staticmethod
+    def get_current_notebook_path():
+        _nb_ctx = dbutils.notebook.entry_point.getDbutils().notebook().getContext()
+        try:
+            _path = _nb_ctx.notebookPath().get()
+            if _path: return _path
+        except Exception: pass
+        try:
+            import json as _jl_json
+            _ctx = _jl_json.loads(_nb_ctx.toJson())
+            for _key in ("notebook_path", "notebookPath"):
+                _val = _ctx.get("extraContext", {}).get(_key, "")
+                if _val: return _val
+                _val = _ctx.get("tags", {}).get(_key, "")
+                if _val: return _val
+        except Exception: pass
+        return ""
+    @staticmethod
+    def update_job_tags(updated_tags):
+        if not updated_tags: return
+        try:
+            _nb_ctx = dbutils.notebook.entry_point.getDbutils().notebook().getContext()
+            _job_id_str = ""
+            _ctx = {}
+            try: _job_id_str = _nb_ctx.jobId().get()
+            except Exception: pass
+            if not _job_id_str:
+                try:
+                    import json as _jl_json
+                    _ctx = _jl_json.loads(_nb_ctx.toJson())
+                    _job_id_str = _ctx.get("tags", {}).get("jobId", "") or _ctx.get("extraContext", {}).get("jobId", "")
+                except Exception: pass
+            if not _job_id_str:
+                try:
+                    import json as _jl_json2
+                    _all_tags = spark.conf.get("spark.databricks.clusterUsageTags.clusterAllTags", "")
+                    if "jobId" in _all_tags:
+                        for _t in _jl_json2.loads(_all_tags):
+                            if _t.get("key") == "jobId":
+                                _job_id_str = _t.get("value", "")
+                                break
+                except Exception: pass
+            if not _job_id_str: return
+            _str_tags = {JobLauncher._sanitize_tag(k): JobLauncher._sanitize_tag(v) for k, v in updated_tags.items()}
+            try:
+                from databricks.sdk import WorkspaceClient as _JL_WC2
+                from databricks.sdk.service import jobs as _jl_jobs2
+                _w = _JL_WC2()
+                _w.jobs.update(job_id=int(_job_id_str), new_settings=_jl_jobs2.JobSettings(tags=_str_tags))
+                return
+            except Exception: pass
+            _host = _ctx.get("extraContext", {}).get("api_url", "") if _ctx else ""
+            _token = _ctx.get("extraContext", {}).get("api_token", "") if _ctx else ""
+            if not _host:
+                try:
+                    from databricks.sdk import WorkspaceClient as _JL_WC3
+                    _w3 = _JL_WC3()
+                    _host = str(_w3.config.host).rstrip("/")
+                    _token = _w3.config.token
+                except Exception: pass
+            if _host and _token:
+                import requests as _jl_req
+                _jl_req.patch(f"{_host}/api/2.1/jobs/update", headers={"Authorization": f"Bearer {_token}"}, json={"job_id": int(_job_id_str), "new_settings": {"tags": _str_tags}}, timeout=30)
+        except Exception: pass
+    def _detect_compute_type(self):
+        if _jl_os.environ.get("IS_SERVERLESS", "").upper() == "TRUE": return True, None
+        try: spark.conf.get("spark.databricks.clusterUsageTags.clusterName")
+        except Exception: return True, None
+        try:
+            _cid = spark.conf.get("spark.databricks.clusterUsageTags.clusterId", "")
+            if _cid: return False, _cid
+        except Exception: pass
+        return True, None
+    def _get_workspace_context(self):
+        try:
+            import json as _jl_json
+            _ctx_json = dbutils.notebook.entry_point.getDbutils().notebook().getContext().toJson()
+            _ctx = _jl_json.loads(_ctx_json)
+            _host = _ctx.get("extraContext", {}).get("api_url", "")
+            _org = _ctx.get("extraContext", {}).get("orgId", "")
+            if _host: return _host.rstrip("/"), _org
+        except Exception: pass
+        try:
+            from databricks.sdk import WorkspaceClient as _JL_WC3
+            _w = _JL_WC3()
+            return str(_w.config.host).rstrip("/"), ""
+        except Exception: pass
+        return "", ""
+    def _print_success_banner(self, result):
+        _jn = result.get("job_name", "N/A")
+        _rn = result.get("run_name", "N/A")
+        _rid = str(result.get("run_id", "N/A"))
+        _url = result.get("job_url", "")
+        from datetime import datetime as _jl_dt
+        _now = _jl_dt.now().strftime("%Y-%m-%d %H:%M:%S")
+        _nb = self.notebook_path.rsplit("/", 1)[-1] if self.notebook_path else "N/A"
+        _content_lines = [f"  Notebook:     {_nb}", f"  Job Name:     {_jn}", f"  Job Run Name: {_rn}", f"  Job Run ID:   {_rid}", f"  Launched At:  {_now}"]
+        _footer_lines = ["  Go to Jobs & Pipelines to follow the progress", "  of the run, or click the link below:"]
+        if _url:
+            _footer_lines.append("")
+            _footer_lines.append(f"  {_url}")
+        _all = ["  JOB LAUNCHED SUCCESSFULLY"] + _content_lines + _footer_lines
+        _iw = max(len(l) for l in _all) + 2
+        def _row(text): return f"  {text}"
+        lines = ["", "=" * (_iw + 4), "  JOB LAUNCHED SUCCESSFULLY", "=" * (_iw + 4)]
+        for cl in _content_lines: lines.append(_row(cl))
+        lines.append("-" * (_iw + 4))
+        for fl in _footer_lines: lines.append(_row(fl))
+        lines.append("=" * (_iw + 4))
+        print("\n".join(lines))
+'''
+
+    def _build_job_launcher_cell(self, use_case_name: str) -> dict:
+        _san_biz = re.sub(r'[^a-z0-9_]', '_', str(self.business_name).lower().strip())
+        _san_biz = re.sub(r'_+', '_', _san_biz).strip('_') or "unknown"
+        _san_uc = re.sub(r'[^a-z0-9_]', '_', str(use_case_name).lower().strip())
+        _san_uc = re.sub(r'_+', '_', _san_uc).strip('_') or "unknown"
+
+        _launcher_logic = f'''
+import os
+
+def _run_with_job_launcher():
+    _biz = "{_san_biz}"
+    _use_case_name = "{_san_uc}"
+    _job_name = "dbx_inspire_ai_" + _use_case_name
+    _genie_nb_path = JobLauncher.get_current_notebook_path()
+    _genie_nb_name = _genie_nb_path.rsplit("/", 1)[-1] if _genie_nb_path else "unknown"
+    _job_tags = {{
+        "dbx_inspire_ai_business": JobLauncher._sanitize_tag(_biz),
+        "dbx_inspire_ai_type": "runtime",
+        "dbx_inspire_ai_usecase": JobLauncher._sanitize_tag(_use_case_name),
+        "dbx_inspire_ai_notebook": JobLauncher._sanitize_tag(_genie_nb_name),
+    }}
+    job_id_env = os.environ.get("JOB_ID")
+    is_job_context = job_id_env is not None and str(job_id_env) != "None"
+    if is_job_context:
+        try:
+            JobLauncher.update_job_tags(_job_tags)
+        except Exception:
+            pass
+        try:
+            main()
+        except Exception as e:
+            print(f"Execution error: {{e}}")
+            raise
+    else:
+        try:
+            _nb_path = JobLauncher.get_current_notebook_path()
+            if _nb_path:
+                _launcher = JobLauncher(_nb_path, {{}}, _job_tags)
+                _launch_result = _launcher.launch(job_name=_job_name, run_name=_job_name)
+                if _launch_result["success"]:
+                    print("Job launched. This notebook will now exit.")
+                    dbutils.notebook.exit("Job launched: " + _launch_result.get("job_url", ""))
+                else:
+                    print(f"Job launch failed: {{_launch_result.get('error', 'Unknown')}}")
+                    print("Continuing with local execution...")
+                    main()
+            else:
+                print("Could not determine notebook path. Running locally...")
+                main()
+        except Exception as e:
+            print(f"Job launch error (non-critical): {{e}}")
+            print("Continuing with local execution...")
+            main()
+
+_run_with_job_launcher()
+'''
+        _full_source = self._JOB_LAUNCHER_CLASS_SOURCE.strip() + '\n\n' + _launcher_logic.strip() + '\n'
+        return {
+            "cell_type": "code",
+            "execution_count": 0,
+            "outputs": [],
+            "metadata": {"application/vnd.databricks.v1+cell": {"nuid": str(uuid.uuid4()), "title": "Job Launcher"}},
+            "source": [_full_source]
+        }
+
     def _assemble_single_use_case_notebook(self, use_case: dict, translations: dict, domain_folder: str, subdomain_folder: str, notebook_name: str, summary_dict: dict = None):
         from databricks.sdk.service import workspace
         
@@ -20476,6 +20610,7 @@ The user provided Strategic Goals that MUST be followed during generation.
                     '\n"""\n\nprint(genie_instruction)\n'
                 ]
             })
+            final_cells.append(self._build_job_launcher_cell(use_case.get('Name', '')))
 
         notebook_metadata = {
             "application/vnd.databricks.v1+notebook": {
@@ -21050,6 +21185,7 @@ The user provided Strategic Goals that MUST be followed during generation.
             "metadata": {"application/vnd.databricks.v1+cell": {"nuid": str(uuid.uuid4())}},
             "source": instruction_cell_source
         })
+        final_cells.append(self._build_job_launcher_cell(use_case_name))
         
         notebook_metadata = {
             "application/vnd.databricks.v1+notebook": {
@@ -22823,6 +22959,286 @@ The user provided Strategic Goals that MUST be followed during generation.
             self.logger.error(f"Failed to upload log file: {get_clean_error_message(e)}")
             if log_file_path:
                 self.logger.error(f"Log file was at: {log_file_path}")
+
+# COMMAND ----------
+
+# DBTITLE 1,JobLauncher
+# ==============================================================================
+# JOB LAUNCHER — Self-Launching Databricks Job Pattern
+# ==============================================================================
+
+class JobLauncher:
+    _TAG_SAFE_RE = None
+
+    @staticmethod
+    def _sanitize_tag(value):
+        import re as _jl_re
+        if JobLauncher._TAG_SAFE_RE is None:
+            JobLauncher._TAG_SAFE_RE = _jl_re.compile(r'[^A-Za-z0-9._-]')
+        s = JobLauncher._TAG_SAFE_RE.sub('_', str(value))
+        s = _jl_re.sub(r'_+', '_', s)
+        s = s.strip('_').strip('.').strip('-')
+        return s
+
+    def __init__(self, notebook_path, widget_key_values, job_tags=None):
+        self.notebook_path = str(notebook_path)
+        self.widget_key_values = {str(k): str(v) for k, v in widget_key_values.items()}
+        self.job_tags = {
+            self._sanitize_tag(k): self._sanitize_tag(v)
+            for k, v in (job_tags or {}).items()
+        }
+
+    def launch(self, job_name=None, run_name=None):
+        _fail = {
+            "success": False, "job_id": None, "run_id": None,
+            "job_name": job_name or "", "run_name": run_name or "",
+            "job_url": "", "error": None,
+        }
+        try:
+            import time as _jl_time
+            from databricks.sdk import WorkspaceClient as _JL_WC
+            from databricks.sdk.service import jobs as _jl_jobs
+            w = _JL_WC()
+            _job_name = job_name or f"dbx_inspire_job_{int(_jl_time.time())}"
+            _run_name = run_name or _job_name
+            is_serverless, cluster_id = self._detect_compute_type()
+            task = _jl_jobs.Task(
+                task_key="inspire_task",
+                notebook_task=_jl_jobs.NotebookTask(
+                    notebook_path=self.notebook_path,
+                    base_parameters=self.widget_key_values,
+                ),
+                timeout_seconds=14400,
+            )
+            if not is_serverless and cluster_id:
+                task.existing_cluster_id = cluster_id
+            _existing_job_id = None
+            try:
+                for _candidate in w.jobs.list(name=_job_name):
+                    if _candidate.settings and _candidate.settings.name == _job_name:
+                        _existing_job_id = _candidate.job_id
+                        break
+            except Exception:
+                pass
+            if _existing_job_id:
+                w.jobs.update(
+                    job_id=_existing_job_id,
+                    new_settings=_jl_jobs.JobSettings(
+                        name=_job_name,
+                        tags=self.job_tags,
+                        tasks=[task],
+                    ),
+                )
+                _job_id = _existing_job_id
+            else:
+                _created = w.jobs.create(name=_job_name, tags=self.job_tags, tasks=[task])
+                _job_id = _created.job_id
+            run = w.jobs.run_now(job_id=_job_id)
+            host, org_id = self._get_workspace_context()
+            job_url = ""
+            if host:
+                _org_param = f"?o={org_id}" if org_id else ""
+                job_url = f"{host}/jobs/{_job_id}/runs/{run.run_id}{_org_param}"
+            result = {
+                "success": True,
+                "job_id": _job_id,
+                "run_id": run.run_id,
+                "job_name": _job_name,
+                "run_name": _run_name,
+                "job_url": job_url,
+                "error": None,
+            }
+            self._print_success_banner(result)
+            return result
+        except Exception as _launch_exc:
+            _fail["error"] = str(_launch_exc)
+            return _fail
+
+    @staticmethod
+    def get_current_notebook_path():
+        _nb_ctx = (
+            dbutils.notebook.entry_point
+            .getDbutils().notebook().getContext()
+        )
+        try:
+            _path = _nb_ctx.notebookPath().get()
+            if _path:
+                return _path
+        except Exception:
+            pass
+        try:
+            import json as _jl_json
+            _ctx = _jl_json.loads(_nb_ctx.toJson())
+            for _key in ("notebook_path", "notebookPath"):
+                _val = _ctx.get("extraContext", {}).get(_key, "")
+                if _val:
+                    return _val
+                _val = _ctx.get("tags", {}).get(_key, "")
+                if _val:
+                    return _val
+        except Exception:
+            pass
+        return ""
+
+    @staticmethod
+    def update_job_tags(updated_tags):
+        if not updated_tags:
+            return
+        try:
+            _nb_ctx = (
+                dbutils.notebook.entry_point
+                .getDbutils().notebook().getContext()
+            )
+            _job_id_str = ""
+            _ctx = {}
+            try:
+                _job_id_str = _nb_ctx.jobId().get()
+            except Exception:
+                pass
+            if not _job_id_str:
+                try:
+                    import json as _jl_json
+                    _ctx = _jl_json.loads(_nb_ctx.toJson())
+                    _job_id_str = (
+                        _ctx.get("tags", {}).get("jobId", "")
+                        or _ctx.get("extraContext", {}).get("jobId", "")
+                    )
+                except Exception:
+                    pass
+            if not _job_id_str:
+                try:
+                    import json as _jl_json2
+                    _all_tags = spark.conf.get(
+                        "spark.databricks.clusterUsageTags.clusterAllTags", ""
+                    )
+                    if "jobId" in _all_tags:
+                        for _t in _jl_json2.loads(_all_tags):
+                            if _t.get("key") == "jobId":
+                                _job_id_str = _t.get("value", "")
+                                break
+                except Exception:
+                    pass
+            if not _job_id_str:
+                return
+            _str_tags = {
+                JobLauncher._sanitize_tag(k): JobLauncher._sanitize_tag(v)
+                for k, v in updated_tags.items()
+            }
+            try:
+                from databricks.sdk import WorkspaceClient as _JL_WC2
+                from databricks.sdk.service import jobs as _jl_jobs2
+                _w = _JL_WC2()
+                _w.jobs.update(
+                    job_id=int(_job_id_str),
+                    new_settings=_jl_jobs2.JobSettings(tags=_str_tags),
+                )
+                return
+            except Exception:
+                pass
+            _host = _ctx.get("extraContext", {}).get("api_url", "") if _ctx else ""
+            _token = _ctx.get("extraContext", {}).get("api_token", "") if _ctx else ""
+            if not _host:
+                try:
+                    from databricks.sdk import WorkspaceClient as _JL_WC3
+                    _w3 = _JL_WC3()
+                    _host = str(_w3.config.host).rstrip("/")
+                    _token = _w3.config.token
+                except Exception:
+                    pass
+            if _host and _token:
+                import requests as _jl_req
+                _jl_req.patch(
+                    f"{_host}/api/2.1/jobs/update",
+                    headers={"Authorization": f"Bearer {_token}"},
+                    json={
+                        "job_id": int(_job_id_str),
+                        "new_settings": {"tags": _str_tags},
+                    },
+                    timeout=30,
+                )
+        except Exception:
+            pass
+
+    def _detect_compute_type(self):
+        import os as _jl_os
+        if _jl_os.environ.get("IS_SERVERLESS", "").upper() == "TRUE":
+            return True, None
+        try:
+            spark.conf.get("spark.databricks.clusterUsageTags.clusterName")
+        except Exception:
+            return True, None
+        try:
+            _cid = spark.conf.get(
+                "spark.databricks.clusterUsageTags.clusterId", ""
+            )
+            if _cid:
+                return False, _cid
+        except Exception:
+            pass
+        return True, None
+
+    def _get_workspace_context(self):
+        try:
+            import json as _jl_json
+            _ctx_json = (
+                dbutils.notebook.entry_point
+                .getDbutils().notebook().getContext().toJson()
+            )
+            _ctx = _jl_json.loads(_ctx_json)
+            _host = _ctx.get("extraContext", {}).get("api_url", "")
+            _org = _ctx.get("extraContext", {}).get("orgId", "")
+            if _host:
+                return _host.rstrip("/"), _org
+        except Exception:
+            pass
+        try:
+            from databricks.sdk import WorkspaceClient as _JL_WC3
+            _w = _JL_WC3()
+            return str(_w.config.host).rstrip("/"), ""
+        except Exception:
+            pass
+        return "", ""
+
+    def _print_success_banner(self, result):
+        from datetime import datetime as _jl_dt
+        _jn = result.get("job_name", "N/A")
+        _rn = result.get("run_name", "N/A")
+        _rid = str(result.get("run_id", "N/A"))
+        _url = result.get("job_url", "")
+        _now = _jl_dt.now().strftime("%Y-%m-%d %H:%M:%S")
+        _nb = self.notebook_path.rsplit("/", 1)[-1] if self.notebook_path else "N/A"
+        _content_lines = [
+            f"  Notebook:     {_nb}",
+            f"  Job Name:     {_jn}",
+            f"  Job Run Name: {_rn}",
+            f"  Job Run ID:   {_rid}",
+            f"  Launched At:  {_now}",
+        ]
+        _footer_lines = [
+            "  Go to Jobs & Pipelines to follow the progress",
+            "  of the run, or click the link below:",
+        ]
+        if _url:
+            _footer_lines.append("")
+            _footer_lines.append(f"  {_url}")
+        _all = (
+            ["  JOB LAUNCHED SUCCESSFULLY"]
+            + _content_lines
+            + _footer_lines
+        )
+        _iw = max(len(l) for l in _all) + 2
+        def _row(text):
+            return f"║{text:<{_iw}}║"
+        lines = [f"\n╔{'═' * _iw}╗"]
+        lines.append(_row("  JOB LAUNCHED SUCCESSFULLY"))
+        lines.append(f"╠{'═' * _iw}╣")
+        for cl in _content_lines:
+            lines.append(_row(cl))
+        lines.append(f"╠{'═' * _iw}╣")
+        for fl in _footer_lines:
+            lines.append(_row(fl))
+        lines.append(f"╚{'═' * _iw}╝\n")
+        print("\n".join(lines))
 
 # COMMAND ----------
 

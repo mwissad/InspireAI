@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Split databricks_inspire_v45.dbc into independent phase notebooks
+Split databricks_inspire_v46.dbc into independent phase notebooks
 for a Databricks Lakeflow (Workflows) multi-task job.
 
 Architecture:
@@ -27,7 +27,7 @@ import zipfile
 import shutil
 
 # ─── Configuration ───
-DBC_PATH = "databricks_inspire_v45.dbc"
+DBC_PATH = "databricks_inspire_v46.dbc"
 OUTPUT_DIR = "notebooks"
 
 # ─── Extract notebook from DBC ───

@@ -569,7 +569,7 @@ export default function LandingPage({ onStart }) {
           <div className="flex items-center gap-3">
             <DatabricksLogo className="w-8 h-8" />
             <span className="font-bold text-xl tracking-[-0.03em] text-[#FFF8ED]">Inspire AI</span>
-            <span className="text-[10px] font-semibold text-[#FF3621] border border-[#FF3621]/30 bg-[#FF3621]/10 rounded-full px-2 py-0.5">v4.5</span>
+            <span className="text-[10px] font-semibold text-[#FF3621] border border-[#FF3621]/30 bg-[#FF3621]/10 rounded-full px-2 py-0.5">v4.6</span>
           </div>
           {/* Section indicators */}
           <div className="hidden md:flex items-center gap-1.5">

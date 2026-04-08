@@ -27,9 +27,9 @@ const SERVICE_TOKEN = process.env.DATABRICKS_TOKEN || '';
 
 // Path to the bundled DBC file — try several candidate locations
 const DBC_CANDIDATES = [
-  path.resolve(__dirname, '..', 'databricks_inspire_v45.dbc'),
-  path.resolve(__dirname, 'databricks_inspire_v45.dbc'),
-  path.resolve(__dirname, '..', 'notebooks', 'databricks_inspire_v45.dbc'),
+  path.resolve(__dirname, '..', 'databricks_inspire_v46.dbc'),
+  path.resolve(__dirname, 'databricks_inspire_v46.dbc'),
+  path.resolve(__dirname, '..', 'notebooks', 'databricks_inspire_v46.dbc'),
 ];
 let BUNDLED_DBC_PATH = DBC_CANDIDATES.find(p => fs.existsSync(p)) || '';
 
@@ -37,7 +37,7 @@ let BUNDLED_DBC_PATH = DBC_CANDIDATES.find(p => fs.existsSync(p)) || '';
 if (!BUNDLED_DBC_PATH) {
   try {
     const b64 = require('./dbc_bundle');
-    const materializedPath = path.resolve(__dirname, 'databricks_inspire_v45.dbc');
+    const materializedPath = path.resolve(__dirname, 'databricks_inspire_v46.dbc');
     fs.writeFileSync(materializedPath, Buffer.from(b64, 'base64'));
     BUNDLED_DBC_PATH = materializedPath;
     console.log('DBC materialized from embedded bundle.');
@@ -794,7 +794,7 @@ app.post('/api/run', requireToken, async (req, res) => {
       name: jobName,
       tags: {
         app: `inspire_ai_${sanitizedTag}`,
-        inspire_version: 'v4.5',
+        inspire_version: 'v4.6',
         business_name: businessName,
       },
       tasks: [{
