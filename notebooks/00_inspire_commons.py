@@ -3046,7 +3046,15 @@ class FlushingStreamHandler(logging.StreamHandler):
 def setup_logging(output_dir):
     """Configures dual logging: detailed logs to a file and high-level logs to the console."""
     log_file_path = os.path.join(output_dir, "log.txt")
-    os.makedirs(output_dir, exist_ok=True)
+    try:
+        os.makedirs(output_dir, exist_ok=True)
+        with open(log_file_path, 'a'):
+            pass
+    except PermissionError:
+        import tempfile
+        output_dir = tempfile.mkdtemp(prefix="inspire_")
+        log_file_path = os.path.join(output_dir, "log.txt")
+        print(f"Warning: Permission denied on original log dir, using fallback: {output_dir}")
     root_logger = logging.getLogger() # Get root logger
     root_logger.setLevel(logging.DEBUG)
 
@@ -11108,7 +11116,9 @@ class DatabricksInspire:
         self.sanitized_customer_name = self._sanitize_name(self.business_name)
         
         # Keep log in /tmp during execution (always writable), will copy to output dir at end
-        self.local_log_output_dir = f"/tmp/{self.sanitized_customer_name}"
+        import uuid as _uuid_mod
+        _run_suffix = str(_uuid_mod.uuid4())[:8]
+        self.local_log_output_dir = f"/tmp/{self.sanitized_customer_name}_{_run_suffix}"
 
         resolved_generation_path = self.generation_path
         if resolved_generation_path.startswith("./"):
