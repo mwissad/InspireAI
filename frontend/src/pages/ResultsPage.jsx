@@ -28,6 +28,13 @@ import {
   ExternalLink,
   HelpCircle,
 } from 'lucide-react';
+import AnimatedCounter from '../components/AnimatedCounter';
+import ScoreGauge from '../components/ScoreGauge';
+import GlassCard from '../components/GlassCard';
+import DomainSunburst from '../components/DomainSunburst';
+import PriorityHeatmap from '../components/PriorityHeatmap';
+import Celebration from '../components/Celebration';
+import { SkeletonCard, SkeletonStats } from '../components/SkeletonLoader';
 
 /* ── Priority sort order ── */
 const PRIORITY_ORDER = [
@@ -833,12 +840,15 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
 
       {/* Loading */}
       {loading && (
-        <div className="bg-surface border border-border rounded-lg p-12 text-center">
-          <Loader2
-            size={20}
-            className="animate-spin text-text-tertiary mx-auto mb-3"
-          />
-          <p className="text-sm text-text-secondary">Loading results...</p>
+        <div className="space-y-6">
+          <SkeletonStats count={4} />
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div className="skeleton rounded-xl h-[280px]" />
+            <div className="skeleton rounded-xl h-[280px]" />
+          </div>
+          <div className="space-y-3">
+            {[1, 2, 3].map(i => <SkeletonCard key={i} />)}
+          </div>
         </div>
       )}
 
@@ -1288,6 +1298,9 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
             );
           })()}
 
+          {/* Celebration on first load */}
+          <Celebration trigger={allUseCases.length > 0 && !isProgressive} />
+
           {/* Stats */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
             <StatCard label="Domains" value={results.domains?.length || domains.length} icon={Building2} />
@@ -1303,6 +1316,26 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
               icon={Code}
             />
           </div>
+
+          {/* Visual Analytics — Sunburst + Heatmap */}
+          {allUseCases.length > 0 && (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+              <GlassCard tilt={false} className="p-5 flex flex-col items-center">
+                <h3 className="text-[10px] font-bold text-text-secondary uppercase tracking-wider mb-3 self-start">Domain Distribution</h3>
+                <DomainSunburst
+                  domains={results?.domains || domains.map(d => ({ domain_name: d, use_cases: allUseCases.filter(uc => (uc._domain || uc['Business Domain'] || uc.domain) === d) }))}
+                  businessName={selectedSession?.business_name || ''}
+                />
+              </GlassCard>
+              <GlassCard tilt={false} className="p-5">
+                <h3 className="text-[10px] font-bold text-text-secondary uppercase tracking-wider mb-3">Priority × Domain</h3>
+                <PriorityHeatmap
+                  useCases={allUseCases}
+                  domains={results?.domains || domains.map(d => ({ domain_name: d }))}
+                />
+              </GlassCard>
+            </div>
+          )}
 
           {/* ═══ Two-Column: Domain Sidebar + Use Cases ═══ */}
           <div className="flex gap-4">
@@ -1670,13 +1703,15 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
 /* ── Stat Card ── */
 function StatCard({ label, value, icon: Icon }) {
   return (
-    <div className="bg-surface border border-border rounded-lg p-4">
+    <GlassCard tilt className="p-4">
       <div className="flex items-center gap-2 mb-1">
         <Icon size={14} className="text-text-tertiary" />
         <span className="text-xs text-text-secondary">{label}</span>
       </div>
-      <div className="text-2xl font-bold text-text-primary">{value}</div>
-    </div>
+      <div className="text-2xl font-bold text-text-primary">
+        <AnimatedCounter value={value} />
+      </div>
+    </GlassCard>
   );
 }
 
@@ -1856,7 +1891,7 @@ function UseCaseCard({ uc, index, expanded, onToggle, resolveTable, token, datab
         onClick={onToggle}
         className="w-full flex items-center gap-3 px-5 py-4 text-left hover:bg-bg-subtle transition-smooth"
       >
-        <span className="text-lg shrink-0">{typeIcon}</span>
+        {priority ? <ScoreGauge priority={priority} size={34} /> : <span className="text-lg shrink-0">{typeIcon}</span>}
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-sm font-semibold text-text-primary">

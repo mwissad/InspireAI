@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, Component } from 'react';
+import { useState, useEffect, useCallback, useRef, Component } from 'react';
 import { ThemeProvider } from './ThemeContext';
 import Header from './components/Header';
 import SettingsPanel from './components/SettingsPanel';
@@ -8,6 +8,8 @@ import LaunchPage from './pages/LaunchPage';
 import MonitorPage from './pages/MonitorPage';
 import ResultsPage from './pages/ResultsPage';
 import ChoosePage from './pages/ChoosePage';
+import ScrollProgressRing from './components/ScrollProgressRing';
+import ParticleField from './components/ParticleField';
 
 // Error Boundary to catch rendering crashes and display useful info
 class ErrorBoundary extends Component {
@@ -117,7 +119,17 @@ export default function App() {
     })();
   }, [settings.authMode, settings.spClientId, settings.spClientSecret, settings.spTenantId, settings.databricksHost]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const nav = (p) => setPage(p);
+  const [transitioning, setTransitioning] = useState(false);
+  const [prevPage, setPrevPage] = useState(null);
+  const nav = useCallback((p) => {
+    if (p === page) return;
+    setTransitioning(true);
+    setPrevPage(page);
+    setTimeout(() => {
+      setPage(p);
+      setTransitioning(false);
+    }, 200);
+  }, [page]);
 
   // Navigation guards
   const canLaunch = true;
@@ -160,7 +172,9 @@ export default function App() {
 
   return (
     <ThemeProvider>
-    <div className="min-h-screen bg-bg text-text-primary">
+    <div className="min-h-screen bg-bg text-text-primary relative">
+      {/* Ambient particle field — visible on all pages */}
+      <ParticleField count={40} />
       {/* Header (hidden on landing) */}
       {page !== 'landing' && (
         <Header
@@ -174,7 +188,7 @@ export default function App() {
       )}
 
       {/* Main content */}
-      <main>
+      <main className={transitioning ? 'page-exit' : 'page-enter'} key={page}>
         {page === 'landing' && <LandingPage onStart={() => nav('choose')} />}
 
         {page === 'choose' && (
@@ -229,6 +243,9 @@ export default function App() {
           onClose={() => setShowSettings(false)}
         />
       )}
+
+      {/* Scroll progress ring — bottom-right corner */}
+      {page !== 'landing' && <ScrollProgressRing />}
     </div>
     </ThemeProvider>
   );

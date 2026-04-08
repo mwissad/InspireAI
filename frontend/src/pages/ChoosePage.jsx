@@ -1,5 +1,8 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Rocket, BarChart3, Loader2, AlertCircle, Clock, CheckCircle2, ArrowRight, Sparkles, ChevronRight, ChevronDown, ChevronUp, Trash2, Eye, EyeOff, Target, FileText } from 'lucide-react';
+import SessionSparkline from '../components/SessionSparkline';
+import MagneticButton from '../components/MagneticButton';
+import { SkeletonCard } from '../components/SkeletonLoader';
 
 const STATUS_CONFIG = {
   completed: { label: 'Completed', bg: 'bg-[#27AE60]/10', text: 'text-[#27AE60]', dot: 'bg-[#27AE60]' },
@@ -122,13 +125,17 @@ export default function ChoosePage({ settings, onNewExperiment, onViewResults })
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center min-h-[80vh]">
-        <div className="text-center space-y-4">
-          <div className="relative w-16 h-16 mx-auto">
-            <div className="absolute inset-0 rounded-full bg-[#FF3621]/20 blur-xl animate-pulse" />
-            <Loader2 className="relative w-10 h-10 animate-spin text-[#FF3621] mx-auto mt-3" />
+      <div className="min-h-[calc(100vh-64px)] flex items-start justify-center pt-12 pb-16 px-6">
+        <div className="max-w-3xl w-full space-y-6">
+          <div className="text-center space-y-3">
+            <div className="skeleton w-40 h-5 mx-auto rounded-full" />
+            <div className="skeleton w-64 h-9 mx-auto rounded-lg" />
+            <div className="skeleton w-52 h-4 mx-auto rounded" />
           </div>
-          <p className="text-sm text-text-secondary">Discovering your experiments...</p>
+          <div className="skeleton w-full h-20 rounded-2xl" />
+          <div className="space-y-2">
+            {[1, 2, 3, 4].map(i => <SkeletonCard key={i} />)}
+          </div>
         </div>
       </div>
     );
@@ -354,6 +361,7 @@ export default function ChoosePage({ settings, onNewExperiment, onViewResults })
                         </button>
                       )}
 
+                      {!isQuickOpen && <SessionSparkline session={session} />}
                       <ChevronRight size={16} className={`text-text-tertiary transition-all ${isQuickOpen ? 'rotate-90' : 'group-hover:text-text-secondary'}`} />
                     </div>
                   </button>
