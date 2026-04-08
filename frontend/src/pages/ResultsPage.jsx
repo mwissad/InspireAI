@@ -1317,25 +1317,6 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
             />
           </div>
 
-          {/* Visual Analytics — Sunburst + Heatmap */}
-          {allUseCases.length > 0 && (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
-              <GlassCard tilt={false} className="p-5 flex flex-col items-center">
-                <h3 className="text-[10px] font-bold text-text-secondary uppercase tracking-wider mb-3 self-start">Domain Distribution</h3>
-                <DomainSunburst
-                  domains={results?.domains || domains.map(d => ({ domain_name: d, use_cases: allUseCases.filter(uc => (uc._domain || uc['Business Domain'] || uc.domain) === d) }))}
-                  businessName={selectedSession?.business_name || ''}
-                />
-              </GlassCard>
-              <GlassCard tilt={false} className="p-5">
-                <h3 className="text-[10px] font-bold text-text-secondary uppercase tracking-wider mb-3">Priority × Domain</h3>
-                <PriorityHeatmap
-                  useCases={allUseCases}
-                  domains={results?.domains || domains.map(d => ({ domain_name: d }))}
-                />
-              </GlassCard>
-            </div>
-          )}
 
           {/* ═══ Two-Column: Domain Sidebar + Use Cases ═══ */}
           <div className="flex gap-4">
@@ -1891,7 +1872,7 @@ function UseCaseCard({ uc, index, expanded, onToggle, resolveTable, token, datab
         onClick={onToggle}
         className="w-full flex items-center gap-3 px-5 py-4 text-left hover:bg-bg-subtle transition-smooth"
       >
-        {priority ? <ScoreGauge priority={priority} size={34} /> : <span className="text-lg shrink-0">{typeIcon}</span>}
+        <span className="text-lg shrink-0">{typeIcon}</span>
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-sm font-semibold text-text-primary">

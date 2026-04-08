@@ -8,6 +8,7 @@ import LaunchPage from './pages/LaunchPage';
 import MonitorPage from './pages/MonitorPage';
 import ResultsPage from './pages/ResultsPage';
 import ChoosePage from './pages/ChoosePage';
+import SetupWizard from './pages/SetupWizard';
 import ScrollProgressRing from './components/ScrollProgressRing';
 import ParticleField from './components/ParticleField';
 
@@ -52,7 +53,9 @@ class ErrorBoundary extends Component {
 }
 
 export default function App() {
-  const [page, setPage] = useState('landing');
+  // Detect if first-run setup is needed
+  const needsSetup = !localStorage.getItem('db_setup_complete');
+  const [page, setPage] = useState(needsSetup ? 'setup' : 'landing');
   const [showSettings, setShowSettings] = useState(false);
 
   // Persisted settings
@@ -189,6 +192,17 @@ export default function App() {
 
       {/* Main content */}
       <main className={transitioning ? 'page-exit' : 'page-enter'} key={page}>
+        {page === 'setup' && (
+          <SetupWizard
+            settings={settings}
+            update={update}
+            onComplete={() => {
+              localStorage.setItem('db_setup_complete', '1');
+              nav('landing');
+            }}
+          />
+        )}
+
         {page === 'landing' && <LandingPage onStart={() => nav('choose')} />}
 
         {page === 'choose' && (

@@ -454,6 +454,117 @@ app.get('/api/health', (req, res) => {
   });
 });
 
+// ═══════════════════════════════════════════════════
+//  Setup Verification — validates all prerequisites
+// ═══════════════════════════════════════════════════
+app.post('/api/setup/verify', async (req, res) => {
+  const token = getToken(req);
+  const host = resolveHost(req);
+  const { warehouse_id, inspire_database } = req.body || {};
+
+  const checks = {
+    workspace: { ok: false, message: '' },
+    auth: { ok: false, message: '' },
+    warehouse: { ok: false, message: '' },
+    catalog: { ok: false, message: '' },
+    notebook: { ok: false, message: '' },
+  };
+
+  // 1. Workspace connectivity
+  try {
+    if (!host) throw new Error('No Databricks host configured');
+    const resp = await fetch(`${host}/api/2.0/clusters/spark-versions`, {
+      headers: { Authorization: `Bearer ${token || 'invalid'}` },
+    });
+    checks.workspace = { ok: resp.status !== 0, message: resp.ok ? host : `Host reachable but returned ${resp.status}` };
+  } catch (err) {
+    checks.workspace = { ok: false, message: `Cannot reach ${host || 'no host'}: ${err.message}` };
+  }
+
+  // 2. Authentication
+  if (token && host) {
+    try {
+      const resp = await dbFetch(host, token, '/api/2.0/preview/scim/v2/Me');
+      if (resp.ok) {
+        const me = await resp.json();
+        checks.auth = { ok: true, message: `Authenticated as ${me.displayName || me.userName || 'user'}` };
+      } else {
+        checks.auth = { ok: false, message: `Token invalid (${resp.status})` };
+      }
+    } catch (err) {
+      checks.auth = { ok: false, message: err.message };
+    }
+  } else {
+    checks.auth = { ok: false, message: token ? 'No host configured' : 'No token provided' };
+  }
+
+  // 3. Warehouse access
+  if (checks.auth.ok && warehouse_id) {
+    try {
+      const resp = await dbFetch(host, token, `/api/2.0/sql/warehouses/${warehouse_id}`);
+      if (resp.ok) {
+        const wh = await resp.json();
+        checks.warehouse = { ok: true, message: `${wh.name} (${wh.state})`, state: wh.state };
+      } else {
+        checks.warehouse = { ok: false, message: `Cannot access warehouse ${warehouse_id}` };
+      }
+    } catch (err) {
+      checks.warehouse = { ok: false, message: err.message };
+    }
+  } else if (!warehouse_id) {
+    checks.warehouse = { ok: false, message: 'No warehouse selected' };
+  }
+
+  // 4. Catalog/database access
+  if (checks.auth.ok && inspire_database) {
+    try {
+      const parts = inspire_database.split('.');
+      if (parts.length !== 2) throw new Error('Format must be catalog.schema');
+      const [catalog, schema] = parts;
+      // Test catalog access
+      const catResp = await dbFetch(host, token, `/api/2.1/unity-catalog/catalogs/${encodeURIComponent(catalog)}`);
+      if (!catResp.ok) throw new Error(`Cannot access catalog "${catalog}"`);
+      // Test schema access or creation
+      const schResp = await dbFetch(host, token, `/api/2.1/unity-catalog/schemas/${encodeURIComponent(catalog)}.${encodeURIComponent(schema)}`);
+      if (schResp.ok) {
+        checks.catalog = { ok: true, message: `${inspire_database} exists and accessible` };
+      } else {
+        // Schema doesn't exist — check if we can create it
+        checks.catalog = { ok: true, message: `Catalog "${catalog}" accessible. Schema "${schema}" will be created on first run.` };
+      }
+    } catch (err) {
+      checks.catalog = { ok: false, message: err.message };
+    }
+  } else if (!inspire_database) {
+    checks.catalog = { ok: false, message: 'No inspire database specified' };
+  }
+
+  // 5. Notebook bundle
+  const hasDbc = fs.existsSync(BUNDLED_DBC_PATH);
+  checks.notebook = { ok: hasDbc, message: hasDbc ? 'Notebook bundle found' : 'DBC file not found — notebook publish will fail' };
+
+  const allOk = Object.values(checks).every(c => c.ok);
+  res.json({ ok: allOk, checks });
+});
+
+// Create inspire database schema if it doesn't exist
+app.post('/api/setup/create-database', requireToken, async (req, res) => {
+  try {
+    const { inspire_database, warehouse_id } = req.body;
+    if (!inspire_database || !warehouse_id) return res.status(400).json({ error: 'inspire_database and warehouse_id required' });
+    const parts = inspire_database.split('.');
+    if (parts.length !== 2) return res.status(400).json({ error: 'Format: catalog.schema' });
+    const [catalog, schema] = parts;
+
+    // Create schema if not exists
+    const sql = `CREATE SCHEMA IF NOT EXISTS \`${catalog}\`.\`${schema}\``;
+    const result = await executeSql(req.dbHost, req.dbToken, warehouse_id, sql);
+    res.json({ ok: true, message: `Schema ${inspire_database} ready` });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // Auto-publish and return the notebook path
 app.get('/api/notebook', requireToken, async (req, res) => {
   try {
