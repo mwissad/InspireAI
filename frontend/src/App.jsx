@@ -11,7 +11,6 @@ import ChoosePage from './pages/ChoosePage';
 import SetupWizard from './pages/SetupWizard';
 import ScrollProgressRing from './components/ScrollProgressRing';
 import ParticleField from './components/ParticleField';
-import McpGuidePage from './pages/McpGuidePage';
 
 // Error Boundary to catch rendering crashes and display useful info
 class ErrorBoundary extends Component {
@@ -249,7 +248,6 @@ export default function App() {
           </ErrorBoundary>
         )}
 
-        {page === 'mcp' && <McpGuidePage />}
       </main>
 
       {/* Settings panel */}

@@ -6,7 +6,6 @@ const NAV = [
   { id: 'launch',  label: 'Launch',  step: 1 },
   { id: 'monitor', label: 'Monitor', step: 2 },
   { id: 'results', label: 'Results', step: 3 },
-  { id: 'mcp',     label: 'MCP',     step: null },
 ];
 
 export default function Header({
@@ -22,7 +21,6 @@ export default function Header({
     launch: true,
     monitor: canMonitor,
     results: canResults || true,
-    mcp: true,
   };
 
   return (
