@@ -7,32 +7,88 @@
   --color-db-red-50: rgba(255, 54, 33, 0.08);
   --color-db-red-100: rgba(255, 54, 33, 0.15);
 
-  /* Surfaces — dark mode */
-  --color-surface: #111113;
-  --color-bg: #09090B;
-  --color-bg-subtle: #1A1A1F;
-  --color-panel: #0F0F12;
+  /* Surfaces — resolved via CSS vars below */
+  --color-surface: var(--t-surface);
+  --color-bg: var(--t-bg);
+  --color-bg-subtle: var(--t-bg-subtle);
+  --color-panel: var(--t-panel);
 
-  /* Borders — dark mode */
-  --color-border: rgba(255, 255, 255, 0.08);
-  --color-border-subtle: rgba(255, 255, 255, 0.04);
-  --color-border-strong: rgba(255, 255, 255, 0.15);
+  /* Borders */
+  --color-border: var(--t-border);
+  --color-border-subtle: var(--t-border-subtle);
+  --color-border-strong: var(--t-border-strong);
 
-  /* Text — dark mode */
-  --color-text-primary: #F0F0F3;
-  --color-text-secondary: #A0A0AB;
-  --color-text-tertiary: #63636E;
-  --color-text-disabled: #3F3F46;
+  /* Text */
+  --color-text-primary: var(--t-text-primary);
+  --color-text-secondary: var(--t-text-secondary);
+  --color-text-tertiary: var(--t-text-tertiary);
+  --color-text-disabled: var(--t-text-disabled);
 
-  /* Status — dark mode */
+  /* Status */
   --color-success: #22C55E;
-  --color-success-bg: rgba(34, 197, 94, 0.1);
+  --color-success-bg: var(--t-success-bg);
   --color-warning: #EAB308;
-  --color-warning-bg: rgba(234, 179, 8, 0.1);
+  --color-warning-bg: var(--t-warning-bg);
   --color-error: #EF4444;
-  --color-error-bg: rgba(239, 68, 68, 0.1);
+  --color-error-bg: var(--t-error-bg);
   --color-info: #3B82F6;
-  --color-info-bg: rgba(59, 130, 246, 0.1);
+  --color-info-bg: var(--t-info-bg);
+}
+
+/* ═══ Light theme (default) ═══ */
+:root {
+  --t-surface: #FFFFFF;
+  --t-bg: #F7F7F8;
+  --t-bg-subtle: #EEEFF1;
+  --t-panel: #FAFAFA;
+
+  --t-border: rgba(0, 0, 0, 0.10);
+  --t-border-subtle: rgba(0, 0, 0, 0.05);
+  --t-border-strong: rgba(0, 0, 0, 0.18);
+
+  --t-text-primary: #1A1A1F;
+  --t-text-secondary: #5C5C66;
+  --t-text-tertiary: #8C8C96;
+  --t-text-disabled: #B8B8C0;
+
+  --t-success-bg: rgba(34, 197, 94, 0.10);
+  --t-warning-bg: rgba(234, 179, 8, 0.10);
+  --t-error-bg: rgba(239, 68, 68, 0.10);
+  --t-info-bg: rgba(59, 130, 246, 0.10);
+
+  --t-scrollbar-thumb: rgba(0, 0, 0, 0.12);
+  --t-scrollbar-hover: rgba(0, 0, 0, 0.22);
+  --t-input-bg: #FFFFFF;
+  --t-input-color: #1A1A1F;
+  --t-placeholder: #8C8C96;
+}
+
+/* ═══ Dark theme ═══ */
+.dark {
+  --t-surface: #111113;
+  --t-bg: #09090B;
+  --t-bg-subtle: #1A1A1F;
+  --t-panel: #0F0F12;
+
+  --t-border: rgba(255, 255, 255, 0.08);
+  --t-border-subtle: rgba(255, 255, 255, 0.04);
+  --t-border-strong: rgba(255, 255, 255, 0.15);
+
+  --t-text-primary: #F0F0F3;
+  --t-text-secondary: #A0A0AB;
+  --t-text-tertiary: #63636E;
+  --t-text-disabled: #3F3F46;
+
+  --t-success-bg: rgba(34, 197, 94, 0.1);
+  --t-warning-bg: rgba(234, 179, 8, 0.1);
+  --t-error-bg: rgba(239, 68, 68, 0.1);
+  --t-info-bg: rgba(59, 130, 246, 0.1);
+
+  --t-scrollbar-thumb: rgba(255, 255, 255, 0.1);
+  --t-scrollbar-hover: rgba(255, 255, 255, 0.2);
+  --t-input-bg: #111113;
+  --t-input-color: #F0F0F3;
+  --t-placeholder: #63636E;
 }
 
 /* Base */
@@ -40,15 +96,16 @@ body {
   font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  background-color: #09090B;
-  color: #F0F0F3;
+  background-color: var(--t-bg);
+  color: var(--t-text-primary);
+  transition: background-color 0.25s ease, color 0.25s ease;
 }
 
-/* Custom scrollbar (dark) */
+/* Custom scrollbar */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.1); border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.2); }
+::-webkit-scrollbar-thumb { background: var(--t-scrollbar-thumb); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--t-scrollbar-hover); }
 
 /* Glow focus ring */
 .glow-focus:focus-within {
@@ -75,12 +132,13 @@ body {
   box-shadow: 0 0 8px rgba(255, 54, 33, 0.4), 0 0 20px rgba(255, 54, 33, 0.15);
 }
 
-/* Input field styling — dark mode */
+/* Input field styling */
 input[type="text"],
 input[type="password"],
 select {
-  background-color: #111113;
-  color: #F0F0F3;
+  background-color: var(--t-input-bg);
+  color: var(--t-input-color);
+  transition: background-color 0.25s ease, color 0.25s ease;
 }
 
 input[type="text"]:focus,
@@ -93,7 +151,7 @@ select:focus {
 
 input::placeholder,
 textarea::placeholder {
-  color: #63636E;
+  color: var(--t-placeholder);
 }
 
 /* Infinite scrolling marquee */

@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, Component } from 'react';
+import { ThemeProvider } from './ThemeContext';
 import Header from './components/Header';
 import SettingsPanel from './components/SettingsPanel';
 import LandingPage from './pages/LandingPage';
@@ -158,6 +159,7 @@ export default function App() {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
+    <ThemeProvider>
     <div className="min-h-screen bg-bg text-text-primary">
       {/* Header (hidden on landing) */}
       {page !== 'landing' && (
@@ -228,5 +230,6 @@ export default function App() {
         />
       )}
     </div>
+    </ThemeProvider>
   );
 }

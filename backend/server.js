@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const multer = require('multer');
 const AdmZip = require('adm-zip');
+const crypto = require('crypto');
 
 dotenv.config();
 
@@ -786,16 +787,22 @@ app.post('/api/run', requireToken, async (req, res) => {
     }
 
     const businessName = params['00_business_name'] || 'Run';
+    const sanitizeTag = (v) => String(v || '').replace(/[^A-Za-z0-9._-]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '').slice(0, 255);
     const sanitizedTag = businessName.toLowerCase().replace(/[^a-z0-9_]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '') || 'run';
     const jobName = `Inspire AI - ${businessName} - ${new Date().toISOString().slice(0, 19)}`;
+    const jobSessionId = crypto.randomUUID();
+    const notebookFilename = resolvedPath.split('/').pop() || 'inspire_notebook';
 
     // Step 1: Create a job with tags
     const createPayload = {
       name: jobName,
       tags: {
-        app: `inspire_ai_${sanitizedTag}`,
         inspire_version: 'v4.6',
-        business_name: businessName,
+        dbx_inspire_ai_business: sanitizeTag(businessName),
+        dbx_inspire_ai_type: 'discovery',
+        dbx_inspire_ai_session: sanitizeTag(jobSessionId),
+        dbx_inspire_ai_usecases: '0',
+        dbx_inspire_ai_notebook: sanitizeTag(notebookFilename),
       },
       tasks: [{
           task_key: 'inspire_notebook',
@@ -1306,7 +1313,7 @@ app.get('/api/inspire/sessions', requireToken, async (req, res) => {
 
     const [catalog, schema] = inspire_database.split('.');
     const table = `\`${catalog}\`.\`${schema}\`.\`__inspire_session\``;
-    const sql = `SELECT session_id, processing_status, completed_percent, create_at, completed_on, business_name, inspire_database_name, operation_mode, generation_path FROM ${table} ORDER BY create_at DESC LIMIT 20`;
+    const sql = `SELECT session_id, processing_status, completed_percent, create_at, completed_on, business_name, inspire_database_name, operation_mode, generation_path, business_domains, catalogs, results_json FROM ${table} ORDER BY create_at DESC LIMIT 20`;
 
     const result = await executeSql(req.dbHost, req.dbToken, warehouse_id, sql);
     const sessions = sqlResultToObjects(result);
@@ -1321,6 +1328,10 @@ app.get('/api/inspire/sessions', requireToken, async (req, res) => {
         generation_path: s.generation_path || '',
       };
       s.completed_percent = parseFloat(s.completed_percent) || 0;
+      // Parse results_json for session summary
+      if (s.results_json && typeof s.results_json === 'string') {
+        try { s.results_json = JSON.parse(s.results_json); } catch { s.results_json = null; }
+      }
     }
 
     res.json({ sessions });

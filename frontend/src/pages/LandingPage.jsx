@@ -12,6 +12,8 @@ import {
   ChevronDown,
 } from 'lucide-react';
 import DatabricksLogo from '../components/DatabricksLogo';
+import { useTheme } from '../ThemeContext';
+import { Sun, Moon } from 'lucide-react';
 
 /* ═══════════════════════════════════════════════════
    DATA
@@ -29,29 +31,37 @@ const FLOATING_SCHEMAS = [
 ];
 
 const CONSTELLATION_NODES = [
-  // Scattered tables (will cluster into domains on scroll)
-  { id: 0, label: 'orders', x: 12, y: 20, domain: 0 },
-  { id: 1, label: 'customers', x: 25, y: 35, domain: 0 },
-  { id: 2, label: 'segments', x: 18, y: 50, domain: 0 },
-  { id: 3, label: 'clicks', x: 8, y: 65, domain: 0 },
-  { id: 4, label: 'transactions', x: 42, y: 15, domain: 1 },
-  { id: 5, label: 'ledger', x: 55, y: 28, domain: 1 },
-  { id: 6, label: 'invoices', x: 48, y: 45, domain: 1 },
-  { id: 7, label: 'payroll', x: 60, y: 60, domain: 1 },
-  { id: 8, label: 'shipments', x: 75, y: 20, domain: 2 },
-  { id: 9, label: 'inventory', x: 88, y: 35, domain: 2 },
-  { id: 10, label: 'sensors', x: 80, y: 55, domain: 2 },
-  { id: 11, label: 'equipment', x: 92, y: 68, domain: 2 },
-  { id: 12, label: 'alerts', x: 35, y: 72, domain: 3 },
-  { id: 13, label: 'compliance', x: 50, y: 80, domain: 3 },
-  { id: 14, label: 'access_logs', x: 65, y: 75, domain: 3 },
+  // Domain 0 — Customer Intelligence (top-left cluster)
+  { id: 0, label: 'orders', x: 10, y: 18, domain: 0 },
+  { id: 1, label: 'customers', x: 22, y: 30, domain: 0 },
+  { id: 2, label: 'segments', x: 14, y: 44, domain: 0 },
+  { id: 3, label: 'clicks', x: 6, y: 58, domain: 0 },
+  // Domain 1 — Financial Analytics (center cluster)
+  { id: 4, label: 'transactions', x: 40, y: 14, domain: 1 },
+  { id: 5, label: 'ledger', x: 52, y: 26, domain: 1 },
+  { id: 6, label: 'invoices', x: 46, y: 42, domain: 1 },
+  { id: 7, label: 'payroll', x: 58, y: 56, domain: 1 },
+  // Domain 2 — Operations (top-right cluster)
+  { id: 8, label: 'shipments', x: 74, y: 16, domain: 2 },
+  { id: 9, label: 'inventory', x: 86, y: 30, domain: 2 },
+  { id: 10, label: 'sensors', x: 78, y: 48, domain: 2 },
+  { id: 11, label: 'equipment', x: 92, y: 62, domain: 2 },
+  // Domain 3 — Risk & Compliance (bottom-center cluster)
+  { id: 12, label: 'alerts', x: 32, y: 68, domain: 3 },
+  { id: 13, label: 'compliance', x: 50, y: 76, domain: 3 },
+  { id: 14, label: 'access_logs', x: 66, y: 70, domain: 3 },
 ];
 
 const CONSTELLATION_EDGES = [
-  [0, 1], [1, 2], [2, 3], [0, 4], [1, 5],
-  [4, 5], [5, 6], [6, 7], [4, 8], [5, 9],
+  // Intra-domain
+  [0, 1], [1, 2], [2, 3],
+  [4, 5], [5, 6], [6, 7],
   [8, 9], [9, 10], [10, 11], [8, 11],
-  [6, 12], [7, 13], [12, 13], [13, 14], [12, 14],
+  [12, 13], [13, 14], [12, 14],
+  // Cross-domain bridges
+  [0, 4], [1, 5],
+  [4, 8], [5, 9],
+  [6, 12], [7, 13],
   [2, 12], [3, 13], [10, 14],
 ];
 
@@ -170,6 +180,8 @@ function useScrollProgress(containerRef) {
 
 /* Floating schema names background */
 function FloatingSchemas({ opacity = 0.04 }) {
+  const { theme } = useTheme();
+  const schemaColor = theme === 'dark' ? '#FFF8ED' : '#1A1A1F';
   return (
     <div className="absolute inset-0 overflow-hidden pointer-events-none" aria-hidden="true">
       {FLOATING_SCHEMAS.map((schema, i) => {
@@ -184,7 +196,7 @@ function FloatingSchemas({ opacity = 0.04 }) {
               top: `${top}%`,
               right: '-300px',
               opacity,
-              color: '#FFF8ED',
+              color: schemaColor,
               animationDuration: `${dur}s`,
               animationDelay: `${delay}s`,
             }}
@@ -197,105 +209,117 @@ function FloatingSchemas({ opacity = 0.04 }) {
   );
 }
 
-/* SVG Neural Constellation — dynamic, alive */
-function NeuralConstellation({ progress, visible }) {
-  const nodeOpacity = Math.min(1, progress * 3);
-  const edgeProgress = Math.max(0, Math.min(1, (progress - 0.2) * 2));
-  const glowIntensity = Math.max(0, (progress - 0.5) * 2);
-  const labelOpacity = Math.max(0, (progress - 0.6) * 2.5);
-  const alive = glowIntensity > 0.3; // constellation is "alive" after this point
+/* SVG Neural Constellation — animated network graph */
+function NeuralConstellation({ progress, visible, palette }) {
+  const p = Math.min(1, progress);
+  const nodeOpacity = Math.min(1, p * 2.5);
+  const edgeOpacity = Math.max(0, Math.min(1, (p - 0.1) * 2));
+  const labelOpacity = Math.max(0, (p - 0.3) * 2);
+  const alive = p > 0.25;
 
   return (
     <svg
       viewBox="0 0 100 90"
       className={`w-full h-full transition-opacity duration-1000 ${visible ? 'opacity-100' : 'opacity-0'}`}
-      style={{ filter: `drop-shadow(0 0 ${glowIntensity * 25}px rgba(255,54,33,${glowIntensity * 0.2}))` }}
     >
       <defs>
-        {/* Animated gradient for data flow along edges */}
         {DOMAIN_COLORS.map((color, i) => (
-          <linearGradient key={`flow-${i}`} id={`flow-${i}`} gradientUnits="userSpaceOnUse">
-            <stop offset="0%" stopColor={color} stopOpacity="0">
-              <animate attributeName="offset" values="-0.3;1" dur={`${2 + i * 0.5}s`} repeatCount="indefinite" />
-            </stop>
-            <stop offset="15%" stopColor={color} stopOpacity="0.8">
-              <animate attributeName="offset" values="-0.15;1.15" dur={`${2 + i * 0.5}s`} repeatCount="indefinite" />
-            </stop>
-            <stop offset="30%" stopColor={color} stopOpacity="0">
-              <animate attributeName="offset" values="0;1.3" dur={`${2 + i * 0.5}s`} repeatCount="indefinite" />
-            </stop>
-          </linearGradient>
+          <radialGradient key={`rg-${i}`} id={`rg-${i}`} cx="50%" cy="50%" r="50%">
+            <stop offset="0%" stopColor={color} stopOpacity="0.3" />
+            <stop offset="100%" stopColor={color} stopOpacity="0" />
+          </radialGradient>
         ))}
-        {/* Glow filter for nodes */}
-        <filter id="nodeGlow">
+        <filter id="nodeGlow" x="-100%" y="-100%" width="300%" height="300%">
           <feGaussianBlur stdDeviation="1.5" result="blur" />
-          <feMerge>
-            <feMergeNode in="blur" />
-            <feMergeNode in="SourceGraphic" />
-          </feMerge>
+          <feMerge><feMergeNode in="blur" /><feMergeNode in="SourceGraphic" /></feMerge>
+        </filter>
+        <filter id="cloudBlur" x="-50%" y="-50%" width="200%" height="200%">
+          <feGaussianBlur stdDeviation="3.5" />
         </filter>
       </defs>
 
-      {/* Background grid — subtle */}
+      {/* Domain clouds */}
+      {alive && DOMAIN_NAMES.map((_, i) => {
+        const nodes = CONSTELLATION_NODES.filter(n => n.domain === i);
+        const cx = nodes.reduce((s, n) => s + n.x, 0) / nodes.length;
+        const cy = nodes.reduce((s, n) => s + n.y, 0) / nodes.length;
+        return (
+          <circle key={`cloud-${i}`} cx={cx} cy={cy} r={16} fill={`url(#rg-${i})`} opacity={edgeOpacity * 0.5} filter="url(#cloudBlur)">
+            <animate attributeName="r" values="14;18;14" dur={`${5 + i * 1.5}s`} repeatCount="indefinite" />
+          </circle>
+        );
+      })}
+
+      {/* Radial grid rings */}
       {alive && (
         <g opacity={0.03}>
-          {Array.from({ length: 10 }).map((_, i) => (
-            <line key={`gx${i}`} x1={i * 10 + 5} y1={0} x2={i * 10 + 5} y2={90} stroke="#FFF8ED" strokeWidth={0.2} />
-          ))}
-          {Array.from({ length: 9 }).map((_, i) => (
-            <line key={`gy${i}`} x1={0} y1={i * 10 + 5} x2={100} y2={i * 10 + 5} stroke="#FFF8ED" strokeWidth={0.2} />
+          {[15, 30, 45].map(r => (
+            <circle key={r} cx={50} cy={45} r={r} fill="none" stroke={palette.gridStroke} strokeWidth={0.15} strokeDasharray="1 2" />
           ))}
         </g>
       )}
 
-      {/* Static edges — base lines */}
+      {/* Edges — straight lines with dash-draw animation */}
       {CONSTELLATION_EDGES.map(([a, b], i) => {
         const na = CONSTELLATION_NODES[a];
         const nb = CONSTELLATION_NODES[b];
-        const edgeColor = DOMAIN_COLORS[na.domain] || '#FF3621';
+        const isCross = na.domain !== nb.domain;
+        const color = isCross ? '#FF3621' : DOMAIN_COLORS[na.domain];
+        const dx = nb.x - na.x;
+        const dy = nb.y - na.y;
+        const len = Math.sqrt(dx * dx + dy * dy);
         return (
           <line
-            key={`e-base-${i}`}
+            key={`e-${i}`}
             x1={na.x} y1={na.y} x2={nb.x} y2={nb.y}
-            stroke={edgeColor}
-            strokeWidth={0.3}
-            strokeOpacity={edgeProgress * 0.25}
-            strokeDasharray="1.5 1.5"
-            strokeDashoffset={100 - edgeProgress * 100}
-            style={{ transition: 'all 0.8s ease-out' }}
+            stroke={color}
+            strokeWidth={isCross ? 0.25 : 0.4}
+            strokeOpacity={edgeOpacity * (isCross ? 0.2 : 0.35)}
+            strokeDasharray={len}
+            strokeDashoffset={len * (1 - edgeOpacity)}
+            style={{ transition: 'stroke-dashoffset 1.5s ease-out' }}
           />
         );
       })}
 
-      {/* Animated data flow along edges — "thinking" pulses */}
+      {/* Animated flowing dashes along edges */}
       {alive && CONSTELLATION_EDGES.map(([a, b], i) => {
         const na = CONSTELLATION_NODES[a];
         const nb = CONSTELLATION_NODES[b];
-        const domainIdx = na.domain;
+        const color = DOMAIN_COLORS[na.domain];
+        const dx = nb.x - na.x;
+        const dy = nb.y - na.y;
+        const len = Math.sqrt(dx * dx + dy * dy);
         return (
           <line
-            key={`e-flow-${i}`}
+            key={`ef-${i}`}
             x1={na.x} y1={na.y} x2={nb.x} y2={nb.y}
-            stroke={`url(#flow-${domainIdx})`}
-            strokeWidth={0.6}
+            stroke={color}
+            strokeWidth={0.5}
             strokeLinecap="round"
-            opacity={glowIntensity * 0.7}
-          />
+            strokeOpacity={0.5}
+            strokeDasharray={`2 ${len - 2}`}
+          >
+            <animate
+              attributeName="stroke-dashoffset"
+              values={`${len};0`}
+              dur={`${2 + (i % 5) * 0.4}s`}
+              repeatCount="indefinite"
+            />
+          </line>
         );
       })}
 
-      {/* Traveling particles along edges */}
-      {alive && CONSTELLATION_EDGES.filter((_, i) => i % 3 === 0).map(([a, b], i) => {
+      {/* Traveling particles along straight edges */}
+      {alive && CONSTELLATION_EDGES.map(([a, b], i) => {
         const na = CONSTELLATION_NODES[a];
         const nb = CONSTELLATION_NODES[b];
         const color = DOMAIN_COLORS[na.domain];
+        const dur = 2 + (i % 4) * 0.6;
         return (
-          <circle key={`particle-${i}`} r={0.5} fill={color} opacity={0.8}>
-            <animateMotion
-              dur={`${2 + (i % 3)}s`}
-              repeatCount="indefinite"
-              path={`M${na.x},${na.y} L${nb.x},${nb.y}`}
-            />
+          <circle key={`p-${i}`} r={0.45} fill={color} opacity={0.85}>
+            <animate attributeName="cx" values={`${na.x};${nb.x};${na.x}`} dur={`${dur}s`} repeatCount="indefinite" />
+            <animate attributeName="cy" values={`${na.y};${nb.y};${na.y}`} dur={`${dur}s`} repeatCount="indefinite" />
           </circle>
         );
       })}
@@ -303,80 +327,71 @@ function NeuralConstellation({ progress, visible }) {
       {/* Nodes */}
       {CONSTELLATION_NODES.map((node) => {
         const color = DOMAIN_COLORS[node.domain];
-        const pulseDelay = node.id * 0.3;
+        const delay = node.id * 0.2;
+        const r = 1.4;
         return (
           <g key={node.id}>
-            {/* Outer glow ring — pulses when alive */}
-            <circle cx={node.x} cy={node.y} r={glowIntensity * 4} fill="none" stroke={color} strokeWidth={0.2} opacity={glowIntensity * 0.2}>
+            {/* Pulse ring */}
+            {alive && (
+              <circle cx={node.x} cy={node.y} r={r * 2} fill="none" stroke={color} strokeWidth={0.15}>
+                <animate attributeName="r" values={`${r * 1.5};${r * 4};${r * 1.5}`} dur="3s" begin={`${delay}s`} repeatCount="indefinite" />
+                <animate attributeName="opacity" values="0.25;0;0.25" dur="3s" begin={`${delay}s`} repeatCount="indefinite" />
+              </circle>
+            )}
+            {/* Glow halo */}
+            <circle cx={node.x} cy={node.y} r={r * 2.5} fill={color} opacity={nodeOpacity * 0.08} filter="url(#nodeGlow)" />
+            {/* Core dot */}
+            <circle cx={node.x} cy={node.y} r={r} fill={color} opacity={nodeOpacity}>
               {alive && (
-                <animate attributeName="r" values={`${glowIntensity * 3};${glowIntensity * 5};${glowIntensity * 3}`} dur="3s" begin={`${pulseDelay}s`} repeatCount="indefinite" />
+                <animate attributeName="r" values={`${r};${r * 1.15};${r}`} dur="2.5s" begin={`${delay}s`} repeatCount="indefinite" />
               )}
             </circle>
-            {/* Soft glow */}
-            <circle cx={node.x} cy={node.y} r={glowIntensity * 2.5} fill={color} opacity={glowIntensity * 0.12} filter={alive ? 'url(#nodeGlow)' : undefined}>
-              {alive && (
-                <animate attributeName="opacity" values={`${glowIntensity * 0.08};${glowIntensity * 0.18};${glowIntensity * 0.08}`} dur="2.5s" begin={`${pulseDelay}s`} repeatCount="indefinite" />
-              )}
-            </circle>
-            {/* Node dot — breathes */}
-            <circle
-              cx={node.x} cy={node.y}
-              r={0.8 + glowIntensity * 0.8}
-              fill={color}
-              opacity={nodeOpacity}
-              style={{ transition: 'all 0.6s ease-out' }}
-            >
-              {alive && (
-                <animate attributeName="r" values={`${0.8 + glowIntensity * 0.6};${0.8 + glowIntensity * 1.2};${0.8 + glowIntensity * 0.6}`} dur="2s" begin={`${pulseDelay}s`} repeatCount="indefinite" />
-              )}
-            </circle>
+            {/* Specular highlight */}
+            <circle cx={node.x - r * 0.3} cy={node.y - r * 0.3} r={r * 0.3} fill="white" opacity={nodeOpacity * 0.45} />
             {/* Label */}
-            <text
-              x={node.x} y={node.y - 3}
-              textAnchor="middle"
-              fill="#FFF8ED"
-              fontSize={2}
-              fontFamily="monospace"
-              opacity={labelOpacity * 0.6}
-              style={{ transition: 'opacity 0.5s' }}
-            >
-              {node.label}
-            </text>
+            <g opacity={labelOpacity * 0.9} style={{ transition: 'opacity 0.5s' }}>
+              <rect
+                x={node.x - node.label.length * 0.9 - 0.5} y={node.y - 5.2}
+                width={node.label.length * 1.8 + 1} height={2.8}
+                rx={1} fill={palette.pageBg} opacity={0.75}
+              />
+              <text x={node.x} y={node.y - 3.2} textAnchor="middle" fill={color} fontSize={1.7} fontWeight="600" fontFamily="system-ui, sans-serif">
+                {node.label}
+              </text>
+            </g>
           </g>
         );
       })}
 
-      {/* Domain cluster labels */}
+      {/* Domain labels */}
       {DOMAIN_NAMES.map((name, i) => {
-        const domainNodes = CONSTELLATION_NODES.filter((n) => n.domain === i);
-        const cx = domainNodes.reduce((s, n) => s + n.x, 0) / domainNodes.length;
-        const cy = domainNodes.reduce((s, n) => s + n.y, 0) / domainNodes.length;
+        const nodes = CONSTELLATION_NODES.filter(n => n.domain === i);
+        const cx = nodes.reduce((s, n) => s + n.x, 0) / nodes.length;
+        const cy = Math.max(...nodes.map(n => n.y)) + 7;
+        const color = DOMAIN_COLORS[i];
+        const w = name.length * 1.5 + 3;
         return (
-          <g key={name} opacity={Math.max(0, (glowIntensity - 0.3) * 2)} style={{ transition: 'opacity 0.8s' }}>
-            {/* Domain background pill */}
-            <rect
-              x={cx - 15} y={cy + 5} width={30} height={5} rx={2.5}
-              fill={DOMAIN_COLORS[i]} opacity={0.1}
-            />
-            <text
-              x={cx} y={cy + 8.5}
-              textAnchor="middle"
-              fill={DOMAIN_COLORS[i]}
-              fontSize={2.2}
-              fontWeight="600"
-            >
+          <g key={name} opacity={Math.max(0, labelOpacity)} style={{ transition: 'opacity 0.8s' }}>
+            <rect x={cx - w / 2} y={cy - 1.8} width={w} height={4} rx={2} fill={color} opacity={0.1} />
+            <text x={cx} y={cy + 1} textAnchor="middle" fill={color} fontSize={1.9} fontWeight="700" fontFamily="system-ui, sans-serif">
               {name}
             </text>
           </g>
         );
       })}
 
-      {/* Central pulse — "heartbeat" of the AI */}
+      {/* Central heartbeat */}
       {alive && (
-        <circle cx={50} cy={45} r={1} fill="#FF3621" opacity={0.3}>
-          <animate attributeName="r" values="0;35;0" dur="4s" repeatCount="indefinite" />
-          <animate attributeName="opacity" values="0.15;0;0.15" dur="4s" repeatCount="indefinite" />
-        </circle>
+        <>
+          <circle cx={50} cy={45} r={1} fill="none" stroke="#FF3621" strokeWidth={0.25}>
+            <animate attributeName="r" values="0;38;0" dur="4.5s" repeatCount="indefinite" />
+            <animate attributeName="opacity" values="0.12;0;0.12" dur="4.5s" repeatCount="indefinite" />
+          </circle>
+          <circle cx={50} cy={45} r={1} fill="none" stroke="#FF3621" strokeWidth={0.18}>
+            <animate attributeName="r" values="0;25;0" dur="4.5s" begin="1.5s" repeatCount="indefinite" />
+            <animate attributeName="opacity" values="0.08;0;0.08" dur="4.5s" begin="1.5s" repeatCount="indefinite" />
+          </circle>
+        </>
       )}
     </svg>
   );
@@ -524,18 +539,18 @@ function InspireOrb({ progress, section }) {
 }
 
 /* Use case card */
-function UseCaseCard({ uc, index, visible }) {
+function UseCaseCard({ uc, index, visible, palette }) {
   return (
     <div
-      className={`flex items-center gap-4 px-5 py-4 bg-[rgba(255,255,255,0.03)] border border-[rgba(255,255,255,0.06)] rounded-2xl transition-all duration-700 ${
+      className={`flex items-center gap-4 px-5 py-4 rounded-2xl transition-all duration-700 ${
         visible ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-8'
       }`}
-      style={{ transitionDelay: `${index * 120}ms` }}
+      style={{ transitionDelay: `${index * 120}ms`, background: palette.cardBg, border: `1px solid ${palette.cardBorder}` }}
     >
       <div className="w-2 h-2 rounded-full shrink-0" style={{ background: uc.color }} />
       <div className="flex-1 min-w-0">
-        <p className="text-sm font-semibold text-[#FFF8ED] truncate">{uc.title}</p>
-        <p className="text-[11px] text-[#ABABAB]">{uc.domain}</p>
+        <p className="text-sm font-semibold truncate" style={{ color: palette.text }}>{uc.title}</p>
+        <p className="text-[11px]" style={{ color: palette.textMuted }}>{uc.domain}</p>
       </div>
       <span className="text-[10px] font-bold px-2.5 py-1 rounded-full shrink-0" style={{ background: `${uc.color}20`, color: uc.color }}>
         {uc.priority}
@@ -548,13 +563,51 @@ function UseCaseCard({ uc, index, visible }) {
    LANDING PAGE
    ═══════════════════════════════════════════════════ */
 
+// Theme-aware color palette for the landing page
+const LIGHT_PALETTE = {
+  pageBg: '#F7F7F8',
+  text: '#1A1A1F',
+  textMuted: '#5C5C66',
+  textFaint: '#B0B0B8',
+  navBg: 'rgba(247,247,248,0.7)',
+  navBorder: 'rgba(0,0,0,0.06)',
+  btnBg: 'rgba(0,0,0,0.04)',
+  btnBorder: 'rgba(0,0,0,0.08)',
+  btnHoverBg: 'rgba(0,0,0,0.08)',
+  gridStroke: '#1A1A1F',
+  cardBg: 'rgba(0,0,0,0.03)',
+  cardBorder: 'rgba(0,0,0,0.08)',
+  termBg: '#FFFFFF',
+  termHeaderBg: '#F0F0F3',
+  termBorder: 'rgba(0,0,0,0.10)',
+};
+const DARK_PALETTE = {
+  pageBg: '#0A0808',
+  text: '#FFF8ED',
+  textMuted: '#ABABAB',
+  textFaint: '#666',
+  navBg: 'rgba(10,8,8,0.7)',
+  navBorder: 'rgba(255,248,237,0.05)',
+  btnBg: 'rgba(255,248,237,0.06)',
+  btnBorder: 'rgba(255,248,237,0.08)',
+  btnHoverBg: 'rgba(255,248,237,0.1)',
+  gridStroke: '#FFF8ED',
+  cardBg: 'rgba(255,255,255,0.03)',
+  cardBorder: 'rgba(255,255,255,0.06)',
+  termBg: 'rgba(0,0,0,0.4)',
+  termHeaderBg: 'rgba(255,255,255,0.04)',
+  termBorder: 'rgba(255,255,255,0.06)',
+};
+
 export default function LandingPage({ onStart }) {
   const typedText = useTypingEffect(HERO_WORDS);
   const scrollContainerRef = useRef(null);
   const { progress, section } = useScrollProgress(scrollContainerRef);
+  const { theme, toggle } = useTheme();
+  const C = theme === 'dark' ? DARK_PALETTE : LIGHT_PALETTE;
 
   return (
-    <div className="h-screen bg-[#0A0808] text-[#FFF8ED] overflow-hidden relative">
+    <div className="h-screen overflow-hidden relative" style={{ backgroundColor: C.pageBg, color: C.text }}>
       {/* ═══ Progress bar ═══ */}
       <div className="fixed top-0 left-0 right-0 z-[100] h-[2px]">
         <div className="h-full bg-gradient-to-r from-[#FF3621] to-[#FF8A6B]" style={{ width: `${progress * 100}%`, transition: 'width 0.15s' }} />
@@ -564,11 +617,11 @@ export default function LandingPage({ onStart }) {
       <InspireOrb progress={progress} section={section} />
 
       {/* ═══ Nav — always visible ═══ */}
-      <nav className="fixed top-0 left-0 right-0 z-50 border-b border-[rgba(255,248,237,0.05)] bg-[#0A0808]/70 backdrop-blur-2xl">
+      <nav className="fixed top-0 left-0 right-0 z-50 backdrop-blur-2xl" style={{ borderBottom: `1px solid ${C.navBorder}`, backgroundColor: C.navBg }}>
         <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <DatabricksLogo className="w-8 h-8" />
-            <span className="font-bold text-xl tracking-[-0.03em] text-[#FFF8ED]">Inspire AI</span>
+            <span className="font-bold text-xl tracking-[-0.03em]" style={{ color: C.text }}>Inspire AI</span>
             <span className="text-[10px] font-semibold text-[#FF3621] border border-[#FF3621]/30 bg-[#FF3621]/10 rounded-full px-2 py-0.5">v4.6</span>
           </div>
           {/* Section indicators */}
@@ -580,21 +633,34 @@ export default function LandingPage({ onStart }) {
                   const el = scrollContainerRef.current;
                   if (el) el.scrollTo({ top: i * el.clientHeight, behavior: 'smooth' });
                 }}
-                className={`px-3 py-1.5 rounded-full text-[11px] font-medium transition-all duration-300 ${
-                  section === i ? 'bg-[#FF3621]/15 text-[#FF3621]' : 'text-[#ABABAB] hover:text-[#FFF8ED]'
-                }`}
+                className="px-3 py-1.5 rounded-full text-[11px] font-medium transition-all duration-300"
+                style={{
+                  color: section === i ? '#FF3621' : C.textMuted,
+                  backgroundColor: section === i ? 'rgba(255,54,33,0.15)' : 'transparent',
+                }}
               >
                 {label}
               </button>
             ))}
           </div>
-          <button
-            onClick={onStart}
-            className="inline-flex items-center gap-2 px-5 py-2.5 text-sm font-semibold text-[#FFF8ED] bg-[rgba(255,248,237,0.06)] border border-[rgba(255,248,237,0.08)] rounded-xl hover:bg-[rgba(255,248,237,0.1)] transition-all duration-300"
-          >
-            Launch App
-            <ArrowRight size={14} />
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={toggle}
+              className="p-2.5 rounded-xl transition-all duration-300"
+              style={{ color: C.textMuted, backgroundColor: C.btnBg, border: `1px solid ${C.btnBorder}` }}
+              title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+            >
+              {theme === 'dark' ? <Sun size={14} /> : <Moon size={14} />}
+            </button>
+            <button
+              onClick={onStart}
+              className="inline-flex items-center gap-2 px-5 py-2.5 text-sm font-semibold rounded-xl transition-all duration-300"
+              style={{ color: C.text, backgroundColor: C.btnBg, border: `1px solid ${C.btnBorder}` }}
+            >
+              Launch App
+              <ArrowRight size={14} />
+            </button>
+          </div>
         </div>
       </nav>
 
@@ -616,12 +682,12 @@ export default function LandingPage({ onStart }) {
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-12 items-center">
               {/* Left: Text */}
               <div>
-                <div className="inline-flex items-center gap-2 px-3.5 py-1.5 bg-[rgba(255,248,237,0.04)] border border-[rgba(255,248,237,0.08)] rounded-full mb-8">
+                <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full mb-8" style={{ background: C.btnBg, border: `1px solid ${C.btnBorder}` }}>
                   <span className="relative flex h-2 w-2">
                     <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#FF3621] opacity-60" />
                     <span className="relative inline-flex rounded-full h-2 w-2 bg-[#FF3621]" />
                   </span>
-                  <span className="text-[11px] font-medium text-[#ABABAB]">Powered by Databricks Foundation Models</span>
+                  <span className="text-[11px] font-medium" style={{ color: C.textMuted }}>Powered by Databricks Foundation Models</span>
                 </div>
 
                 <h1 className="text-4xl sm:text-5xl lg:text-6xl font-bold leading-[1.08] tracking-[-0.04em] mb-6">
@@ -629,10 +695,10 @@ export default function LandingPage({ onStart }) {
                   <span className="bg-gradient-to-r from-[#FF3621] to-[#FF8A6B] bg-clip-text text-transparent">{typedText}</span>
                   <span className="text-[#FF3621] animate-cursor-blink">|</span>
                   <br />
-                  <span className="text-[#7A716E]">from your data.</span>
+                  <span style={{ color: C.textMuted }}>from your data.</span>
                 </h1>
 
-                <p className="text-base sm:text-lg text-[#ABABAB] mb-10 max-w-lg leading-relaxed">
+                <p className="text-base sm:text-lg mb-10 max-w-lg leading-relaxed" style={{ color: C.textMuted }}>
                   AI-powered analytics use case discovery from your Unity Catalog metadata. Scored, prioritized, and implementation-ready.
                 </p>
 
@@ -646,7 +712,7 @@ export default function LandingPage({ onStart }) {
                   <ArrowRight size={16} className="group-hover:translate-x-0.5 transition-transform duration-300" />
                 </button>
 
-                <div className="flex items-center gap-2 text-sm text-[#7A716E] mt-5">
+                <div className="flex items-center gap-2 text-sm mt-5" style={{ color: C.textFaint }}>
                   <Globe2 size={14} />
                   <span>No setup required — runs on your Databricks workspace</span>
                 </div>
@@ -673,24 +739,24 @@ export default function LandingPage({ onStart }) {
 
           {/* Scroll hint */}
           <div className="absolute bottom-8 left-1/2 -translate-x-1/2 flex flex-col items-center gap-2 animate-pulse">
-            <span className="text-[10px] font-medium text-[#7A716E] uppercase tracking-[0.15em]">Scroll to explore</span>
-            <ChevronDown size={16} className="text-[#7A716E]" />
+            <span className="text-[10px] font-medium text-text-tertiary uppercase tracking-[0.15em]">Scroll to explore</span>
+            <ChevronDown size={16} className="text-text-tertiary" />
           </div>
         </section>
 
         {/* ═══ SECTION 2: Neural Constellation — "Analyze" ═══ */}
         <section className="h-screen snap-start relative flex items-center justify-center overflow-hidden">
           <FloatingSchemas opacity={0.02} />
-          <div className="absolute inset-0 bg-gradient-to-b from-[#0A0808] via-[#0D0A0A] to-[#100C0C]" />
+          <div className="absolute inset-0" style={{ background: `linear-gradient(to bottom, ${C.pageBg}, ${C.pageBg})` }} />
 
           <div className="relative z-10 max-w-6xl mx-auto px-6 w-full">
             <div className="text-center mb-8">
               <span className="text-[11px] font-medium text-[#FF3621] uppercase tracking-[0.15em] block mb-3">How Inspire Thinks</span>
               <h2 className={`text-3xl sm:text-4xl lg:text-5xl font-bold tracking-[-0.03em] transition-all duration-1000 ${section >= 1 ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-8'}`}>
                 Your tables.{' '}
-                <span className="text-[#7A716E]">Connected.</span>
+                <span className="text-text-tertiary">Connected.</span>
               </h2>
-              <p className={`text-sm text-[#ABABAB] mt-3 max-w-md mx-auto transition-all duration-1000 delay-200 ${section >= 1 ? 'opacity-100' : 'opacity-0'}`}>
+              <p className={`text-sm mt-3 max-w-md mx-auto transition-all duration-1000 delay-200 ${section >= 1 ? 'opacity-100' : 'opacity-0'}`} style={{ color: C.textMuted }}>
                 Inspire AI maps relationships across your Unity Catalog, discovers hidden connections, and clusters tables into business domains.
               </p>
             </div>
@@ -699,6 +765,7 @@ export default function LandingPage({ onStart }) {
               <NeuralConstellation
                 progress={section >= 1 ? Math.min(1, (progress - 0.15) * 4) : 0}
                 visible={section >= 1}
+                palette={C}
               />
             </div>
 
@@ -707,7 +774,7 @@ export default function LandingPage({ onStart }) {
               {DOMAIN_NAMES.map((name, i) => (
                 <div key={name} className="flex items-center gap-2">
                   <div className="w-2 h-2 rounded-full" style={{ background: DOMAIN_COLORS[i] }} />
-                  <span className="text-[11px] text-[#ABABAB]">{name}</span>
+                  <span className="text-[11px]" style={{ color: C.textMuted }}>{name}</span>
                 </div>
               ))}
             </div>
@@ -716,7 +783,7 @@ export default function LandingPage({ onStart }) {
 
         {/* ═══ SECTION 3: Pipeline — "Insights" ═══ */}
         <section className="h-screen snap-start relative flex items-center justify-center overflow-hidden">
-          <div className="absolute inset-0 bg-gradient-to-b from-[#100C0C] via-[#0D0A0A] to-[#0A0808]" />
+          <div className="absolute inset-0" style={{ background: C.pageBg }} />
           <div className="absolute top-[30%] right-[-5%] w-[30%] h-[30%] rounded-full bg-[#FF3621]/[0.03] blur-[100px]" aria-hidden="true" />
 
           <div className="relative z-10 max-w-5xl mx-auto px-6 w-full">
@@ -724,7 +791,7 @@ export default function LandingPage({ onStart }) {
               <span className="text-[11px] font-medium text-[#FF3621] uppercase tracking-[0.15em] block mb-3">The Pipeline</span>
               <h2 className={`text-3xl sm:text-4xl lg:text-5xl font-bold tracking-[-0.03em] transition-all duration-1000 ${section >= 2 ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-8'}`}>
                 From catalog to strategy{' '}
-                <span className="text-[#7A716E]">in minutes.</span>
+                <span className="text-text-tertiary">in minutes.</span>
               </h2>
             </div>
 
@@ -733,21 +800,21 @@ export default function LandingPage({ onStart }) {
               {PIPELINE_STEPS.map((step, i) => (
                 <div key={step.label} className="flex items-center gap-2 sm:gap-2">
                   <div
-                    className={`flex items-center gap-3 px-6 py-4 bg-[rgba(255,248,237,0.03)] border border-[rgba(255,248,237,0.06)] rounded-2xl transition-all duration-700 hover:bg-[rgba(255,248,237,0.06)] hover:border-[#FF3621]/20 group ${
+                    className={`flex items-center gap-3 px-6 py-4 rounded-2xl transition-all duration-700 hover:border-[#FF3621]/20 group ${
                       section >= 2 ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-8'
                     }`}
-                    style={{ transitionDelay: `${i * 150}ms` }}
+                    style={{ background: C.cardBg, border: `1px solid ${C.cardBorder}`, transitionDelay: `${i * 150}ms` }}
                   >
                     <div className="w-10 h-10 rounded-xl bg-[#FF3621]/10 flex items-center justify-center">
                       <step.icon size={20} className="text-[#FF3621] group-hover:scale-110 transition-transform" />
                     </div>
                     <div>
-                      <span className="text-[10px] text-[#7A716E] font-mono">0{i + 1}</span>
-                      <p className="text-sm font-semibold text-[#FFF8ED]">{step.label}</p>
+                      <span className="text-[10px] text-text-tertiary font-mono">0{i + 1}</span>
+                      <p className="text-sm font-semibold" style={{ color: C.text }}>{step.label}</p>
                     </div>
                   </div>
                   {i < PIPELINE_STEPS.length - 1 && (
-                    <ChevronRight size={16} className="text-[rgba(255,248,237,0.1)] hidden sm:block" />
+                    <ChevronRight size={16} className="hidden sm:block" style={{ color: C.cardBorder }} />
                   )}
                 </div>
               ))}
@@ -757,7 +824,7 @@ export default function LandingPage({ onStart }) {
 
         {/* ═══ SECTION 4: The Inspire Agent ═══ */}
         <section className="h-screen snap-start relative flex items-center justify-center overflow-hidden">
-          <div className="absolute inset-0 bg-gradient-to-b from-[#0A0808] via-[#080A10] to-[#0A0808]" />
+          <div className="absolute inset-0" style={{ background: C.pageBg }} />
           {/* Subtle blue-ish glow to match the robot's lighting */}
           <div className="absolute top-[20%] left-[30%] w-[40%] h-[50%] rounded-full bg-[#1a2a4a]/[0.15] blur-[120px]" aria-hidden="true" />
           <div className="absolute bottom-[10%] right-[20%] w-[25%] h-[30%] rounded-full bg-[#FF3621]/[0.04] blur-[100px]" aria-hidden="true" />
@@ -766,8 +833,8 @@ export default function LandingPage({ onStart }) {
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 items-center">
               {/* Left: Agent image */}
               <div className={`relative transition-all duration-1000 ${section >= 3 ? 'opacity-100 translate-x-0' : 'opacity-0 -translate-x-12'}`}>
-                <div className="absolute inset-0 bg-gradient-to-t from-[#0A0808] via-transparent to-transparent z-10 pointer-events-none" />
-                <div className="absolute inset-0 bg-gradient-to-r from-transparent via-transparent to-[#0A0808] z-10 pointer-events-none" />
+                <div className="absolute inset-0 z-10 pointer-events-none" style={{ background: `linear-gradient(to top, ${C.pageBg}, transparent)` }} />
+                <div className="absolute inset-0 z-10 pointer-events-none" style={{ background: `linear-gradient(to right, transparent, transparent 60%, ${C.pageBg})` }} />
                 <img
                   src="/inspire-agent.jpg"
                   alt="Inspire AI Agent"
@@ -783,7 +850,7 @@ export default function LandingPage({ onStart }) {
                   Your AI-powered{' '}
                   <span className="bg-gradient-to-r from-[#FF3621] to-[#FF8A6B] bg-clip-text text-transparent">data strategist.</span>
                 </h2>
-                <p className="text-base text-[#ABABAB] leading-relaxed mb-8 max-w-md">
+                <p className="text-base leading-relaxed mb-8 max-w-md" style={{ color: C.textMuted }}>
                   Inspire AI works like a senior data consultant — scanning your entire Unity Catalog, understanding table relationships, and delivering a prioritized analytics strategy tailored to your business.
                 </p>
                 <div className="space-y-3">
@@ -795,7 +862,7 @@ export default function LandingPage({ onStart }) {
                   ].map((item) => (
                     <div key={item.label} className="flex items-center gap-3">
                       <div className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: item.color }} />
-                      <span className="text-sm text-[#FFF8ED]/70">{item.label}</span>
+                      <span className="text-sm" style={{ color: C.textMuted }}>{item.label}</span>
                     </div>
                   ))}
                 </div>
@@ -806,7 +873,7 @@ export default function LandingPage({ onStart }) {
 
         {/* ═══ SECTION 5: Results — "Results" ═══ */}
         <section className="h-screen snap-start relative flex items-center justify-center overflow-hidden">
-          <div className="absolute inset-0 bg-[#0A0808]" />
+          <div className="absolute inset-0" style={{ background: C.pageBg }} />
           <FloatingSchemas opacity={0.015} />
 
           <div className="relative z-10 max-w-5xl mx-auto px-6 w-full">
@@ -820,11 +887,11 @@ export default function LandingPage({ onStart }) {
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-w-3xl mx-auto">
               {USE_CASES.map((uc, i) => (
-                <UseCaseCard key={uc.title} uc={uc} index={i} visible={section >= 4} />
+                <UseCaseCard key={uc.title} uc={uc} index={i} visible={section >= 4} palette={C} />
               ))}
             </div>
 
-            <p className={`text-center text-sm text-[#7A716E] mt-8 transition-all duration-700 delay-700 ${section >= 4 ? 'opacity-100' : 'opacity-0'}`}>
+            <p className={`text-center text-sm text-text-tertiary mt-8 transition-all duration-700 delay-700 ${section >= 4 ? 'opacity-100' : 'opacity-0'}`}>
               + Genie code instructions, PDF catalogs, executive presentations, and more.
             </p>
           </div>
@@ -832,17 +899,17 @@ export default function LandingPage({ onStart }) {
 
         {/* ═══ SECTION 6: CTA — "Start" ═══ */}
         <section className="h-screen snap-start relative flex items-center justify-center overflow-hidden">
-          <div className="absolute inset-0 bg-gradient-to-b from-[#0A0808] to-[#0D0808]" />
+          <div className="absolute inset-0" style={{ background: C.pageBg }} />
           <div className="absolute top-[40%] left-[40%] w-[30%] h-[30%] rounded-full bg-[#FF3621]/[0.06] blur-[120px]" aria-hidden="true" />
 
           <div className="relative z-10 text-center max-w-2xl mx-auto px-6">
             <h2 className={`text-4xl sm:text-5xl lg:text-6xl font-bold tracking-[-0.03em] leading-[1.1] mb-6 transition-all duration-1000 ${section >= 5 ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-8'}`}>
-              <span className="text-[rgba(255,248,237,0.15)]">Your data already has the answers.</span>
+              <span style={{ color: C.textFaint }}>Your data already has the answers.</span>
               <br />
               <span className="bg-gradient-to-r from-[#FF3621] to-[#FF8A6B] bg-clip-text text-transparent">Inspire finds the questions.</span>
             </h2>
 
-            <p className={`text-[#ABABAB] mb-10 transition-all duration-700 delay-200 ${section >= 5 ? 'opacity-100' : 'opacity-0'}`}>
+            <p className={`mb-10 transition-all duration-700 delay-200 ${section >= 5 ? 'opacity-100' : 'opacity-0'}`} style={{ color: C.textMuted }}>
               Launch Inspire AI and generate your first analytics strategy in under 30 minutes.
             </p>
 
@@ -860,7 +927,7 @@ export default function LandingPage({ onStart }) {
 
             <div className="flex items-center justify-center gap-3 mt-12">
               {['Unity Catalog', 'Foundation Models', 'Genie'].map((tag) => (
-                <span key={tag} className="text-[10px] text-[#7A716E] font-medium px-3 py-1.5 bg-[rgba(255,248,237,0.03)] border border-[rgba(255,248,237,0.05)] rounded-lg">{tag}</span>
+                <span key={tag} className="text-[10px] font-medium px-3 py-1.5 rounded-lg" style={{ color: C.textFaint, background: C.btnBg, border: `1px solid ${C.btnBorder}` }}>{tag}</span>
               ))}
             </div>
           </div>

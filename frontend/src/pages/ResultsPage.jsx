@@ -26,6 +26,7 @@ import {
   Eye,
   EyeOff,
   ExternalLink,
+  HelpCircle,
 } from 'lucide-react';
 
 /* ── Priority sort order ── */
@@ -108,6 +109,13 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
   const [artifactsLoading, setArtifactsLoading] = useState(false);
   const [artifactsExpanded, setArtifactsExpanded] = useState(false);
   const [expandedFolders, setExpandedFolders] = useState({});
+  // All notebook file paths discovered from the artifacts tree (for "Open in Databricks" links)
+  const [allNotebookFiles, setAllNotebookFiles] = useState([]);
+  // File preview state
+  const [previewFile, setPreviewFile] = useState(null); // path of currently previewed file
+  const [previewData, setPreviewData] = useState(null); // { type: 'pdf'|'csv', url?, rows?, headers? }
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [expandedCells, setExpandedCells] = useState({}); // { "row-col": true }
 
   // Only one card expanded at a time
   const [expandedUseCase, setExpandedUseCase] = useState(null);
@@ -362,6 +370,32 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
     return h;
   }, [token, databricksHost]);
 
+  // Recursively scan a folder to discover all file paths (notebooks, PDFs, CSVs, etc.)
+  const deepScanFolder = useCallback(async (folderPath) => {
+    if (!folderPath || !token) return;
+    const headers = artifactHeaders();
+    const discovered = [];
+    const scan = async (dir) => {
+      try {
+        const resp = await fetch(`/api/workspace/list?path=${encodeURIComponent(dir)}`, { headers });
+        if (!resp.ok) return;
+        const data = await resp.json();
+        const files = data.files || [];
+        setArtifactTree(prev => ({ ...prev, [dir]: { files, loading: false, error: null } }));
+        for (const f of files) {
+          if (f.is_directory) {
+            await scan(f.path);
+          } else {
+            discovered.push(f.path);
+          }
+        }
+      } catch { /* silent */ }
+    };
+    await scan(folderPath);
+    // Accumulate — don't replace
+    setAllNotebookFiles(prev => [...new Set([...prev, ...discovered])]);
+  }, [token, artifactHeaders]);
+
   const loadArtifacts = useCallback(async (genPath) => {
     if (!genPath || !token) return;
     setArtifactsLoading(true);
@@ -391,6 +425,10 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
           if (data.files && data.files.length > 0) {
             setArtifactsRootFiles(data.files);
             setArtifactsLoading(false);
+            // Auto-scan ALL subfolders to discover notebook paths and previewable files
+            for (const f of data.files) {
+              if (f.is_directory) deepScanFolder(f.path);
+            }
             return;
           }
         }
@@ -398,7 +436,7 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
     }
     setArtifactsRootFiles([]);
     setArtifactsLoading(false);
-  }, [token, databricksHost, artifactHeaders]);
+  }, [token, databricksHost, artifactHeaders, deepScanFolder]);
 
   const loadFolder = useCallback(async (folderPath) => {
     if (!folderPath || !token) return;
@@ -444,6 +482,97 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
       .catch(() => { /* silent */ });
   }, [artifactHeaders]);
 
+  // Open a file (PDF/Excel) in a new browser tab
+  const openFileInTab = useCallback(async (filePath, fileName) => {
+    const headers = artifactHeaders();
+    try {
+      const resp = await fetch(`/api/workspace/export?path=${encodeURIComponent(filePath)}`, { headers });
+      if (!resp.ok) return;
+      const blob = await resp.blob();
+      const ext = (fileName || '').toLowerCase().split('.').pop();
+      const mimeType = ext === 'pdf' ? 'application/pdf' : ext === 'csv' ? 'text/csv' : 'application/octet-stream';
+      const typedBlob = new Blob([blob], { type: mimeType });
+      const url = URL.createObjectURL(typedBlob);
+      window.open(url, '_blank');
+    } catch { /* silent */ }
+  }, [artifactHeaders]);
+
+  // Toggle inline preview for a file
+  const togglePreview = useCallback(async (filePath, fileName) => {
+    // Toggle off if same file
+    if (previewFile === filePath) {
+      if (previewData?.url) URL.revokeObjectURL(previewData.url);
+      setPreviewFile(null);
+      setPreviewData(null);
+      return;
+    }
+    setPreviewFile(filePath);
+    setPreviewData(null);
+    setPreviewLoading(true);
+    setExpandedCells({});
+    const headers = artifactHeaders();
+    try {
+      const resp = await fetch(`/api/workspace/export?path=${encodeURIComponent(filePath)}`, { headers });
+      if (!resp.ok) throw new Error('fetch failed');
+      const ext = (fileName || '').toLowerCase().split('.').pop();
+      if (ext === 'pdf') {
+        const blob = new Blob([await resp.blob()], { type: 'application/pdf' });
+        setPreviewData({ type: 'pdf', url: URL.createObjectURL(blob) });
+      } else if (ext === 'csv') {
+        const text = await resp.text();
+        // CSV parser that handles quoted fields with commas and newlines
+        const parseCsvLine = (line) => {
+          const cells = [];
+          let current = '';
+          let inQuotes = false;
+          for (let i = 0; i < line.length; i++) {
+            const ch = line[i];
+            if (inQuotes) {
+              if (ch === '"' && line[i + 1] === '"') { current += '"'; i++; }
+              else if (ch === '"') inQuotes = false;
+              else current += ch;
+            } else {
+              if (ch === '"') inQuotes = true;
+              else if (ch === ',') { cells.push(current.trim()); current = ''; }
+              else current += ch;
+            }
+          }
+          cells.push(current.trim());
+          return cells;
+        };
+        const lines = text.split(/\r?\n/).filter(l => l.trim());
+        const csvHeaders = parseCsvLine(lines[0] || '');
+        const rows = lines.slice(1, 51).map(l => parseCsvLine(l));
+        setPreviewData({ type: 'csv', headers: csvHeaders, rows, totalRows: lines.length - 1 });
+      } else if (ext === 'xlsx' || ext === 'xls') {
+        const buf = await resp.arrayBuffer();
+        try {
+          // Load SheetJS from CDN if not already loaded
+          if (!window.XLSX) {
+            await new Promise((resolve, reject) => {
+              const s = document.createElement('script');
+              s.src = 'https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js';
+              s.onload = resolve;
+              s.onerror = reject;
+              document.head.appendChild(s);
+            });
+          }
+          const wb = window.XLSX.read(buf, { type: 'array' });
+          const ws = wb.Sheets[wb.SheetNames[0]];
+          const jsonData = window.XLSX.utils.sheet_to_json(ws, { header: 1 });
+          const xlHeaders = (jsonData[0] || []).map(String);
+          const rows = jsonData.slice(1, 51).map(r => (r || []).map(c => c == null ? '' : String(c)));
+          setPreviewData({ type: 'csv', headers: xlHeaders, rows, totalRows: jsonData.length - 1 });
+        } catch {
+          setPreviewData({ type: 'error', message: 'Could not parse Excel file — try downloading instead.' });
+        }
+      }
+    } catch {
+      setPreviewData({ type: 'error', message: 'Could not load file' });
+    }
+    setPreviewLoading(false);
+  }, [previewFile, previewData, artifactHeaders]);
+
   // Find generation path from selected session
   const selectedSession = sessions.find(s => String(s.session_id) === String(selectedSessionId));
   const generationRootPath = selectedSession?.generation_path || selectedSession?.widget_values?.generation_path || '';
@@ -464,6 +593,14 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
   const generationPath = sanitizedName && resolvedRoot
     ? `${resolvedRoot.replace(/\/+$/, '')}/${sanitizedName}`
     : resolvedRoot;
+
+  // Auto-load artifacts to discover notebook paths for "Open in Databricks" links
+  useEffect(() => {
+    if (generationPath && token && !artifactsRootFiles) {
+      console.log('[Inspire] Auto-loading artifacts from:', generationPath);
+      loadArtifacts(generationPath);
+    }
+  }, [generationPath, token]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const highPriorityCount = allUseCases.filter((uc) => ['Ultra High', 'Very High', 'High'].includes(String(uc?.Priority || ''))).length;
 
@@ -846,15 +983,41 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
                               : `${(f.file_size / 1024).toFixed(0)}KB`}
                           </span>
                         )}
-                        {!isDir && (
-                          <button
-                            type="button"
-                            className="text-[10px] text-db-red hover:underline font-medium flex items-center gap-0.5 shrink-0"
-                            onClick={(e) => { e.stopPropagation(); downloadFile(f.path, f.name); }}
-                          >
-                            <Download size={10} /> Download
-                          </button>
-                        )}
+                        {!isDir && (() => {
+                          const ext = (f.name || '').toLowerCase().split('.').pop();
+                          const isPdf = ext === 'pdf';
+                          const isSpreadsheet = ext === 'csv' || ext === 'xlsx' || ext === 'xls';
+                          const isPreviewable = isPdf || isSpreadsheet;
+                          return (
+                            <div className="flex items-center gap-2 shrink-0">
+                              {isPreviewable && (
+                                <button
+                                  type="button"
+                                  className="text-[10px] text-info hover:underline font-medium flex items-center gap-0.5"
+                                  onClick={(e) => { e.stopPropagation(); togglePreview(f.path, f.name); }}
+                                >
+                                  {previewFile === f.path ? <><Eye size={10} /> Hide</> : <><Eye size={10} /> Preview</>}
+                                </button>
+                              )}
+                              {(isPdf || isSpreadsheet) && (
+                                <button
+                                  type="button"
+                                  className="text-[10px] text-success hover:underline font-medium flex items-center gap-0.5"
+                                  onClick={(e) => { e.stopPropagation(); openFileInTab(f.path, f.name); }}
+                                >
+                                  <ExternalLink size={10} /> Open
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                className="text-[10px] text-db-red hover:underline font-medium flex items-center gap-0.5"
+                                onClick={(e) => { e.stopPropagation(); downloadFile(f.path, f.name); }}
+                              >
+                                <Download size={10} /> Download
+                              </button>
+                            </div>
+                          );
+                        })()}
                         {isDir && (
                           <button
                             type="button"
@@ -866,6 +1029,66 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
                           </button>
                         )}
                       </div>
+                      {/* Inline file preview */}
+                      {!isDir && previewFile === f.path && (
+                        <div className="ml-6 mr-2 my-2">
+                          {previewLoading && (
+                            <div className="flex items-center gap-2 py-4 justify-center">
+                              <Loader2 size={12} className="animate-spin text-text-tertiary" />
+                              <span className="text-[10px] text-text-secondary">Loading preview...</span>
+                            </div>
+                          )}
+                          {previewData?.type === 'pdf' && (
+                            <iframe src={previewData.url} className="w-full h-[500px] rounded-lg border border-border" title="PDF Preview" />
+                          )}
+                          {previewData?.type === 'csv' && (
+                            <div className="rounded-xl border border-border overflow-hidden shadow-sm">
+                              {/* Table header bar */}
+                              <div className="flex items-center justify-between px-4 py-2 bg-bg-subtle border-b border-border">
+                                <span className="text-[10px] font-semibold text-text-secondary">{previewData.headers.length} columns · {previewData.totalRows} rows</span>
+                                <span className="text-[9px] text-text-tertiary">Showing first {Math.min(50, previewData.totalRows)}</span>
+                              </div>
+                              <div className="max-h-[400px] overflow-auto">
+                                <table className="w-full border-collapse">
+                                  <thead className="sticky top-0 z-10">
+                                    <tr className="bg-bg-subtle">
+                                      <th className="px-3 py-2 text-[9px] text-text-tertiary font-mono text-right border-b border-r border-border w-8">#</th>
+                                      {previewData.headers.map((h, i) => (
+                                        <th key={i} className="px-3 py-2 text-left text-[10px] text-text-primary font-semibold border-b border-border whitespace-nowrap">{h}</th>
+                                      ))}
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {previewData.rows.map((row, ri) => (
+                                      <tr key={ri} className={`${ri % 2 === 0 ? 'bg-surface' : 'bg-bg-subtle/30'} hover:bg-db-red-50/30 transition-colors`}>
+                                        <td className="px-3 py-1.5 text-[9px] text-text-tertiary font-mono text-right border-r border-border/50 w-8">{ri + 1}</td>
+                                        {row.map((cell, ci) => (
+                                          <td
+                                            key={ci}
+                                            className={`px-3 py-1.5 text-[11px] text-text-primary border-b border-border/30 ${expandedCells[`${ri}-${ci}`] ? 'whitespace-normal break-words' : 'whitespace-nowrap max-w-[250px] truncate'} ${cell.length > 30 ? 'cursor-pointer hover:bg-db-red-50/20' : ''}`}
+                                            onClick={cell.length > 30 ? () => setExpandedCells(prev => ({ ...prev, [`${ri}-${ci}`]: !prev[`${ri}-${ci}`] })) : undefined}
+                                            title={cell.length > 30 && !expandedCells[`${ri}-${ci}`] ? 'Click to expand' : undefined}
+                                          >{cell}</td>
+                                        ))}
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                              {previewData.totalRows > 50 && (
+                                <div className="flex items-center justify-center gap-2 py-2.5 bg-bg-subtle border-t border-border text-[10px] text-text-tertiary">
+                                  <span>Showing 50 of {previewData.totalRows} rows</span>
+                                  <span className="text-text-disabled">·</span>
+                                  <span>Download for full data</span>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                          {previewData?.type === 'error' && (
+                            <p className="text-[10px] text-error py-2">{previewData.message}</p>
+                          )}
+                        </div>
+                      )}
                       {isDir && isOpen && (
                         <div>
                           {folderData?.loading && (
@@ -948,6 +1171,116 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
                       <div className="max-h-80 overflow-y-auto">
                         {renderFileTree(artifactsRootFiles)}
                       </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+
+          {/* Quick Access — always visible, PDF/Excel/CSV files from artifacts */}
+          {(() => {
+            const previewableFiles = [];
+            const collect = (files) => {
+              if (!files) return;
+              for (const f of files) {
+                if (f.is_directory) {
+                  const sub = artifactTree[f.path];
+                  if (sub?.files) collect(sub.files);
+                } else {
+                  const ext = (f.name || '').toLowerCase().split('.').pop();
+                  if (['pdf', 'csv', 'xlsx', 'xls'].includes(ext)) previewableFiles.push(f);
+                }
+              }
+            };
+            collect(artifactsRootFiles);
+            if (previewableFiles.length === 0) return null;
+
+            const EXT_STYLES = {
+              pdf:  { bg: 'bg-error-bg', text: 'text-error' },
+              csv:  { bg: 'bg-success-bg', text: 'text-success' },
+              xlsx: { bg: 'bg-info-bg', text: 'text-info' },
+              xls:  { bg: 'bg-info-bg', text: 'text-info' },
+            };
+
+            return (
+              <div className="bg-surface border border-border rounded-xl p-4 mb-6 shadow-sm">
+                <h3 className="text-[10px] font-bold text-text-secondary uppercase tracking-wider mb-3">Quick Access — Documents & Data</h3>
+                <div className="flex gap-2 overflow-x-auto scrollbar-hide">
+                  {previewableFiles.map((f) => {
+                    const ext = (f.name || '').toLowerCase().split('.').pop();
+                    const style = EXT_STYLES[ext] || EXT_STYLES.csv;
+                    const isActive = previewFile === f.path;
+                    return (
+                      <div key={f.path} className={`flex items-center gap-2 px-3 py-2 rounded-lg text-[11px] border transition-all shrink-0 ${isActive ? 'border-db-red/30 bg-db-red-50' : 'border-border bg-bg-subtle/50 hover:bg-bg-subtle'}`}>
+                        <span className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded ${style.bg} ${style.text}`}>{ext}</span>
+                        <span className="text-text-primary font-medium truncate max-w-[200px]">{f.name}</span>
+                        <div className="flex items-center gap-1.5 ml-1 border-l border-border pl-2">
+                          <button type="button" className="text-[10px] text-info hover:text-info font-medium flex items-center gap-0.5 hover:underline" onClick={() => togglePreview(f.path, f.name)}>
+                            {isActive ? <><EyeOff size={9} /> Hide</> : <><Eye size={9} /> Preview</>}
+                          </button>
+                          <button type="button" className="text-[10px] text-success font-medium flex items-center gap-0.5 hover:underline" onClick={() => openFileInTab(f.path, f.name)}>
+                            <ExternalLink size={9} /> Open
+                          </button>
+                          <button type="button" className="text-[10px] text-db-red font-medium flex items-center gap-0.5 hover:underline" onClick={() => downloadFile(f.path, f.name)}>
+                            <Download size={9} />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                {/* Inline preview */}
+                {previewFile && previewableFiles.some(f => f.path === previewFile) && (
+                  <div className="mt-4">
+                    {previewLoading && (
+                      <div className="flex items-center gap-2 py-6 justify-center rounded-xl border border-border bg-bg-subtle/30">
+                        <Loader2 size={14} className="animate-spin text-text-tertiary" />
+                        <span className="text-xs text-text-secondary">Loading preview...</span>
+                      </div>
+                    )}
+                    {previewData?.type === 'pdf' && (
+                      <iframe src={previewData.url} className="w-full h-[600px] rounded-xl border border-border shadow-sm" title="PDF Preview" />
+                    )}
+                    {previewData?.type === 'csv' && (
+                      <div className="rounded-xl border border-border overflow-hidden shadow-sm">
+                        <div className="flex items-center justify-between px-4 py-2 bg-bg-subtle border-b border-border">
+                          <span className="text-[10px] font-semibold text-text-secondary">{previewData.headers.length} columns · {previewData.totalRows} rows</span>
+                          <span className="text-[9px] text-text-tertiary">Showing first {Math.min(50, previewData.totalRows)}</span>
+                        </div>
+                        <div className="max-h-[400px] overflow-auto">
+                          <table className="w-full border-collapse">
+                            <thead className="sticky top-0 z-10">
+                              <tr className="bg-bg-subtle">
+                                <th className="px-3 py-2 text-[9px] text-text-tertiary font-mono text-right border-b border-r border-border w-8">#</th>
+                                {previewData.headers.map((h, i) => (
+                                  <th key={i} className="px-3 py-2 text-left text-[10px] text-text-primary font-semibold border-b border-border whitespace-nowrap">{h}</th>
+                                ))}
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {previewData.rows.map((row, ri) => (
+                                <tr key={ri} className={`${ri % 2 === 0 ? 'bg-surface' : 'bg-bg-subtle/30'} hover:bg-db-red-50/30 transition-colors`}>
+                                  <td className="px-3 py-1.5 text-[9px] text-text-tertiary font-mono text-right border-r border-border/50 w-8">{ri + 1}</td>
+                                  {row.map((cell, ci) => (
+                                    <td key={ci} className="px-3 py-1.5 text-[11px] text-text-primary border-b border-border/30 whitespace-normal break-words max-w-[400px]">{cell}</td>
+                                  ))}
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                        {previewData.totalRows > 50 && (
+                          <div className="flex items-center justify-center gap-2 py-2.5 bg-bg-subtle border-t border-border text-[10px] text-text-tertiary">
+                            <span>Showing 50 of {previewData.totalRows} rows</span>
+                            <span className="text-text-disabled">·</span>
+                            <span>Download for full data</span>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    {previewData?.type === 'error' && (
+                      <p className="text-[10px] text-error py-2">{previewData.message}</p>
                     )}
                   </div>
                 )}
@@ -1308,6 +1641,8 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
                       resolveTable={resolveTable}
                       token={token}
                       databricksHost={databricksHost}
+                      generationPath={generationPath}
+                      allNotebookFiles={allNotebookFiles}
                     />
                   ))}
                 </div>
@@ -1413,7 +1748,7 @@ function CopyButton({ text }) {
 }
 
 /* ── Use Case Card ── */
-function UseCaseCard({ uc, index, expanded, onToggle, resolveTable, token, databricksHost }) {
+function UseCaseCard({ uc, index, expanded, onToggle, resolveTable, token, databricksHost, generationPath, allNotebookFiles }) {
   const [notebookContent, setNotebookContent] = useState(null);
   const [notebookLoading, setNotebookLoading] = useState(false);
   const [notebookError, setNotebookError] = useState('');
@@ -1443,9 +1778,21 @@ function UseCaseCard({ uc, index, expanded, onToggle, resolveTable, token, datab
   const resultTable = s(uc.result_table);
   const technicalDesign = stripHtml(uc['Technical Design']);
   const tablesInvolved = s(uc['Tables Involved']);
-  const notebookPath = s(uc.notebook_path);
+  const storedNotebookPath = s(uc.notebook_path);
   const genieInstruction = s(uc.genie_instruction);
   const typeIcon = TYPE_ICONS[ucType] || '📋';
+
+  // Use stored path, or find matching notebook from auto-discovered artifact files
+  // Notebook filenames follow: {use_case_id}-{sanitized_name}.ipynb (e.g. "N01-AI05-predict_churn.ipynb")
+  const ucId = s(uc.No);
+  const notebookPath = storedNotebookPath || (() => {
+    if (!ucId || !allNotebookFiles?.length) return '';
+    // Find a file whose name starts with the use case ID followed by a separator
+    return allNotebookFiles.find((p) => {
+      const name = p.split('/').pop() || '';
+      return name.startsWith(`${ucId}-`) || name.startsWith(`${ucId}_`) || name.startsWith(`${ucId}.`);
+    }) || '';
+  })();
 
   const hasNotebook = !!(notebookPath || genieInstruction);
 
@@ -1533,6 +1880,18 @@ function UseCaseCard({ uc, index, expanded, onToggle, resolveTable, token, datab
               <span className="text-[10px] px-2 py-0.5 rounded-full font-medium text-[#FF3621] bg-[#FF3621]/10 flex items-center gap-1">
                 <FileCode size={9} /> Notebook
               </span>
+            )}
+            {hasNotebook && notebookPath && databricksHost && (
+              <a
+                href={`https://${databricksHost.replace(/^https?:\/\//, '')}#workspace${notebookPath}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                title="Open in Databricks"
+                onClick={(e) => e.stopPropagation()}
+                className="p-1 rounded-md text-text-tertiary hover:text-db-red hover:bg-db-red-50 transition-colors"
+              >
+                <ExternalLink size={11} />
+              </a>
             )}
           </div>
           <div className="text-[10px] text-text-tertiary mt-1 flex items-center gap-3">
@@ -1681,6 +2040,19 @@ function UseCaseCard({ uc, index, expanded, onToggle, resolveTable, token, datab
                     )}
                   </button>
                   {notebookContent && <CopyButton text={notebookContent} />}
+                  {notebookContent && (
+                    <div className="relative group">
+                      <HelpCircle size={11} className="text-text-tertiary hover:text-db-red cursor-help transition-colors" />
+                      <div className="invisible opacity-0 group-hover:visible group-hover:opacity-100 transition-all duration-200 absolute bottom-full right-0 mb-2 z-50 min-w-[280px] bg-surface border border-border rounded-lg shadow-xl p-3 text-[10px] text-text-secondary leading-relaxed whitespace-pre-line">
+                        <div className="font-bold text-text-primary mb-1.5">HOW TO USE:</div>
+                        <div>1. Open Genie Code in your Databricks workspace (side panel in any notebook)</div>
+                        <div>2. Copy the ENTIRE content of the instruction below</div>
+                        <div>3. Paste it into Genie Code and let Genie generate the implementation</div>
+                        <div>4. Genie will create the complete code — review, iterate, and execute</div>
+                        <div className="absolute bottom-[-5px] right-3 w-2.5 h-2.5 bg-surface border-b border-r border-border rotate-45" />
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
 

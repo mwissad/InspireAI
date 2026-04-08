@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Rocket, BarChart3, Loader2, AlertCircle, Clock, CheckCircle2, ArrowRight, Sparkles, ChevronRight, ChevronDown, ChevronUp, Trash2 } from 'lucide-react';
+import { Rocket, BarChart3, Loader2, AlertCircle, Clock, CheckCircle2, ArrowRight, Sparkles, ChevronRight, ChevronDown, ChevronUp, Trash2, Eye, EyeOff, Target, FileText } from 'lucide-react';
 
 const STATUS_CONFIG = {
   completed: { label: 'Completed', bg: 'bg-[#27AE60]/10', text: 'text-[#27AE60]', dot: 'bg-[#27AE60]' },
@@ -26,6 +26,43 @@ function formatDate(dateStr) {
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
 
+function formatCompletedDate(dateStr) {
+  if (!dateStr) return '';
+  const d = new Date(dateStr);
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+
+const HIGH_PRIORITIES = new Set(['Ultra High', 'Very High', 'High']);
+
+function getSessionSummary(session) {
+  const rj = session.results_json;
+  if (!rj) return null;
+  // Extract all use cases from results_json
+  let useCases = [];
+  const domains = new Set();
+  if (Array.isArray(rj.domains)) {
+    for (const d of rj.domains) {
+      if (d.domain_name) domains.add(d.domain_name);
+      if (Array.isArray(d.use_cases)) useCases.push(...d.use_cases);
+    }
+  } else if (Array.isArray(rj.use_cases)) {
+    useCases = rj.use_cases;
+    for (const uc of useCases) {
+      const dom = uc['Business Domain'] || uc.domain || '';
+      if (dom) domains.add(dom);
+    }
+  } else if (Array.isArray(rj)) {
+    useCases = rj;
+    for (const uc of useCases) {
+      const dom = uc['Business Domain'] || uc.domain || '';
+      if (dom) domains.add(dom);
+    }
+  }
+  if (useCases.length === 0) return null;
+  const highCount = useCases.filter(uc => HIGH_PRIORITIES.has(uc.Priority || uc.priority || '')).length;
+  return { total: useCases.length, high: highCount, domains: domains.size, domainNames: [...domains], useCases };
+}
+
 export default function ChoosePage({ settings, onNewExperiment, onViewResults }) {
   const { token, databricksHost, warehouseId, inspireDatabase } = settings;
   const [loading, setLoading] = useState(true);
@@ -34,6 +71,7 @@ export default function ChoosePage({ settings, onNewExperiment, onViewResults })
   const [showAll, setShowAll] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [deleting, setDeleting] = useState(null);
+  const [expandedQuickView, setExpandedQuickView] = useState(null);
 
   const deleteSession = useCallback(async (sessionId) => {
     if (!token || !inspireDatabase || !warehouseId) return;
@@ -98,8 +136,28 @@ export default function ChoosePage({ settings, onNewExperiment, onViewResults })
 
   if (sessions.length === 0 && !error) return null;
 
-  const completedCount = sessions.filter(s => s.completed_percent >= 100).length;
+  const completedSessions = sessions.filter(s => s.completed_percent >= 100);
+  const completedCount = completedSessions.length;
   const inProgressCount = sessions.length - completedCount;
+
+  // Aggregate summary across all completed sessions
+  const totalSummary = (() => {
+    let totalUc = 0, totalHigh = 0;
+    const allDomains = new Set();
+    for (const s of completedSessions) {
+      const sum = getSessionSummary(s);
+      if (sum) {
+        totalUc += sum.total;
+        totalHigh += sum.high;
+        // Collect domain names
+        const rj = s.results_json;
+        if (Array.isArray(rj?.domains)) {
+          for (const d of rj.domains) if (d.domain_name) allDomains.add(d.domain_name);
+        }
+      }
+    }
+    return totalUc > 0 ? { total: totalUc, high: totalHigh, domains: allDomains.size } : null;
+  })();
 
   return (
     <div className="min-h-[calc(100vh-64px)] flex items-start justify-center pt-12 pb-16 px-6 relative overflow-hidden">
@@ -123,6 +181,11 @@ export default function ChoosePage({ settings, onNewExperiment, onViewResults })
           <p className="text-sm text-text-secondary max-w-md mx-auto">
             Pick up where you left off or start a fresh experiment.
           </p>
+          {totalSummary && (
+            <p className="text-[11px] text-text-tertiary">
+              {totalSummary.total} use cases discovered · {totalSummary.high} high priority · {totalSummary.domains} domain{totalSummary.domains !== 1 ? 's' : ''} explored
+            </p>
+          )}
         </div>
 
         {/* ── New Experiment CTA ── */}
@@ -160,88 +223,203 @@ export default function ChoosePage({ settings, onNewExperiment, onViewResults })
               const name = session.widget_values?.['00_business_name'] || session.business_name || `Session ${session.session_id}`;
               const date = session.completed_on || session.create_at;
               const mode = session.widget_values?.['02_operation_mode'] || session.operation_mode || '';
+              const isCompleted = session.completed_percent >= 100;
+              const summary = isCompleted ? getSessionSummary(session) : null;
+
+              // Build a short text description from domain names and catalog
+              const description = (() => {
+                const parts = [];
+                // Domain names from results_json
+                const rj = session.results_json;
+                if (rj && Array.isArray(rj.domains)) {
+                  const domainNames = rj.domains.map(d => d.domain_name).filter(Boolean);
+                  if (domainNames.length > 0) {
+                    parts.push(domainNames.length <= 3 ? domainNames.join(', ') : `${domainNames.slice(0, 3).join(', ')} +${domainNames.length - 3} more`);
+                  }
+                }
+                // Catalog info
+                const db = session.inspire_database_name || '';
+                if (db) parts.push(db.split('.')[0]);
+                // Business domains from session config (fallback if no results_json)
+                if (parts.length === 0 && session.business_domains) {
+                  parts.push(session.business_domains.length > 60 ? session.business_domains.slice(0, 57) + '...' : session.business_domains);
+                }
+                return parts.join(' · ');
+              })();
+
+              const isQuickOpen = expandedQuickView === session.session_id;
+              const PRIORITY_COLORS = { 'Ultra High': '#DC2626', 'Very High': '#EA580C', 'High': '#D97706', 'Medium': '#2563EB', 'Low': '#6B7280' };
 
               return (
-                <button
+                <div
                   key={session.session_id}
-                  onClick={() => onViewResults(session.session_id)}
-                  className="group w-full flex items-center gap-4 px-5 py-4 rounded-xl bg-surface/50 border border-border hover:border-[rgba(255,248,237,0.12)] hover:bg-surface transition-all duration-200 text-left"
+                  className={`rounded-xl bg-surface/50 border transition-all duration-200 ${isQuickOpen ? 'border-border-strong' : 'border-border hover:border-[rgba(255,248,237,0.12)]'}`}
                 >
-                  {/* Status indicator */}
-                  <div className="flex-shrink-0 relative">
-                    <div className={`w-10 h-10 rounded-lg ${cfg.bg} flex items-center justify-center`}>
-                      {status === 'completed' ? (
-                        <CheckCircle2 size={18} className={cfg.text} />
-                      ) : status === 'running' ? (
-                        <Loader2 size={18} className={`${cfg.text} animate-spin`} />
+                  {/* Main clickable row */}
+                  <button
+                    onClick={() => onViewResults(session.session_id)}
+                    className="group w-full flex items-center gap-4 px-5 py-4 hover:bg-surface transition-all duration-200 text-left rounded-xl"
+                  >
+                    {/* Status indicator */}
+                    <div className="flex-shrink-0 relative">
+                      <div className={`w-10 h-10 rounded-lg ${cfg.bg} flex items-center justify-center`}>
+                        {status === 'completed' ? (
+                          <CheckCircle2 size={18} className={cfg.text} />
+                        ) : status === 'running' ? (
+                          <Loader2 size={18} className={`${cfg.text} animate-spin`} />
+                        ) : (
+                          <AlertCircle size={18} className={cfg.text} />
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Info */}
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-text-primary truncate">{name}</p>
+                      {description && (
+                        <p className="text-[11px] text-text-secondary truncate mt-0.5">{description}</p>
+                      )}
+                      <div className="flex items-center gap-2 mt-1">
+                        {date && (
+                          <span className="flex items-center gap-1 text-[11px] text-text-tertiary">
+                            <Clock size={10} />
+                            {formatDate(date)}
+                          </span>
+                        )}
+                        {mode && (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-[rgba(255,248,237,0.04)] text-text-tertiary font-mono">
+                            {mode}
+                          </span>
+                        )}
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${cfg.bg} ${cfg.text}`}>
+                          {cfg.label}
+                        </span>
+                      </div>
+                      {summary && (
+                        <p className="text-[11px] text-text-secondary mt-1.5">
+                          {summary.total} use case{summary.total !== 1 ? 's' : ''}
+                          {' · '}{summary.high} high priority
+                          {' · '}{summary.domains} domain{summary.domains !== 1 ? 's' : ''}
+                          {session.completed_on ? ` · Completed ${formatCompletedDate(session.completed_on)}` : ''}
+                        </p>
+                      )}
+                    </div>
+
+                    {/* Progress / Quick View / Delete / Arrow */}
+                    <div className="flex-shrink-0 flex items-center gap-2">
+                      {status === 'running' && (
+                        <div className="w-16 h-1.5 rounded-full bg-[rgba(255,248,237,0.06)] overflow-hidden">
+                          <div
+                            className="h-full rounded-full bg-[#FF8A6B] transition-all duration-500"
+                            style={{ width: `${session.completed_percent || 0}%` }}
+                          />
+                        </div>
+                      )}
+
+                      {/* Quick View toggle */}
+                      {summary && (
+                        <button
+                          onClick={(e) => { e.stopPropagation(); setExpandedQuickView(isQuickOpen ? null : session.session_id); }}
+                          className="px-2.5 py-1.5 text-[10px] font-medium rounded-lg flex items-center gap-1 transition-all border border-border hover:border-[#FF3621]/30 hover:bg-[#FF3621]/5 text-text-tertiary hover:text-[#FF3621]"
+                          title="Quick view use cases"
+                        >
+                          {isQuickOpen ? <><EyeOff size={10} /> Hide</> : <><Eye size={10} /> Quick View</>}
+                        </button>
+                      )}
+
+                      {/* Delete button */}
+                      {confirmDelete === session.session_id ? (
+                        <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); deleteSession(session.session_id); }}
+                            disabled={deleting === session.session_id}
+                            className="px-2 py-1 text-[10px] font-medium rounded-md bg-[#E74C3C]/15 text-[#E74C3C] hover:bg-[#E74C3C]/25 transition-colors"
+                          >
+                            {deleting === session.session_id ? <Loader2 size={10} className="animate-spin" /> : 'Delete'}
+                          </button>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setConfirmDelete(null); }}
+                            className="px-2 py-1 text-[10px] font-medium rounded-md bg-[rgba(255,248,237,0.06)] text-text-tertiary hover:text-text-secondary transition-colors"
+                          >
+                            Cancel
+                          </button>
+                        </div>
                       ) : (
-                        <AlertCircle size={18} className={cfg.text} />
-                      )}
-                    </div>
-                  </div>
-
-                  {/* Info */}
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-text-primary truncate">{name}</p>
-                    <div className="flex items-center gap-2 mt-1">
-                      {date && (
-                        <span className="flex items-center gap-1 text-[11px] text-text-tertiary">
-                          <Clock size={10} />
-                          {formatDate(date)}
-                        </span>
-                      )}
-                      {mode && (
-                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-[rgba(255,248,237,0.04)] text-text-tertiary font-mono">
-                          {mode}
-                        </span>
-                      )}
-                      <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${cfg.bg} ${cfg.text}`}>
-                        {cfg.label}
-                      </span>
-                    </div>
-                  </div>
-
-                  {/* Progress / Delete / Arrow */}
-                  <div className="flex-shrink-0 flex items-center gap-2">
-                    {status === 'running' && (
-                      <div className="w-16 h-1.5 rounded-full bg-[rgba(255,248,237,0.06)] overflow-hidden">
-                        <div
-                          className="h-full rounded-full bg-[#FF8A6B] transition-all duration-500"
-                          style={{ width: `${session.completed_percent || 0}%` }}
-                        />
-                      </div>
-                    )}
-
-                    {/* Delete button */}
-                    {confirmDelete === session.session_id ? (
-                      <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
                         <button
-                          onClick={(e) => { e.stopPropagation(); deleteSession(session.session_id); }}
-                          disabled={deleting === session.session_id}
-                          className="px-2 py-1 text-[10px] font-medium rounded-md bg-[#E74C3C]/15 text-[#E74C3C] hover:bg-[#E74C3C]/25 transition-colors"
+                          onClick={(e) => { e.stopPropagation(); setConfirmDelete(session.session_id); }}
+                          className="p-1.5 rounded-lg text-text-tertiary opacity-0 group-hover:opacity-100 hover:text-[#E74C3C] hover:bg-[#E74C3C]/10 transition-all"
+                          title="Delete experiment"
                         >
-                          {deleting === session.session_id ? <Loader2 size={10} className="animate-spin" /> : 'Delete'}
+                          <Trash2 size={14} />
                         </button>
-                        <button
-                          onClick={(e) => { e.stopPropagation(); setConfirmDelete(null); }}
-                          className="px-2 py-1 text-[10px] font-medium rounded-md bg-[rgba(255,248,237,0.06)] text-text-tertiary hover:text-text-secondary transition-colors"
-                        >
-                          Cancel
-                        </button>
+                      )}
+
+                      <ChevronRight size={16} className={`text-text-tertiary transition-all ${isQuickOpen ? 'rotate-90' : 'group-hover:text-text-secondary'}`} />
+                    </div>
+                  </button>
+
+                  {/* ── Quick View Panel ── */}
+                  {isQuickOpen && summary && (
+                    <div className="border-t border-border px-5 py-4 space-y-4">
+                      {/* Domain chips */}
+                      <div className="flex flex-wrap gap-1.5">
+                        {summary.domainNames.map((d) => (
+                          <span key={d} className="text-[10px] font-medium px-2.5 py-1 rounded-full bg-[#FF3621]/8 text-[#FF3621] border border-[#FF3621]/15">
+                            {d}
+                          </span>
+                        ))}
                       </div>
-                    ) : (
+
+                      {/* Top use cases list */}
+                      <div className="space-y-1.5">
+                        <p className="text-[10px] font-bold text-text-secondary uppercase tracking-wider">Top Use Cases</p>
+                        {summary.useCases
+                          .sort((a, b) => {
+                            const order = ['Ultra High', 'Very High', 'High', 'Medium', 'Low', 'Very Low'];
+                            return order.indexOf(a.Priority || a.priority || '') - order.indexOf(b.Priority || b.priority || '');
+                          })
+                          .slice(0, 8)
+                          .map((uc, i) => {
+                            const ucName = uc.Name || uc.use_case_name || uc.name || uc.usecase || `Use Case ${i + 1}`;
+                            const ucPriority = uc.Priority || uc.priority || '';
+                            const ucDomain = uc['Business Domain'] || uc.domain || '';
+                            const ucTechnique = uc['Analytics Technique'] || '';
+                            const priorityColor = PRIORITY_COLORS[ucPriority] || '#6B7280';
+                            return (
+                              <div key={uc.No || i} className="flex items-center gap-3 px-3 py-2 rounded-lg bg-bg-subtle/50 hover:bg-bg-subtle transition-colors">
+                                <div className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: priorityColor }} />
+                                <div className="flex-1 min-w-0">
+                                  <p className="text-[11px] font-medium text-text-primary truncate">{ucName}</p>
+                                  <p className="text-[10px] text-text-tertiary truncate">
+                                    {ucDomain}{ucTechnique ? ` · ${ucTechnique}` : ''}
+                                  </p>
+                                </div>
+                                {ucPriority && (
+                                  <span className="text-[9px] font-bold px-2 py-0.5 rounded-full shrink-0" style={{ background: `${priorityColor}15`, color: priorityColor }}>
+                                    {ucPriority}
+                                  </span>
+                                )}
+                              </div>
+                            );
+                          })}
+                        {summary.useCases.length > 8 && (
+                          <p className="text-[10px] text-text-tertiary text-center pt-1">
+                            +{summary.useCases.length - 8} more use cases
+                          </p>
+                        )}
+                      </div>
+
+                      {/* View full results button */}
                       <button
-                        onClick={(e) => { e.stopPropagation(); setConfirmDelete(session.session_id); }}
-                        className="p-1.5 rounded-lg text-text-tertiary opacity-0 group-hover:opacity-100 hover:text-[#E74C3C] hover:bg-[#E74C3C]/10 transition-all"
-                        title="Delete experiment"
+                        onClick={() => onViewResults(session.session_id)}
+                        className="w-full flex items-center justify-center gap-2 py-2.5 rounded-lg bg-[#FF3621]/10 text-[#FF3621] text-[11px] font-semibold hover:bg-[#FF3621]/15 transition-colors"
                       >
-                        <Trash2 size={14} />
+                        <BarChart3 size={12} /> View Full Results
+                        <ArrowRight size={12} />
                       </button>
-                    )}
-
-                    <ChevronRight size={16} className="text-text-tertiary group-hover:text-text-secondary transition-colors" />
-                  </div>
-                </button>
+                    </div>
+                  )}
+                </div>
               );
             })}
 
