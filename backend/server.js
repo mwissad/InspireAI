@@ -6,6 +6,9 @@ const path = require('path');
 const multer = require('multer');
 const AdmZip = require('adm-zip');
 const crypto = require('crypto');
+const yaml = require('js-yaml');
+const { SSEServerTransport } = require('@modelcontextprotocol/sdk/server/sse.js');
+const { createInspireMcpServer } = require('./mcp-server');
 
 dotenv.config();
 
@@ -62,6 +65,41 @@ const STATIC_DIR = path.resolve(__dirname, '..', 'frontend', 'dist');
 if (fs.existsSync(STATIC_DIR)) {
   app.use(express.static(STATIC_DIR));
 }
+
+// OpenAPI / API Docs
+const openapiSpec = yaml.load(fs.readFileSync(path.resolve(__dirname, 'openapi.yaml'), 'utf8'));
+const apiDocsHtml = fs.readFileSync(path.resolve(__dirname, 'api-docs.html'), 'utf8');
+app.get('/api-docs', (req, res) => res.type('html').send(apiDocsHtml));
+app.get('/api/openapi.json', (req, res) => res.json(openapiSpec));
+
+// ═══════════════════════════════════════════════════
+//  MCP Server (SSE transport)
+// ═══════════════════════════════════════════════════
+
+const mcpSessions = new Map(); // sessionId → SSEServerTransport
+
+app.get('/mcp/sse', async (req, res) => {
+  const transport = new SSEServerTransport('/mcp/messages', res);
+  const server = createInspireMcpServer();
+  mcpSessions.set(transport.sessionId, transport);
+
+  res.on('close', () => {
+    mcpSessions.delete(transport.sessionId);
+    server.close().catch(() => {});
+  });
+
+  console.log(`🔌 MCP client connected (session: ${transport.sessionId})`);
+  await server.connect(transport);
+});
+
+app.post('/mcp/messages', async (req, res) => {
+  const sessionId = req.query.sessionId;
+  const transport = mcpSessions.get(sessionId);
+  if (!transport) {
+    return res.status(400).json({ error: 'Unknown or expired MCP session. Reconnect via GET /mcp/sse.' });
+  }
+  await transport.handlePostMessage(req, res);
+});
 
 // Request logger
 app.use((req, res, next) => {
@@ -1556,5 +1594,6 @@ app.listen(PORT, () => {
   console.log(`   Service Token:   ${SERVICE_TOKEN ? '✅ Configured' : '—  (users must provide PAT)'}`);
   console.log(`   Bundled DBC:     ${hasDbc ? '✅ Found' : '❌ Not found'}`);
   console.log(`   Static Frontend: ${servingStatic ? '✅ Serving from ' + STATIC_DIR : '—  (dev proxy mode)'}`);
-  console.log(`   Default Notebook: ${DEFAULT_NOTEBOOK_PATH || '(publish via UI)'}\n`);
+  console.log(`   Default Notebook: ${DEFAULT_NOTEBOOK_PATH || '(publish via UI)'}`);
+  console.log(`   MCP Server:      ✅ SSE at /mcp/sse  |  API docs at /api-docs\n`);
 });

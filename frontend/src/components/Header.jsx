@@ -6,6 +6,7 @@ const NAV = [
   { id: 'launch',  label: 'Launch',  step: 1 },
   { id: 'monitor', label: 'Monitor', step: 2 },
   { id: 'results', label: 'Results', step: 3 },
+  { id: 'mcp',     label: 'MCP',     step: null },
 ];
 
 export default function Header({
@@ -21,6 +22,7 @@ export default function Header({
     launch: true,
     monitor: canMonitor,
     results: canResults || true,
+    mcp: true,
   };
 
   return (
@@ -62,9 +64,11 @@ export default function Header({
                   `}
                 >
                   <span className="flex items-center gap-1.5">
-                    <span className={`text-xs font-mono ${active ? 'text-db-red' : 'opacity-50'}`}>
-                      {String(item.step).padStart(2, '0')}
-                    </span>
+                    {item.step && (
+                      <span className={`text-xs font-mono ${active ? 'text-db-red' : 'opacity-50'}`}>
+                        {String(item.step).padStart(2, '0')}
+                      </span>
+                    )}
                     {item.label}
                   </span>
                   {active && (
