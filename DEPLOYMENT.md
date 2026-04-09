@@ -1,93 +1,195 @@
-# Inspire AI — Deployment Guide
+# Inspire AI v4.6 — Deployment Guide
 
-Deploy Inspire AI to any Databricks workspace in minutes. Three methods available — pick the one that fits your workflow.
-
----
-
-## Quick Start (Recommended)
-
-### Option A: Git-Backed App (2 minutes, zero CLI)
-
-1. Go to **Databricks Workspace** > **Compute** > **Apps**
-2. Click **Create App** > **Custom App**
-3. Enter:
-   - **Name**: `inspire-ai`
-   - **Git URL**: `https://github.com/mwissad/InspireApp.git`
-   - **Branch**: `v46_ui_glow` (or `main`)
-4. Click **Create**
-5. Wait 1-2 minutes for the app to build and start
-6. Click the app URL — the **Setup Wizard** guides you through the rest
-
-That's it. The wizard handles authentication, warehouse selection, database creation, and notebook publishing.
+Deploy Inspire AI to any Databricks workspace in minutes. Four options available — pick the one that fits your workflow.
 
 ---
 
-### Option B: Databricks CLI + Asset Bundle (1 command)
+## Prerequisites
 
-**Prerequisites:**
-- [Databricks CLI](https://docs.databricks.com/dev-tools/cli/install.html) installed and authenticated
-- `databricks auth login --host https://your-workspace-url`
-
-**Deploy:**
-
-```bash
-git clone https://github.com/mwissad/InspireApp.git
-cd InspireApp
-
-# Deploy to your workspace
-databricks bundle deploy -t prod
-
-# Or for development/testing:
-databricks bundle deploy -t dev
-```
-
-This creates:
-- The Databricks App (accessible at `https://inspire-ai-<workspace>.databricksapps.com`)
-- The Inspire notebook in `/Shared/inspire-ai/`
-- The pipeline job definition
-
-**Run the app:**
-
-```bash
-databricks bundle run inspire_ai -t prod
-```
+- A Databricks workspace (AWS, Azure, or GCP)
+- A running SQL Warehouse (Serverless recommended)
+- Unity Catalog enabled with at least one catalog
+- Workspace admin permissions (to create Apps)
 
 ---
 
-### Option C: Manual File Sync (for air-gapped environments)
+## Option 1: Git-Backed App (Recommended)
+
+The fastest method — Databricks pulls the code directly from GitHub. No CLI, no build steps.
+
+### Steps
+
+1. Open your Databricks workspace
+2. Go to **Compute** > **Apps** > **Create App**
+3. Select **"Create from Git repository"**
+4. Enter:
+   - **Repository URL:** `https://github.com/mwissad/InspireAI`
+   - **Branch:** `main`
+   - **App name:** `inspire-ai`
+5. Click **Create**
+6. Wait 1-2 minutes for the app to build and start
+7. Click the app URL — the Settings panel guides you through configuration
+
+That's it. Databricks clones the repo, runs `start.sh`, and starts the app automatically.
+
+---
+
+## Option 2: Databricks CLI Deployment
+
+For teams that prefer CLI-based deployments or need more control.
+
+### Prerequisites
+
+- [Databricks CLI](https://docs.databricks.com/dev-tools/cli/install.html) v0.229+
+- Node.js 18+
+
+### Steps
 
 ```bash
-# 1. Clone the repo locally
-git clone https://github.com/mwissad/InspireApp.git
-cd InspireApp
+# 1. Authenticate to your workspace
+databricks auth login --host https://<workspace-url> --profile <profile-name>
 
-# 2. Sync to workspace
-databricks sync . "/Workspace/Users/$(databricks current-user me --output json | jq -r .userName)/inspire-ai" \
-  --watch --include "app.yaml,start.sh,backend/**,frontend/dist/**,databricks_inspire_v46.dbc"
+# 2. Clone the repo
+git clone https://github.com/mwissad/InspireAI.git
+cd InspireAI
 
-# 3. Create the app
-databricks apps create inspire-ai
+# 3. Build the frontend
+cd frontend && npm install && npm run build && cd ..
 
-# 4. Deploy
+# 4. Install backend dependencies
+cd backend && npm install && cd ..
+
+# 5. Create the Inspire database schema
+databricks api post /api/2.0/sql/statements -p <profile-name> --json '{
+  "warehouse_id": "<warehouse-id>",
+  "statement": "CREATE SCHEMA IF NOT EXISTS workspace._inspire",
+  "wait_timeout": "30s"
+}'
+
+# 6. Create the app
+databricks apps create inspire-ai \
+  --description "Inspire AI — Data Strategy Copilot powered by Databricks" \
+  -p <profile-name>
+
+# 7. Wait for compute to reach ACTIVE
+databricks apps get inspire-ai -p <profile-name>
+
+# 8. Sync files to the workspace
+databricks sync . /Workspace/Users/<your-email>/inspire-ai \
+  --exclude node_modules \
+  --exclude .venv \
+  --exclude __pycache__ \
+  --exclude .git \
+  --exclude "frontend/src" \
+  --exclude "frontend/public" \
+  --exclude "frontend/node_modules" \
+  --exclude ".DS_Store" \
+  --exclude docs \
+  --exclude notebooks \
+  --exclude ".claude" \
+  -p <profile-name> --full
+
+# 9. Deploy
 databricks apps deploy inspire-ai \
-  --source-code-path "/Workspace/Users/<your-email>/inspire-ai"
+  --source-code-path /Workspace/Users/<your-email>/inspire-ai \
+  -p <profile-name>
+
+# 10. Get the app URL
+databricks apps get inspire-ai -p <profile-name>
 ```
+
+> **Find your warehouse ID:** `databricks warehouses list -p <profile-name>`
 
 ---
 
-## Setup Wizard
+## Option 3: Run Locally
 
-On first launch, Inspire AI shows a guided setup wizard:
+For development, testing, or demos without deploying to Databricks.
 
-| Step | What it does | Auto-detected? |
-|------|-------------|----------------|
-| 1. Connect | Configures workspace URL | Yes (auto from Databricks runtime) |
-| 2. Authenticate | PAT or Service Principal | Yes (if SP configured in app.yaml) |
-| 3. Warehouse | Selects SQL warehouse | Yes (picks first running serverless) |
-| 4. Database | Creates `catalog.schema` for Inspire data | User selects catalog, types schema name |
-| 5. Verify | Tests all permissions and publishes notebook | Automated checks with clear pass/fail |
+```bash
+# 1. Clone and install
+git clone https://github.com/mwissad/InspireAI.git
+cd InspireAI
+npm run install:all
 
-After setup completes, all settings are persisted in the browser. Users on the same workspace can share the app URL — each authenticates with their own PAT.
+# 2. Configure environment
+export DATABRICKS_HOST=https://<your-workspace-url>
+export DATABRICKS_TOKEN=dapi...
+
+# 3a. Run in dev mode (hot reload)
+npm run dev
+# Frontend: http://localhost:5173
+# Backend:  http://localhost:8080
+
+# 3b. Or run in production mode
+bash start.sh
+# App: http://localhost:8080
+```
+
+> **Note:** If npm registry is unreachable, use the mirror: `npm install --registry=https://registry.npmmirror.com`
+
+---
+
+## Option 4: Service Principal (Automated Auth)
+
+For production deployments where users shouldn't need their own PAT.
+
+### 1. Create a Service Principal
+
+```bash
+databricks service-principals create --display-name "Inspire AI" --output json -p <profile-name>
+```
+
+Note the `application_id` from the output.
+
+### 2. Grant Permissions
+
+```sql
+-- Grant to service principal
+GRANT USE CATALOG ON CATALOG <catalog> TO `<sp-application-id>`;
+GRANT USE SCHEMA ON CATALOG <catalog> TO `<sp-application-id>`;
+GRANT SELECT ON CATALOG <catalog> TO `<sp-application-id>`;
+GRANT CREATE SCHEMA ON CATALOG <catalog> TO `<sp-application-id>`;
+GRANT CREATE TABLE ON CATALOG <catalog> TO `<sp-application-id>`;
+```
+
+Also grant `CAN_USE` on the SQL Warehouse in the warehouse permissions UI.
+
+### 3. Update app.yaml
+
+Uncomment the `resources` section in `app.yaml`:
+
+```yaml
+resources:
+  - name: "inspire-ai-sp"
+    type: "service-principal"
+    description: "Service principal for Inspire AI"
+    permissions:
+      - "CAN_USE"
+      - "CAN_MANAGE"
+```
+
+### 4. Redeploy
+
+The app will now automatically authenticate using the service principal — no PAT needed.
+
+---
+
+## First-Time Setup
+
+On first launch, configure via the **Settings** panel:
+
+| Setting | Description | Auto-detected? |
+|---------|-------------|----------------|
+| Databricks Host | Workspace URL | Yes (auto from Databricks runtime) |
+| Access Token | PAT or Service Principal | Yes (if SP configured) |
+| SQL Warehouse | Compute for queries | Select from dropdown |
+| Inspire Database | `catalog.schema` for session data | User selects (e.g. `workspace._inspire`) |
+
+After configuration, the app:
+1. **Publishes the notebook** to `/Shared/inspire_ai/`
+2. **Creates tracking tables** (`__inspire_session`, `__inspire_step`) in the Inspire Database
+3. Settings are persisted in the browser — no repeat setup needed
 
 ---
 
@@ -103,61 +205,6 @@ After setup completes, all settings are persisted in the browser. Users on the s
 | `SELECT` on source tables | Read column metadata | `GRANT SELECT ON SCHEMA <catalog>.<schema> TO <user>` |
 | `CREATE SCHEMA` in target catalog | Create inspire database | `GRANT CREATE SCHEMA ON CATALOG <catalog> TO <user>` |
 | Workspace: Write `/Shared/` | Publish notebook + artifacts | Automatic for workspace users |
-
-### Service Principal Permissions (for unattended deployment)
-
-```sql
--- Grant to service principal
-GRANT USE CATALOG ON CATALOG main TO `<sp-application-id>`;
-GRANT USE SCHEMA ON CATALOG main TO `<sp-application-id>`;
-GRANT SELECT ON CATALOG main TO `<sp-application-id>`;
-GRANT CREATE SCHEMA ON CATALOG main TO `<sp-application-id>`;
-GRANT CREATE TABLE ON CATALOG main TO `<sp-application-id>`;
-```
-
-Also grant `CAN_USE` on the SQL Warehouse in the warehouse permissions UI.
-
----
-
-## Service Principal Setup (Optional)
-
-For production deployments where users shouldn't need their own PAT:
-
-### 1. Create Service Principal
-
-```bash
-# Via Databricks CLI
-databricks service-principals create --display-name "Inspire AI" --output json
-```
-
-Note the `application_id` from the output.
-
-### 2. Create OAuth Secret
-
-```bash
-databricks service-principals secrets create --service-principal-id <sp-id> --output json
-```
-
-Note the `secret` value.
-
-### 3. Configure app.yaml
-
-Uncomment the service principal section in `app.yaml`:
-
-```yaml
-env:
-  - name: NODE_ENV
-    value: production
-resources:
-  - name: inspire-sp
-    description: "Service principal for Inspire AI"
-    service_principal:
-      permission: CAN_USE
-```
-
-### 4. Grant Permissions
-
-See the SQL grants in the Permissions section above.
 
 ---
 
@@ -179,54 +226,41 @@ See the SQL grants in the Permissions section above.
 |---------|-------------|
 | Databricks Host | Workspace URL |
 | Token | PAT or SP token |
-| Auth Mode | `pat` or `sp` |
 | Warehouse ID | SQL warehouse for queries |
 | Inspire Database | `catalog.schema` for session data |
 | Notebook Path | Workspace path of published notebook |
 
 ---
 
-## Architecture
+## Updating
 
-```
-Browser ──> Databricks App (Node.js)
-                │
-                ├── Express API (proxy to Databricks REST APIs)
-                │     ├── /api/setup/verify (permission checks)
-                │     ├── /api/notebook (auto-publish DBC)
-                │     ├── /api/run (submit pipeline job)
-                │     ├── /api/inspire/* (session tracking)
-                │     └── /api/workspace/* (artifact access)
-                │
-                └── Static React Frontend
-                      ├── Setup Wizard (first run)
-                      ├── Landing Page
-                      ├── Choose Page (session browser)
-                      ├── Launch Page (configure & run)
-                      ├── Monitor Page (live progress)
-                      └── Results Page (use cases, artifacts)
+### Git-backed app
+Push to the branch configured in the Databricks App. It auto-redeploys.
+
+### CLI deployment
+```bash
+git pull
+cd frontend && npm run build && cd ..
+databricks sync . /Workspace/Users/<email>/inspire-ai \
+  --exclude node_modules --exclude .git --exclude "frontend/src" \
+  --exclude "frontend/node_modules" --exclude ".claude" \
+  -p <profile-name> --full
+databricks apps deploy inspire-ai \
+  --source-code-path /Workspace/Users/<email>/inspire-ai \
+  -p <profile-name>
 ```
 
-### What happens when a user clicks "Launch":
+---
 
-1. Frontend sends parameters to `/api/run`
-2. Backend creates a Databricks Job with the Inspire notebook
-3. Backend starts the job → returns `run_id`
-4. Frontend polls `/api/inspire/session` every 2 seconds
-5. Backend queries `__inspire_session` and `__inspire_step` tables via SQL
-6. Frontend shows real-time progress + live use case preview
-7. On completion → Results page with full use case catalog
+## Monitoring & Logs
 
-### Files deployed:
+Access application logs by appending `/logz` to your app URL:
 
-| File | Purpose | Size |
-|------|---------|------|
-| `app.yaml` | Databricks App manifest | 100B |
-| `start.sh` | Startup script (Node.js bootstrap) | 2KB |
-| `backend/server.js` | Express API server | 45KB |
-| `backend/dbc_bundle.js` | Embedded notebook (base64 fallback) | 425KB |
-| `frontend/dist/` | Pre-built React app | ~10MB |
-| `databricks_inspire_v46.dbc` | Inspire notebook bundle | 320KB |
+```
+https://inspire-ai-<workspace-id>.<region>.databricksapps.com/logz
+```
+
+Or via the Databricks UI: **Compute** > **Apps** > **inspire-ai** > **Logs**
 
 ---
 
@@ -237,14 +271,15 @@ Browser ──> Databricks App (Node.js)
 | Symptom | Fix |
 |---------|-----|
 | "Port already in use" | Another app is using port 8080. Check with `lsof -i :8080` |
-| "Node.js not found" | The Databricks App runtime includes Node.js 18+. For local dev: `brew install node` |
+| "Node.js not found" | The Databricks App runtime includes Node.js 18+. For local dev: install Node.js |
 | "DBC file not found" | Ensure `databricks_inspire_v46.dbc` is in the repo root |
+| App stuck on "Starting" | Check app logs. Ensure the runtime has internet access for `npm install` |
 
-### Setup wizard issues
+### Authentication issues
 
 | Symptom | Fix |
 |---------|-----|
-| "Cannot reach workspace" | Check the URL format: `https://adb-xxxx.xx.azuredatabricks.net` (no trailing slash) |
+| "Cannot reach workspace" | Check URL format: `https://adb-xxxx.xx.azuredatabricks.net` (no trailing slash) |
 | "Token invalid (401)" | Regenerate PAT. Ensure it hasn't expired |
 | "Cannot access catalog" | User needs `USE CATALOG` grant. Ask workspace admin |
 | "Warehouse not accessible" | User needs `CAN_USE` permission on the warehouse |
@@ -255,53 +290,11 @@ Browser ──> Databricks App (Node.js)
 |---------|-----|
 | "Session table not found" | The notebook is still initializing. Wait 30 seconds and refresh |
 | "Results empty" | Check the Monitor page — pipeline may still be running |
-| "Notebook failed" | Check the Databricks job run in Workflows for error details |
+| "Notebook failed" | Check the Databricks job run in **Workflows** for error details |
 
 ### Re-running setup
 
-To re-trigger the Setup Wizard:
+To re-trigger the Settings configuration:
 1. Open browser DevTools (F12)
 2. Console: `localStorage.removeItem('db_setup_complete')`
 3. Refresh the page
-
----
-
-## Local Development
-
-```bash
-# Clone and install
-git clone https://github.com/mwissad/InspireApp.git
-cd InspireApp
-npm run install:all
-
-# Create backend/.env
-cat > backend/.env << 'EOF'
-DATABRICKS_HOST=https://your-workspace-url
-DATABRICKS_TOKEN=dapi_your_token_here
-EOF
-
-# Start dev servers (hot reload)
-npm run dev
-
-# Frontend: http://localhost:5173
-# Backend:  http://localhost:8080
-```
-
----
-
-## Updating
-
-### Git-backed app
-Push to the branch configured in the Databricks App. It auto-redeploys.
-
-### Asset Bundle
-```bash
-git pull
-databricks bundle deploy -t prod
-```
-
-### Manual
-```bash
-databricks sync . "/Workspace/Users/<email>/inspire-ai" \
-  --include "app.yaml,start.sh,backend/**,frontend/dist/**,databricks_inspire_v46.dbc"
-```
