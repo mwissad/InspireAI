@@ -16,6 +16,8 @@ The fastest way to get started — no build steps, no CLI:
 4. Set app name to `inspire-ai`, click **Create**
 5. Open the app URL, configure via the Settings panel — done.
 
+> **Alternative:** Import `installer.py` into your workspace and click **Run All** — it handles everything automatically (clone, deploy, database creation). See [Option 2 in DEPLOYMENT.md](DEPLOYMENT.md#option-2-installer-notebook-zero-cli).
+>
 > For CLI deployment, local dev, and service principal setup, see **[DEPLOYMENT.md](DEPLOYMENT.md)**.
 
 ---

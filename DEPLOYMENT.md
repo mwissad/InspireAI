@@ -1,6 +1,6 @@
 # Inspire AI v4.6 — Deployment Guide
 
-Deploy Inspire AI to any Databricks workspace in minutes. Four options available — pick the one that fits your workflow.
+Deploy Inspire AI to any Databricks workspace in minutes. Five options available — pick the one that fits your workflow.
 
 ---
 
@@ -34,7 +34,39 @@ That's it. Databricks clones the repo, runs `start.sh`, and starts the app autom
 
 ---
 
-## Option 2: Databricks CLI Deployment
+## Option 2: Installer Notebook (Zero CLI)
+
+A single notebook that does everything — ideal for customers or teams who don't have the Databricks CLI installed.
+
+### Steps
+
+1. Download `installer.py` from the repo (or import directly from GitHub)
+2. Import it into your Databricks workspace: **Workspace** > **Import** > upload `installer.py`
+3. Open the notebook and attach it to any cluster (DBR 13.3+) or **Serverless** compute
+4. Review the pre-filled widgets at the top:
+   - **Install Source:** `github`
+   - **GitHub Repository URL:** `https://github.com/mwissad/InspireAI.git`
+   - **GitHub Branch:** `main`
+   - **App Name:** `inspire-ai`
+   - **Inspire Catalog:** `workspace`
+   - **Inspire Schema:** `_inspire`
+5. Click **Run All**
+
+The notebook will:
+- Clone the repo (or extract a zip you uploaded)
+- Detect a SQL warehouse and inject it into the app config
+- Upload all files to your workspace
+- Create and deploy the Databricks App
+- Create the `workspace._inspire` schema
+- Display a clickable link to your running app
+
+**After the notebook completes**, open the app URL and enter your PAT — the warehouse, database, and notebook are already pre-configured.
+
+> **Zip option:** If GitHub is not accessible from your workspace, download the repo as a zip, upload it to your workspace files (e.g. `/Workspace/Users/<you>/InspireAI.zip`), change the **Install Source** widget to `zip`, and update the **Zip File Path** widget accordingly.
+
+---
+
+## Option 3: Databricks CLI Deployment
 
 For teams that prefer CLI-based deployments or need more control.
 
@@ -102,7 +134,7 @@ databricks apps get inspire-ai -p <profile-name>
 
 ---
 
-## Option 3: Run Locally
+## Option 4: Run Locally
 
 For development, testing, or demos without deploying to Databricks.
 
@@ -130,7 +162,7 @@ bash start.sh
 
 ---
 
-## Option 4: Service Principal (Automated Auth)
+## Option 5: Service Principal (Automated Auth)
 
 For production deployments where users shouldn't need their own PAT.
 
