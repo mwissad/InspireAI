@@ -24,6 +24,10 @@ app.use(express.json({ limit: '50mb' }));
 const DATABRICKS_HOST = process.env.DATABRICKS_HOST || '';
 const DEFAULT_NOTEBOOK_PATH = process.env.NOTEBOOK_PATH || '';
 
+// Installer-injected defaults — pre-fill the Setup Wizard so users skip manual config.
+const DEFAULT_WAREHOUSE_ID = process.env.INSPIRE_WAREHOUSE_ID || '';
+const DEFAULT_INSPIRE_DB = process.env.INSPIRE_DATABASE || '';
+
 // Optional: when deployed as a Databricks App, the runtime may inject a
 // service-principal token automatically. Individual users can still
 // override this by passing their own PAT via the Authorization header.
@@ -489,6 +493,22 @@ app.get('/api/health', (req, res) => {
     hasServiceToken: !!SERVICE_TOKEN,
     isDatabricksApp: hasForwardedToken || !!DATABRICKS_HOST,
     hasUserToken: hasForwardedToken,
+  });
+});
+
+// Pre-configured defaults (injected by the installer notebook via app.yaml env vars)
+app.get('/api/defaults', (req, res) => {
+  const host = resolveHost(req);
+  // In Databricks Apps, DATABRICKS_HOST may be just the hostname — normalize
+  let fullHost = host;
+  if (fullHost && !fullHost.startsWith('http')) fullHost = `https://${fullHost}`;
+  res.json({
+    databricksHost: fullHost || '',
+    warehouseId: DEFAULT_WAREHOUSE_ID,
+    inspireDatabase: DEFAULT_INSPIRE_DB,
+    notebookPath: DEFAULT_NOTEBOOK_PATH,
+    isDatabricksApp: !!DATABRICKS_HOST,
+    hasServiceToken: !!SERVICE_TOKEN,
   });
 });
 
