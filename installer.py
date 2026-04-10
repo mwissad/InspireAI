@@ -274,14 +274,38 @@ else:
 
 # COMMAND ----------
 
+import requests
+
+# REST API helper — SDK-version-agnostic
+api_base = w.config.host.rstrip("/")
+api_headers = {}
+try:
+    # Get auth headers from the SDK config
+    auth_header = w.config.authenticate()
+    if isinstance(auth_header, dict):
+        api_headers = auth_header
+    else:
+        api_headers = {"Authorization": f"Bearer {auth_header}"}
+except Exception:
+    api_headers = {"Authorization": f"Bearer {dbutils.notebook.entry_point.getDbutils().notebook().getContext().apiToken().get()}"}
+
+def api_get(path):
+    r = requests.get(f"{api_base}{path}", headers=api_headers)
+    r.raise_for_status()
+    return r.json()
+
+def api_post(path, body=None):
+    r = requests.post(f"{api_base}{path}", headers=api_headers, json=body or {})
+    return r
+
 # Check if app already exists
 app_exists = False
 app_url = None
 
 try:
-    existing = w.apps.get(APP_NAME)
+    resp = api_get(f"/api/2.0/apps/{APP_NAME}")
     app_exists = True
-    app_url = existing.url
+    app_url = resp.get("url")
     print(f"App '{APP_NAME}' already exists: {app_url}")
     print("Will redeploy with updated source code.")
 except Exception:
@@ -289,22 +313,18 @@ except Exception:
 
 if not app_exists:
     print(f"Creating app '{APP_NAME}'...")
-    try:
-        app = w.apps.create_and_wait(
-            name=APP_NAME,
-            description="Inspire AI — Data Strategy Copilot powered by Databricks"
-        )
-        app_url = app.url
+    resp = api_post("/api/2.0/apps", {"name": APP_NAME, "description": "Inspire AI — Data Strategy Copilot powered by Databricks"})
+    if resp.status_code in (200, 201):
+        data = resp.json()
+        app_url = data.get("url")
         print(f"App created: {app_url}")
-    except Exception as e:
-        error_msg = str(e)
-        if "already exists" in error_msg.lower():
-            existing = w.apps.get(APP_NAME)
-            app_exists = True
-            app_url = existing.url
-            print(f"App '{APP_NAME}' already exists: {app_url}")
-        else:
-            raise RuntimeError(f"Failed to create app: {e}")
+    elif "already exists" in resp.text.lower():
+        data = api_get(f"/api/2.0/apps/{APP_NAME}")
+        app_exists = True
+        app_url = data.get("url")
+        print(f"App '{APP_NAME}' already exists: {app_url}")
+    else:
+        raise RuntimeError(f"Failed to create app ({resp.status_code}): {resp.text[:500]}")
 
 # COMMAND ----------
 
@@ -319,12 +339,13 @@ timeout = 300  # 5 minutes
 start_time = time.time()
 
 while True:
-    app_info = w.apps.get(APP_NAME)
-    state = app_info.compute_status.state.value if app_info.compute_status else "UNKNOWN"
+    data = api_get(f"/api/2.0/apps/{APP_NAME}")
+    state = data.get("compute_status", {}).get("state", "UNKNOWN")
     elapsed = int(time.time() - start_time)
     print(f"  [{elapsed}s] Compute state: {state}")
 
     if state == "ACTIVE":
+        app_url = data.get("url", app_url)
         print("Compute is ACTIVE.")
         break
 
@@ -342,19 +363,36 @@ while True:
 
 print(f"Deploying '{APP_NAME}' from {WORKSPACE_DEST} ...")
 
-deployment = w.apps.deploy_and_wait(
-    app_name=APP_NAME,
-    source_code_path=WORKSPACE_DEST
-)
+resp = api_post(f"/api/2.0/apps/{APP_NAME}/deployments", {"source_code_path": WORKSPACE_DEST})
+if resp.status_code not in (200, 201):
+    raise RuntimeError(f"Deploy failed ({resp.status_code}): {resp.text[:500]}")
 
-deploy_state = deployment.status.state.value if deployment.status else "UNKNOWN"
-print(f"Deployment status: {deploy_state}")
+deploy_data = resp.json()
+deploy_id = deploy_data.get("deployment_id", "")
+print(f"Deployment started (ID: {deploy_id}). Waiting for completion...")
 
-if deploy_state != "SUCCEEDED":
-    msg = deployment.status.message if deployment.status else "No message"
-    raise RuntimeError(f"Deployment failed ({deploy_state}): {msg}")
+timeout = 300
+start_time = time.time()
 
-print("Deployment succeeded.")
+while True:
+    data = api_get(f"/api/2.0/apps/{APP_NAME}")
+    active_dep = data.get("active_deployment", {})
+    dep_state = active_dep.get("status", {}).get("state", "UNKNOWN")
+    dep_msg = active_dep.get("status", {}).get("message", "")
+    elapsed = int(time.time() - start_time)
+    print(f"  [{elapsed}s] Deployment state: {dep_state}")
+
+    if dep_state == "SUCCEEDED":
+        app_url = data.get("url", app_url)
+        print("Deployment succeeded.")
+        break
+    elif dep_state in ("FAILED", "CANCELLED"):
+        raise RuntimeError(f"Deployment failed ({dep_state}): {dep_msg}")
+
+    if elapsed > timeout:
+        raise TimeoutError(f"Deployment did not complete within {timeout}s")
+
+    time.sleep(10)
 
 # COMMAND ----------
 
@@ -395,8 +433,8 @@ else:
 # COMMAND ----------
 
 # Refresh app info to get the final URL
-app_info = w.apps.get(APP_NAME)
-app_url = app_info.url
+app_data = api_get(f"/api/2.0/apps/{APP_NAME}")
+app_url = app_data.get("url", app_url)
 
 print("=" * 60)
 print("  Inspire AI — Installation Complete")
