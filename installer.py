@@ -11,10 +11,11 @@
 # MAGIC
 # MAGIC **What this installer does:**
 # MAGIC 1. Downloads the Inspire AI source code
-# MAGIC 2. Uploads it to your workspace files
-# MAGIC 3. Creates and deploys a Databricks App
-# MAGIC 4. Creates the Inspire tracking database
-# MAGIC 5. Prints the app URL — ready to use
+# MAGIC 2. Detects your SQL warehouse and pre-configures the app
+# MAGIC 3. Uploads everything to your workspace files
+# MAGIC 4. Creates and deploys a Databricks App
+# MAGIC 5. Creates the Inspire tracking database
+# MAGIC 6. Prints the app URL — ready to use with zero manual setup
 # MAGIC
 # MAGIC ---
 # MAGIC **Prerequisites:** DBR 13.3+ · Unity Catalog enabled · Workspace admin permissions
@@ -42,10 +43,9 @@ dbutils.widgets.text("schema", "_inspire", "7. Inspire Schema")
 
 # COMMAND ----------
 
-import os, shutil, time, json, base64, subprocess, tempfile
+import os, shutil, time, json, subprocess
 from pathlib import Path
 from databricks.sdk import WorkspaceClient
-from databricks.sdk.service.workspace import ImportFormat
 
 # Read widget values
 INSTALL_SOURCE = dbutils.widgets.get("install_source")
@@ -63,10 +63,26 @@ w          = WorkspaceClient()
 current_user = w.current_user.me()
 USER_EMAIL   = current_user.user_name
 WORKSPACE_DEST = f"/Workspace/Users/{USER_EMAIL}/{APP_NAME}"
+WORKSPACE_HOST = w.config.host  # Full host URL with https://
 
 # Directories/files to skip during upload
 SKIP_DIRS  = {".git", "node_modules", ".venv", "__pycache__", ".claude", "docs", "notebooks", ".DS_Store"}
 SKIP_PATHS = {"frontend/src", "frontend/public", "frontend/node_modules"}
+
+# Detect SQL warehouse early — needed for app.yaml injection and database creation
+warehouses = list(w.warehouses.list())
+WAREHOUSE_ID = None
+WAREHOUSE_NAME = None
+
+for wh in warehouses:
+    if wh.state and wh.state.value == "RUNNING":
+        WAREHOUSE_ID = wh.id
+        WAREHOUSE_NAME = wh.name
+        break
+
+if not WAREHOUSE_ID and warehouses:
+    WAREHOUSE_ID = warehouses[0].id
+    WAREHOUSE_NAME = warehouses[0].name
 
 print("=" * 60)
 print("  Inspire AI Installer — Configuration")
@@ -79,8 +95,10 @@ else:
     print(f"  Zip path:          {ZIP_PATH}")
 print(f"  App name:          {APP_NAME}")
 print(f"  Inspire database:  {INSPIRE_DB}")
+print(f"  Workspace host:    {WORKSPACE_HOST}")
 print(f"  Current user:      {USER_EMAIL}")
 print(f"  Workspace dest:    {WORKSPACE_DEST}")
+print(f"  SQL Warehouse:     {WAREHOUSE_NAME or 'None found'} ({WAREHOUSE_ID or 'N/A'})")
 print("=" * 60)
 
 # Validate
@@ -139,12 +157,58 @@ for f in required_files:
     fpath = os.path.join(LOCAL_DIR, f)
     assert os.path.exists(fpath), f"Missing required file: {f} — is this a valid Inspire AI repo?"
 
-print(f"Source code ready. Key files verified.")
+print("Source code ready. Key files verified.")
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Step 4 — Upload to Workspace
+# MAGIC ## Step 4 — Inject Configuration into app.yaml
+
+# COMMAND ----------
+
+import yaml
+
+app_yaml_path = os.path.join(LOCAL_DIR, "app.yaml")
+
+with open(app_yaml_path, "r") as f:
+    app_config = yaml.safe_load(f)
+
+# Ensure env section exists
+if "env" not in app_config or app_config["env"] is None:
+    app_config["env"] = []
+
+# Env vars to inject — these pre-fill the Setup Wizard so users skip manual config
+inject_vars = {
+    "NODE_ENV": "production",
+    "INSPIRE_DATABASE": INSPIRE_DB,
+}
+if WAREHOUSE_ID:
+    inject_vars["INSPIRE_WAREHOUSE_ID"] = WAREHOUSE_ID
+
+# Update or append each env var
+existing_names = {e["name"] for e in app_config["env"] if isinstance(e, dict) and "name" in e}
+
+for name, value in inject_vars.items():
+    if name in existing_names:
+        for e in app_config["env"]:
+            if isinstance(e, dict) and e.get("name") == name:
+                e["value"] = value
+                break
+    else:
+        app_config["env"].append({"name": name, "value": value})
+
+# Write the modified app.yaml back
+with open(app_yaml_path, "w") as f:
+    yaml.dump(app_config, f, default_flow_style=False, sort_keys=False)
+
+print("Injected into app.yaml:")
+for name, value in inject_vars.items():
+    print(f"  {name} = {value}")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Step 5 — Upload to Workspace
 
 # COMMAND ----------
 
@@ -206,11 +270,9 @@ else:
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Step 5 — Create Databricks App
+# MAGIC ## Step 6 — Create Databricks App
 
 # COMMAND ----------
-
-from databricks.sdk.service.apps import App
 
 # Check if app already exists
 app_exists = False
@@ -247,11 +309,11 @@ if not app_exists:
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Step 6 — Wait for App Compute
+# MAGIC ## Step 7 — Wait for App Compute
 
 # COMMAND ----------
 
-print(f"Waiting for app compute to become ACTIVE...")
+print("Waiting for app compute to become ACTIVE...")
 
 timeout = 300  # 5 minutes
 start_time = time.time()
@@ -274,11 +336,9 @@ while True:
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Step 7 — Deploy
+# MAGIC ## Step 8 — Deploy
 
 # COMMAND ----------
-
-from databricks.sdk.service.apps import AppDeployment
 
 print(f"Deploying '{APP_NAME}' from {WORKSPACE_DEST} ...")
 
@@ -294,40 +354,23 @@ if deploy_state != "SUCCEEDED":
     msg = deployment.status.message if deployment.status else "No message"
     raise RuntimeError(f"Deployment failed ({deploy_state}): {msg}")
 
-print(f"Deployment succeeded.")
+print("Deployment succeeded.")
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Step 8 — Create Inspire Database
+# MAGIC ## Step 9 — Create Inspire Database
 
 # COMMAND ----------
 
 from databricks.sdk.service.sql import StatementState
 
-# Find a SQL warehouse
-warehouses = list(w.warehouses.list())
-warehouse_id = None
-
-# Prefer a running serverless warehouse
-for wh in warehouses:
-    if wh.state and wh.state.value == "RUNNING":
-        warehouse_id = wh.id
-        print(f"Using warehouse: {wh.name} ({wh.id}) — RUNNING")
-        break
-
-# Fall back to any warehouse (will auto-start)
-if not warehouse_id and warehouses:
-    wh = warehouses[0]
-    warehouse_id = wh.id
-    print(f"Using warehouse: {wh.name} ({wh.id}) — will auto-start")
-
-if warehouse_id:
+if WAREHOUSE_ID:
     sql = f"CREATE SCHEMA IF NOT EXISTS `{CATALOG}`.`{SCHEMA}`"
     print(f"Executing: {sql}")
 
     stmt = w.statement_execution.execute_statement(
-        warehouse_id=warehouse_id,
+        warehouse_id=WAREHOUSE_ID,
         statement=sql,
         wait_timeout="30s"
     )
@@ -360,29 +403,43 @@ print("  Inspire AI — Installation Complete")
 print("=" * 60)
 print()
 print(f"  App URL:           {app_url}")
+print(f"  Workspace Host:    {WORKSPACE_HOST}")
 print(f"  Inspire Database:  {INSPIRE_DB}")
-if warehouse_id:
-    print(f"  SQL Warehouse:     {warehouse_id}")
+if WAREHOUSE_ID:
+    print(f"  SQL Warehouse:     {WAREHOUSE_NAME} ({WAREHOUSE_ID})")
+print()
+print("  Pre-configured:")
+print(f"    Workspace host .... injected by Databricks runtime")
+print(f"    SQL Warehouse ..... {WAREHOUSE_ID or 'not set — select in Settings'}")
+print(f"    Inspire Database .. {INSPIRE_DB}")
+print(f"    Notebook .......... auto-published on first launch")
 print()
 print("  Next steps:")
 print("  1. Open the app URL above")
-print("  2. Click the Settings gear icon")
-print("  3. Enter your Personal Access Token (PAT)")
-print("  4. Select a SQL Warehouse from the dropdown")
-print(f"  5. Set Inspire Database to: {INSPIRE_DB}")
-print("  6. Click 'Get Started' and launch your first analysis!")
+print("  2. Enter your Personal Access Token (PAT) in the Setup Wizard")
+print("  3. Everything else is pre-configured — click through to launch!")
 print()
 print("=" * 60)
 
 # Display clickable link
 displayHTML(f"""
-<div style="padding: 20px; background: linear-gradient(135deg, #1a1a2e, #16213e); border-radius: 12px; text-align: center; margin: 20px 0;">
-  <h2 style="color: #e0e0e0; margin-bottom: 16px;">Inspire AI is ready!</h2>
+<div style="padding: 24px; background: linear-gradient(135deg, #1a1a2e, #16213e); border-radius: 12px; text-align: center; margin: 20px 0;">
+  <h2 style="color: #e0e0e0; margin-bottom: 8px;">Inspire AI is ready!</h2>
+  <p style="color: #aaa; font-size: 13px; margin-bottom: 20px;">
+    Warehouse, database, and notebook are pre-configured.<br/>
+    Just open the app and enter your PAT to get started.
+  </p>
   <a href="{app_url}" target="_blank"
-     style="display: inline-block; padding: 12px 32px; background: linear-gradient(135deg, #ff6b35, #f7931e);
-            color: white; text-decoration: none; border-radius: 8px; font-size: 18px; font-weight: 600;">
+     style="display: inline-block; padding: 14px 36px; background: linear-gradient(135deg, #ff6b35, #f7931e);
+            color: white; text-decoration: none; border-radius: 8px; font-size: 18px; font-weight: 600;
+            box-shadow: 0 4px 15px rgba(255, 107, 53, 0.3);">
     Open Inspire AI
   </a>
-  <p style="color: #888; margin-top: 12px; font-size: 14px;">{app_url}</p>
+  <p style="color: #666; margin-top: 14px; font-size: 12px;">{app_url}</p>
+  <div style="margin-top: 16px; padding: 12px; background: rgba(255,255,255,0.05); border-radius: 8px; text-align: left; font-family: monospace; font-size: 11px; color: #888;">
+    <div>Warehouse: <span style="color: #4ec9b0;">{WAREHOUSE_NAME or 'N/A'}</span></div>
+    <div>Database: <span style="color: #4ec9b0;">{INSPIRE_DB}</span></div>
+    <div>Notebook: <span style="color: #4ec9b0;">auto-published on first launch</span></div>
+  </div>
 </div>
 """)

@@ -143,6 +143,18 @@ export default function App() {
   useEffect(() => {
     (async () => {
       try {
+        // 0. Fetch installer-injected defaults and apply if user hasn't configured yet
+        try {
+          const defResp = await fetch('/api/defaults');
+          if (defResp.ok) {
+            const defaults = await defResp.json();
+            if (defaults.databricksHost && !settings.databricksHost) update('databricksHost', defaults.databricksHost);
+            if (defaults.warehouseId && !settings.warehouseId) update('warehouseId', defaults.warehouseId);
+            if (defaults.inspireDatabase && !settings.inspireDatabase) update('inspireDatabase', defaults.inspireDatabase);
+            if (defaults.notebookPath && !settings.notebookPath) update('notebookPath', defaults.notebookPath);
+          }
+        } catch { /* defaults endpoint may not exist in older backends */ }
+
         const headers = { 'Content-Type': 'application/json' };
         if (settings.token) {
           headers['Authorization'] = `Bearer ${settings.token}`;
