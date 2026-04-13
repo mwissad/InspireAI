@@ -190,6 +190,7 @@ if "env" not in app_config or app_config["env"] is None:
 inject_vars = {
     "NODE_ENV": "production",
     "INSPIRE_DATABASE": INSPIRE_DB,
+    "INSPIRE_AUTO_SETUP": "true",
 }
 if WAREHOUSE_ID:
     inject_vars["INSPIRE_WAREHOUSE_ID"] = WAREHOUSE_ID

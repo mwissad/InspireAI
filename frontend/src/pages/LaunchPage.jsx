@@ -33,7 +33,7 @@ import {
 
 /* ─── Constants (v45 notebook widget options) ─── */
 const QUALITY_OPTIONS = ['Good Quality', 'High Quality', 'Very High Quality'];
-const TABLE_ELECTION = ['Let Inspire Decides', 'All Tables', 'Transactional Only'];
+const TABLE_ELECTION = ['Let Inspire Decides', 'Selected Tables', 'All Tables', 'Transactional Only'];
 const GENERATION_OPTIONS = [
   { key: 'Genie Code Instructions', icon: Sparkles, desc: 'Generate Genie code instructions per use case' },
   { key: 'PDF Catalog', icon: FileText, desc: 'Professional PDF use case catalog' },
@@ -144,6 +144,12 @@ export default function LaunchPage({ settings, update, onLaunched }) {
     if (selectedTables.length > 0) {
       // When tables are selected, ALWAYS send tables as comma-separated full paths
       metadata = selectedTables.join(',');
+      // Auto-switch table election to reflect manual selection
+      setParams((p) => p['04_table_election'] !== 'Selected Tables'
+        ? { ...p, '01_uc_metadata': metadata, '04_table_election': 'Selected Tables' }
+        : { ...p, '01_uc_metadata': metadata }
+      );
+      return;
     } else {
       // Fall back to catalogs/schemas if no tables selected
       const parts = [
@@ -483,11 +489,7 @@ export default function LaunchPage({ settings, update, onLaunched }) {
                         selected={selectedTables}
                         onToggle={(name) => {
                           if (selectedTables.includes(name)) setSelectedTables((p) => p.filter((x) => x !== name));
-                          else {
-                            setSelectedTables((p) => [...p, name]);
-                            // Auto-collapse picker after first table selection
-                            if (selectedTables.length === 0) setPickerExpanded(false);
-                          }
+                          else setSelectedTables((p) => [...p, name]);
                         }}
                         getKey={(t) => t.full_name}
                         getLabel={(t) => t.full_name.split('.').pop()}

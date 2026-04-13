@@ -508,6 +508,7 @@ app.get('/api/defaults', (req, res) => {
     inspireDatabase: DEFAULT_INSPIRE_DB,
     notebookPath: DEFAULT_NOTEBOOK_PATH,
     isDatabricksApp: !!DATABRICKS_HOST,
+    autoSetup: process.env.INSPIRE_AUTO_SETUP === 'true',
     hasServiceToken: !!SERVICE_TOKEN,
   });
 });
@@ -1600,26 +1601,31 @@ if (fs.existsSync(STATIC_DIR)) {
   // inject a script that auto-completes the Setup Wizard so users
   // don't need to manually enter a PAT (the app proxy provides auth).
   const indexHtmlRaw = fs.readFileSync(path.join(STATIC_DIR, 'index.html'), 'utf8');
+  const AUTO_SETUP = process.env.INSPIRE_AUTO_SETUP === 'true';
   const autoSetupSnippet = `<script>
 (function(){
   if(localStorage.getItem('db_setup_complete'))return;
-  fetch('/api/defaults').then(r=>r.json()).then(function(d){
-    if(!d.isDatabricksApp)return;
-    fetch('/api/health').then(r=>r.json()).then(function(h){
-      if(!h.hasUserToken&&!h.hasServiceToken)return;
+  fetch('/api/defaults').then(function(r){return r.json()}).then(function(d){
+    if(!d.isDatabricksApp&&!d.autoSetup)return;
+    fetch('/api/health').then(function(r){return r.json()}).then(function(h){
+      if(!h.hasUserToken&&!h.hasServiceToken&&!d.autoSetup)return;
       if(d.databricksHost)localStorage.setItem('db_databricks_host',d.databricksHost);
       if(d.warehouseId)localStorage.setItem('db_warehouse_id',d.warehouseId);
       if(d.inspireDatabase)localStorage.setItem('db_inspire_database',d.inspireDatabase);
+      // Auto-publish notebook in background
+      fetch('/api/notebook').then(function(r){return r.json()}).then(function(nb){
+        if(nb.path)localStorage.setItem('db_notebook_path',nb.path);
+      }).catch(function(){});
       if(d.databricksHost&&d.warehouseId&&d.inspireDatabase){
         localStorage.setItem('db_setup_complete','1');
         localStorage.setItem('db_auth_mode','pat');
-        if(location.hash===''||location.hash==='#setup')location.reload();
+        location.reload();
       }
     });
   });
 })();
 </script>`;
-  const isDatabricksAppEnv = !!DATABRICKS_HOST;
+  const isDatabricksAppEnv = !!DATABRICKS_HOST || AUTO_SETUP;
   const indexHtml = isDatabricksAppEnv
     ? indexHtmlRaw.replace('</head>', autoSetupSnippet + '</head>')
     : indexHtmlRaw;
