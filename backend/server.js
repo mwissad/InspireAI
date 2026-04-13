@@ -1596,8 +1596,36 @@ app.get('/api/workspace/status', requireToken, async (req, res) => {
 // ═══════════════════════════════════════════════════
 
 if (fs.existsSync(STATIC_DIR)) {
+  // When running as a Databricks App with installer-injected config,
+  // inject a script that auto-completes the Setup Wizard so users
+  // don't need to manually enter a PAT (the app proxy provides auth).
+  const indexHtmlRaw = fs.readFileSync(path.join(STATIC_DIR, 'index.html'), 'utf8');
+  const autoSetupSnippet = `<script>
+(function(){
+  if(localStorage.getItem('db_setup_complete'))return;
+  fetch('/api/defaults').then(r=>r.json()).then(function(d){
+    if(!d.isDatabricksApp)return;
+    fetch('/api/health').then(r=>r.json()).then(function(h){
+      if(!h.hasUserToken&&!h.hasServiceToken)return;
+      if(d.databricksHost)localStorage.setItem('db_databricks_host',d.databricksHost);
+      if(d.warehouseId)localStorage.setItem('db_warehouse_id',d.warehouseId);
+      if(d.inspireDatabase)localStorage.setItem('db_inspire_database',d.inspireDatabase);
+      if(d.databricksHost&&d.warehouseId&&d.inspireDatabase){
+        localStorage.setItem('db_setup_complete','1');
+        localStorage.setItem('db_auth_mode','pat');
+        if(location.hash===''||location.hash==='#setup')location.reload();
+      }
+    });
+  });
+})();
+</script>`;
+  const isDatabricksAppEnv = !!DATABRICKS_HOST;
+  const indexHtml = isDatabricksAppEnv
+    ? indexHtmlRaw.replace('</head>', autoSetupSnippet + '</head>')
+    : indexHtmlRaw;
+
   app.get('{*path}', (req, res) => {
-    res.sendFile(path.join(STATIC_DIR, 'index.html'));
+    res.type('html').send(indexHtml);
   });
 }
 

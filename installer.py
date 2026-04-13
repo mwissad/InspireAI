@@ -28,10 +28,10 @@
 # COMMAND ----------
 
 # Widgets with pre-filled defaults
-dbutils.widgets.dropdown("install_source", "github", ["github", "zip"], "1. Install Source")
+dbutils.widgets.dropdown("install_source", "workspace", ["github", "zip", "workspace"], "1. Install Source")
 dbutils.widgets.text("github_url", "https://github.com/mwissad/InspireAI.git", "2. GitHub Repository URL")
 dbutils.widgets.text("github_branch", "main", "3. GitHub Branch")
-dbutils.widgets.text("zip_path", "/Workspace/Users/me/InspireAI.zip", "4. Zip File Path (if zip)")
+dbutils.widgets.text("zip_path", "/Workspace/Users/me/InspireAI.zip", "4. Zip/Folder Path (if zip or workspace)")
 dbutils.widgets.text("app_name", "inspire-ai", "5. App Name")
 dbutils.widgets.text("catalog", "workspace", "6. Inspire Catalog")
 dbutils.widgets.text("schema", "_inspire", "7. Inspire Schema")
@@ -91,8 +91,10 @@ print(f"  Install source:    {INSTALL_SOURCE}")
 if INSTALL_SOURCE == "github":
     print(f"  GitHub URL:        {GITHUB_URL}")
     print(f"  GitHub Branch:     {GITHUB_BRANCH}")
-else:
+elif INSTALL_SOURCE == "zip":
     print(f"  Zip path:          {ZIP_PATH}")
+else:
+    print(f"  Workspace folder:  {ZIP_PATH}")
 print(f"  App name:          {APP_NAME}")
 print(f"  Inspire database:  {INSPIRE_DB}")
 print(f"  Workspace host:    {WORKSPACE_HOST}")
@@ -107,6 +109,8 @@ assert CATALOG.strip(), "Catalog cannot be empty"
 assert SCHEMA.strip(), "Schema cannot be empty"
 if INSTALL_SOURCE == "zip":
     assert os.path.exists(ZIP_PATH), f"Zip file not found at: {ZIP_PATH}"
+elif INSTALL_SOURCE == "workspace":
+    assert os.path.exists(ZIP_PATH), f"Workspace folder not found at: {ZIP_PATH}"
 
 print("\n  Validation passed.")
 
@@ -150,6 +154,11 @@ elif INSTALL_SOURCE == "zip":
         print(f"Unwrapped nested directory: {entries[0]}/")
 
     print(f"Extracted to {LOCAL_DIR}")
+
+elif INSTALL_SOURCE == "workspace":
+    print(f"Copying from workspace folder {ZIP_PATH} ...")
+    shutil.copytree(ZIP_PATH, LOCAL_DIR, dirs_exist_ok=True)
+    print(f"Copied to {LOCAL_DIR}")
 
 # Quick sanity check
 required_files = ["app.yaml", "start.sh", "backend/server.js"]
@@ -212,75 +221,12 @@ for name, value in inject_vars.items():
 
 # COMMAND ----------
 
-def should_skip(rel_path: str) -> bool:
-    """Check if a file should be skipped during upload."""
-    parts = rel_path.split("/")
-    for part in parts:
-        if part in SKIP_DIRS:
-            return True
-    for skip in SKIP_PATHS:
-        if rel_path.startswith(skip):
-            return True
-    return False
+import requests, urllib.parse
 
-# Walk the local directory and upload each file
-uploaded = 0
-skipped = 0
-errors = []
-
-print(f"Uploading to {WORKSPACE_DEST} ...")
-
-# Create the destination directory
-try:
-    w.workspace.mkdirs(WORKSPACE_DEST)
-except Exception:
-    pass  # May already exist
-
-for root, dirs, files in os.walk(LOCAL_DIR):
-    # Filter out skip directories in-place to prevent descending into them
-    dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
-
-    for filename in files:
-        local_path = os.path.join(root, filename)
-        rel_path = os.path.relpath(local_path, LOCAL_DIR)
-
-        if should_skip(rel_path):
-            skipped += 1
-            continue
-
-        workspace_path = f"{WORKSPACE_DEST}/{rel_path}"
-
-        try:
-            with open(local_path, "rb") as f:
-                content = f.read()
-            w.workspace.upload(workspace_path, content, overwrite=True)
-            uploaded += 1
-        except Exception as e:
-            errors.append((rel_path, str(e)))
-
-print(f"\nUploaded: {uploaded} files")
-print(f"Skipped:  {skipped} files")
-if errors:
-    print(f"Errors:   {len(errors)}")
-    for path, err in errors[:5]:
-        print(f"  - {path}: {err}")
-else:
-    print("No errors.")
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## Step 6 — Create Databricks App
-
-# COMMAND ----------
-
-import requests
-
-# REST API helper — SDK-version-agnostic
+# REST API helper — SDK-version-agnostic (needed for file uploads and app management)
 api_base = w.config.host.rstrip("/")
 api_headers = {}
 try:
-    # Get auth headers from the SDK config
     auth_header = w.config.authenticate()
     if isinstance(auth_header, dict):
         api_headers = auth_header
@@ -297,6 +243,106 @@ def api_get(path):
 def api_post(path, body=None):
     r = requests.post(f"{api_base}{path}", headers=api_headers, json=body or {})
     return r
+
+def should_skip(rel_path: str) -> bool:
+    """Check if a file should be skipped during upload."""
+    parts = rel_path.split("/")
+    for part in parts:
+        if part in SKIP_DIRS:
+            return True
+    for skip in SKIP_PATHS:
+        if rel_path.startswith(skip):
+            return True
+    return False
+
+if INSTALL_SOURCE == "workspace":
+    # Files are already in the workspace — just point the deploy at the source folder.
+    # We still need to inject app.yaml, so upload only the modified app.yaml.
+    WORKSPACE_DEST = ZIP_PATH  # Deploy directly from the pre-uploaded folder
+    print(f"Using existing workspace folder: {WORKSPACE_DEST}")
+    print("Uploading modified app.yaml with injected config...")
+    import base64
+    app_yaml_workspace = f"{WORKSPACE_DEST}/app.yaml"
+    with open(app_yaml_path, "rb") as f:
+        content = f.read()
+    try:
+        put_resp = requests.post(
+            f"{api_base}/api/2.0/workspace/import",
+            headers=api_headers,
+            json={
+                "path": app_yaml_workspace,
+                "content": base64.b64encode(content).decode("utf-8"),
+                "overwrite": True,
+                "format": "AUTO"
+            }
+        )
+        put_resp.raise_for_status()
+        print(f"  Updated {app_yaml_workspace}")
+    except Exception as e:
+        print(f"  Warning: Could not update app.yaml ({e}). Config may need manual setup.")
+else:
+    # Walk the local directory and upload each file
+    uploaded = 0
+    skipped = 0
+    errors = []
+
+    print(f"Uploading to {WORKSPACE_DEST} ...")
+
+    # Create the destination directory
+    try:
+        w.workspace.mkdirs(WORKSPACE_DEST)
+    except Exception:
+        pass  # May already exist
+
+    for root, dirs, files in os.walk(LOCAL_DIR):
+        # Filter out skip directories in-place to prevent descending into them
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+
+        for filename in files:
+            local_path = os.path.join(root, filename)
+            rel_path = os.path.relpath(local_path, LOCAL_DIR)
+
+            if should_skip(rel_path):
+                skipped += 1
+                continue
+
+            workspace_path = f"{WORKSPACE_DEST}/{rel_path}"
+
+            try:
+                with open(local_path, "rb") as f:
+                    content = f.read()
+                # Use the Import REST API with AUTO format for arbitrary files.
+                import base64
+                put_resp = requests.post(
+                    f"{api_base}/api/2.0/workspace/import",
+                    headers=api_headers,
+                    json={
+                        "path": workspace_path,
+                        "content": base64.b64encode(content).decode("utf-8"),
+                        "overwrite": True,
+                        "format": "AUTO"
+                    }
+                )
+                put_resp.raise_for_status()
+                uploaded += 1
+            except Exception as e:
+                errors.append((rel_path, str(e)))
+
+    print(f"\nUploaded: {uploaded} files")
+    print(f"Skipped:  {skipped} files")
+    if errors:
+        print(f"Errors:   {len(errors)}")
+        for path, err in errors[:5]:
+            print(f"  - {path}: {err}")
+    else:
+        print("No errors.")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Step 6 — Create Databricks App
+
+# COMMAND ----------
 
 # Check if app already exists
 app_exists = False
@@ -376,9 +422,23 @@ start_time = time.time()
 
 while True:
     data = api_get(f"/api/2.0/apps/{APP_NAME}")
+
+    # Check pending_deployment first (in-progress), then fall back to active_deployment (completed)
+    pending_dep = data.get("pending_deployment", {})
     active_dep = data.get("active_deployment", {})
-    dep_state = active_dep.get("status", {}).get("state", "UNKNOWN")
-    dep_msg = active_dep.get("status", {}).get("message", "")
+
+    # Use the deployment matching our deploy_id, preferring pending
+    if pending_dep.get("deployment_id") == deploy_id:
+        dep = pending_dep
+    elif active_dep.get("deployment_id") == deploy_id:
+        dep = active_dep
+    elif pending_dep:
+        dep = pending_dep
+    else:
+        dep = active_dep
+
+    dep_state = dep.get("status", {}).get("state", "UNKNOWN")
+    dep_msg = dep.get("status", {}).get("message", "")
     elapsed = int(time.time() - start_time)
     print(f"  [{elapsed}s] Deployment state: {dep_state}")
 

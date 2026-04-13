@@ -30,6 +30,7 @@ export default function SetupWizard({ settings, update, onComplete }) {
   const [publishing, setPublishing] = useState(false);
   const [publishResult, setPublishResult] = useState(null);
   const [creatingDb, setCreatingDb] = useState(false);
+  const [isDatabricksApp, setIsDatabricksApp] = useState(false);
 
   const { databricksHost, token, warehouseId, inspireDatabase, authMode } = settings;
 
@@ -40,25 +41,26 @@ export default function SetupWizard({ settings, update, onComplete }) {
     return h;
   }, [token, databricksHost]);
 
-  // Auto-detect host from environment
+  // Auto-detect host and Databricks App mode from environment
   useEffect(() => {
-    if (!databricksHost) {
-      fetch('/api/health').then(r => r.json()).then(data => {
-        if (data.hostConfigured && data.host) {
-          // Health returns truncated host — try to get full from env
-          fetch('/api/health').then(r => r.json()).then(d => {
-            if (d.hostConfigured) {
-              // The backend knows the host from env
-            }
-          });
+    fetch('/api/health').then(r => r.json()).then(data => {
+      if (data.isDatabricksApp) {
+        setIsDatabricksApp(true);
+        // When running as a Databricks App, the proxy auto-injects the user's
+        // OAuth token via x-forwarded-access-token — no PAT needed.
+        if (data.hostConfigured) {
+          // Fetch full host from defaults endpoint
+          fetch('/api/defaults').then(r => r.json()).then(d => {
+            if (d.databricksHost && !databricksHost) update('databricksHost', d.databricksHost);
+          }).catch(() => {});
         }
-      }).catch(() => {});
-    }
-  }, [databricksHost]);
+      }
+    }).catch(() => {});
+  }, []);
 
-  // Load warehouses when auth is ready
+  // Load warehouses when auth is ready (or in Databricks App mode where token is auto-injected)
   useEffect(() => {
-    if (!token || !databricksHost || step < 2) return;
+    if ((!token && !isDatabricksApp) || step < 2) return;
     fetch('/api/warehouses', { headers: headers() })
       .then(r => r.json())
       .then(data => {
@@ -76,7 +78,7 @@ export default function SetupWizard({ settings, update, onComplete }) {
 
   // Load catalogs when warehouse is ready
   useEffect(() => {
-    if (!token || !databricksHost || step < 3) return;
+    if ((!token && !isDatabricksApp) || step < 3) return;
     fetch('/api/catalogs', { headers: headers() })
       .then(r => r.json())
       .then(data => setCatalogs(data.catalogs || []))
@@ -86,7 +88,7 @@ export default function SetupWizard({ settings, update, onComplete }) {
   // Load schemas when catalog selected
   const selectedCatalog = inspireDatabase?.split('.')[0] || '';
   useEffect(() => {
-    if (!selectedCatalog || !token || !databricksHost) return;
+    if (!selectedCatalog || (!token && !isDatabricksApp)) return;
     fetch(`/api/catalogs/${encodeURIComponent(selectedCatalog)}/schemas`, { headers: headers() })
       .then(r => r.json())
       .then(data => setSchemas(data.schemas || []))
@@ -150,8 +152,8 @@ export default function SetupWizard({ settings, update, onComplete }) {
 
   const canProceed = () => {
     switch (step) {
-      case 0: return !!databricksHost;
-      case 1: return !!token;
+      case 0: return !!databricksHost || isDatabricksApp;
+      case 1: return !!token || isDatabricksApp;
       case 2: return !!warehouseId;
       case 3: return !!inspireDatabase && inspireDatabase.includes('.');
       case 4: return verification?.ok;
@@ -240,58 +242,66 @@ export default function SetupWizard({ settings, update, onComplete }) {
           {/* Step 1: Authenticate */}
           {step === 1 && (
             <div className="space-y-4">
-              <div className="flex gap-2 mb-4">
-                {['pat', 'sp'].map(mode => (
-                  <button
-                    key={mode}
-                    onClick={() => update('authMode', mode)}
-                    className={`flex-1 px-4 py-2.5 rounded-xl text-xs font-medium border transition-all ${
-                      authMode === mode ? 'border-db-red bg-db-red-50 text-db-red' : 'border-border text-text-secondary hover:border-border-strong'
-                    }`}
-                  >
-                    {mode === 'pat' ? 'Personal Access Token' : 'Service Principal'}
-                  </button>
-                ))}
-              </div>
-
-              {authMode === 'pat' ? (
-                <div>
-                  <label className="text-xs font-medium text-text-secondary mb-1.5 block">Personal Access Token (PAT)</label>
-                  <input
-                    type="password"
-                    value={token}
-                    onChange={(e) => update('token', e.target.value)}
-                    placeholder="dapi..."
-                    className="w-full px-4 py-3 rounded-xl border border-border bg-surface text-text-primary text-sm font-mono focus:border-db-red focus:ring-1 focus:ring-db-red/20 outline-none transition-all"
-                  />
-                  <p className="text-[10px] text-text-tertiary mt-1.5">
-                    Generate at: Databricks &rarr; User Settings &rarr; Developer &rarr; Access Tokens &rarr; Generate New Token
-                  </p>
+              {isDatabricksApp ? (
+                <div className="flex items-center gap-2 px-4 py-3 rounded-lg bg-success-bg text-success text-sm">
+                  <CheckCircle2 size={16} /> Authenticated automatically via Databricks App. No PAT needed.
                 </div>
               ) : (
-                <div className="space-y-3">
-                  <div>
-                    <label className="text-xs font-medium text-text-secondary mb-1 block">Client ID</label>
-                    <input type="text" value={settings.spClientId} onChange={(e) => update('spClientId', e.target.value)}
-                      className="w-full px-4 py-2.5 rounded-xl border border-border bg-surface text-text-primary text-sm font-mono focus:border-db-red outline-none" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" />
+                <>
+                  <div className="flex gap-2 mb-4">
+                    {['pat', 'sp'].map(mode => (
+                      <button
+                        key={mode}
+                        onClick={() => update('authMode', mode)}
+                        className={`flex-1 px-4 py-2.5 rounded-xl text-xs font-medium border transition-all ${
+                          authMode === mode ? 'border-db-red bg-db-red-50 text-db-red' : 'border-border text-text-secondary hover:border-border-strong'
+                        }`}
+                      >
+                        {mode === 'pat' ? 'Personal Access Token' : 'Service Principal'}
+                      </button>
+                    ))}
                   </div>
-                  <div>
-                    <label className="text-xs font-medium text-text-secondary mb-1 block">Client Secret</label>
-                    <input type="password" value={settings.spClientSecret} onChange={(e) => update('spClientSecret', e.target.value)}
-                      className="w-full px-4 py-2.5 rounded-xl border border-border bg-surface text-text-primary text-sm font-mono focus:border-db-red outline-none" placeholder="dose..." />
-                  </div>
-                  <div>
-                    <label className="text-xs font-medium text-text-secondary mb-1 block">Tenant ID (Azure)</label>
-                    <input type="text" value={settings.spTenantId} onChange={(e) => update('spTenantId', e.target.value)}
-                      className="w-full px-4 py-2.5 rounded-xl border border-border bg-surface text-text-primary text-sm font-mono focus:border-db-red outline-none" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" />
-                  </div>
-                </div>
-              )}
 
-              {token && (
-                <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-success-bg text-success text-xs">
-                  <CheckCircle2 size={14} /> Token configured ({token.slice(0, 6)}...{token.slice(-4)})
-                </div>
+                  {authMode === 'pat' ? (
+                    <div>
+                      <label className="text-xs font-medium text-text-secondary mb-1.5 block">Personal Access Token (PAT)</label>
+                      <input
+                        type="password"
+                        value={token}
+                        onChange={(e) => update('token', e.target.value)}
+                        placeholder="dapi..."
+                        className="w-full px-4 py-3 rounded-xl border border-border bg-surface text-text-primary text-sm font-mono focus:border-db-red focus:ring-1 focus:ring-db-red/20 outline-none transition-all"
+                      />
+                      <p className="text-[10px] text-text-tertiary mt-1.5">
+                        Generate at: Databricks &rarr; User Settings &rarr; Developer &rarr; Access Tokens &rarr; Generate New Token
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      <div>
+                        <label className="text-xs font-medium text-text-secondary mb-1 block">Client ID</label>
+                        <input type="text" value={settings.spClientId} onChange={(e) => update('spClientId', e.target.value)}
+                          className="w-full px-4 py-2.5 rounded-xl border border-border bg-surface text-text-primary text-sm font-mono focus:border-db-red outline-none" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" />
+                      </div>
+                      <div>
+                        <label className="text-xs font-medium text-text-secondary mb-1 block">Client Secret</label>
+                        <input type="password" value={settings.spClientSecret} onChange={(e) => update('spClientSecret', e.target.value)}
+                          className="w-full px-4 py-2.5 rounded-xl border border-border bg-surface text-text-primary text-sm font-mono focus:border-db-red outline-none" placeholder="dose..." />
+                      </div>
+                      <div>
+                        <label className="text-xs font-medium text-text-secondary mb-1 block">Tenant ID (Azure)</label>
+                        <input type="text" value={settings.spTenantId} onChange={(e) => update('spTenantId', e.target.value)}
+                          className="w-full px-4 py-2.5 rounded-xl border border-border bg-surface text-text-primary text-sm font-mono focus:border-db-red outline-none" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" />
+                      </div>
+                    </div>
+                  )}
+
+                  {token && (
+                    <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-success-bg text-success text-xs">
+                      <CheckCircle2 size={14} /> Token configured ({token.slice(0, 6)}...{token.slice(-4)})
+                    </div>
+                  )}
+                </>
               )}
             </div>
           )}
