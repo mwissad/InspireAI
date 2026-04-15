@@ -97,21 +97,18 @@ Returns a run_id — use inspire_get_run_status and inspire_get_session to monit
         const { token, host, cluster_id, notebook_path, ...rest } = args;
         // Map flat args to the params object the API expects
         const params = {
-          business: rest.business_name,
-          inspire_database: rest.inspire_database,
-          warehouse_id: rest.warehouse_id,
-          operation_mode: rest.operation_mode || 'Discover Usecases',
-          catalogs: rest.catalogs,
-          schemas: rest.schemas,
-          tables: rest.tables,
-          business_domains: rest.business_domains,
-          generation_instructions: rest.strategic_goals || '',
-          business_priorities: rest.business_priorities,
-          generate: rest.generate_choices,
-          generation_path: rest.generation_path,
-          output_language: rest.output_language,
-          json_file_path: '',
-          session_id: String(Date.now()) + String(Math.floor(Math.random() * 1e6)),
+          '00_business_name': rest.business_name,
+          '01_uc_metadata': [rest.catalogs, rest.schemas, rest.tables].filter(Boolean).join(','),
+          '02_inspire_database': rest.inspire_database,
+          '04_table_election': 'Let Inspire Decides',
+          '05_use_cases_quality': 'Good Quality',
+          '06_business_domains': rest.business_domains || '',
+          '07_business_priorities': rest.business_priorities || '',
+          '08_generation_instructions': rest.strategic_goals || '',
+          '09_generation_options': rest.generate_choices || 'Genie Code Instructions,PDF Catalog',
+          '11_generation_path': rest.generation_path || './inspire_gen/',
+          '12_documents_languages': rest.output_language || 'English',
+          '14_session_id': String(Date.now()) + String(Math.floor(Math.random() * 1e6)),
         };
         // Strip undefined values
         for (const k of Object.keys(params)) {

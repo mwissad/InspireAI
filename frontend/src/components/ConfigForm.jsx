@@ -183,22 +183,18 @@ export default function ConfigForm({ onSubmit, isSubmitting, submitError, disabl
     const finalSessionId = form.session_id ||
       String(Date.now()) + String(Math.floor(Math.random() * 1e6));
     const params = {
-      business: form.business_name,
-      catalogs: '',
-      schemas: form.uc_metadata,
-      tables: '',
-      inspire_database: form.inspire_database,
-      operation_mode: form.operation || 'Discover Usecases',
-      table_election_mode: form.table_election,
-      use_cases_quality: form.use_cases_quality,
-      business_domains: form.business_domains,
-      business_priorities: form.business_priorities,
-      generation_instructions: form.strategic_goals,
-      generate: form.generation_options.join(','),
-      generation_path: form.generation_path,
-      output_language: form.documents_languages.join(','),
-      json_file_path: '',
-      session_id: finalSessionId,
+      '00_business_name': form.business_name,
+      '01_uc_metadata': form.uc_metadata,
+      '02_inspire_database': form.inspire_database,
+      '04_table_election': form.table_election,
+      '05_use_cases_quality': form.use_cases_quality,
+      '06_business_domains': form.business_domains,
+      '07_business_priorities': form.business_priorities,
+      '08_generation_instructions': form.strategic_goals,
+      '09_generation_options': form.generation_options.join(','),
+      '11_generation_path': form.generation_path,
+      '12_documents_languages': form.documents_languages.join(','),
+      '14_session_id': finalSessionId,
     };
     onSubmit(params);
   };

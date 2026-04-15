@@ -1005,7 +1005,7 @@ app.post('/api/run', requireToken, async (req, res) => {
       console.warn(`⚠️ Path verify failed: ${verifyErr.message}`);
     }
 
-    const businessName = params.business || params['00_business_name'] || 'Run';
+    const businessName = params['00_business_name'] || 'Run';
     const sanitizeTag = (v) => String(v || '').replace(/[^A-Za-z0-9._-]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '').slice(0, 255);
     const sanitizedTag = businessName.toLowerCase().replace(/[^a-z0-9_]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '') || 'run';
     const jobName = `Inspire AI - ${businessName} - ${new Date().toISOString().slice(0, 19)}`;

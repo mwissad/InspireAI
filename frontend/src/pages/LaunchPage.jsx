@@ -55,24 +55,20 @@ const BUSINESS_PRIORITIES = [
 export default function LaunchPage({ settings, update, onLaunched }) {
   const { databricksHost, token, notebookPath, warehouseId, inspireDatabase } = settings;
 
-  // ── Widget params (v47 named widget keys — see integration guide §9) ──
+  // ── Widget params (must match notebook widget names exactly) ──
   const [params, setParams] = useState({
-    business: '',
-    catalogs: '',
-    schemas: '',
-    tables: '',
-    inspire_database: inspireDatabase || '',
-    table_election_mode: 'Let Inspire Decides',
-    use_cases_quality: 'High Quality',
-    business_domains: '',
-    business_priorities: '',
-    generation_instructions: '',
-    generate: 'Genie Code Instructions,PDF Catalog',
-    generation_path: './inspire_gen/',
-    output_language: 'English',
-    operation_mode: 'Discover Usecases',
-    json_file_path: '',
-    session_id: '',
+    '00_business_name': '',
+    '01_uc_metadata': '',
+    '02_inspire_database': inspireDatabase || '',
+    '04_table_election': 'Let Inspire Decides',
+    '05_use_cases_quality': 'High Quality',
+    '06_business_domains': '',
+    '07_business_priorities': '',
+    '08_generation_instructions': '',
+    '09_generation_options': 'Genie Code Instructions,PDF Catalog',
+    '11_generation_path': './inspire_gen/',
+    '12_documents_languages': 'English',
+    '14_session_id': '',
   });
 
   // ── Catalog/Schema pickers ──
@@ -126,40 +122,33 @@ export default function LaunchPage({ settings, update, onLaunched }) {
   // Sync inspire database from settings
   useEffect(() => {
     if (inspireDatabase) {
-      setParams((p) => ({ ...p, inspire_database: inspireDatabase }));
+      setParams((p) => ({ ...p, '02_inspire_database': inspireDatabase }));
     }
   }, [inspireDatabase]);
 
   // Sync generation options
   useEffect(() => {
     const sel = Object.entries(genChecks).filter(([, v]) => v).map(([k]) => k);
-    setParams((p) => ({ ...p, generate: sel.join(',') }));
+    setParams((p) => ({ ...p, '09_generation_options': sel.join(',') }));
   }, [genChecks]);
 
   // Sync business priorities
   useEffect(() => {
     const sel = Object.entries(priorityChecks).filter(([, v]) => v).map(([k]) => k);
-    setParams((p) => ({ ...p, business_priorities: sel.join(',') }));
+    setParams((p) => ({ ...p, '07_business_priorities': sel.join(',') }));
   }, [priorityChecks]);
 
-  // Build UC metadata from selections — v47 uses separate catalogs/schemas/tables fields
+  // Build UC metadata from selections — combined into 01_uc_metadata for the notebook
   useEffect(() => {
     if (selectedTables.length > 0) {
-      // Auto-switch table election to reflect manual selection
-      setParams((p) => ({
-        ...p,
-        catalogs: selectedCatalogs.join(','),
-        schemas: selectedSchemas.join(','),
-        tables: selectedTables.join(','),
-        table_election_mode: 'Selected Tables',
-      }));
+      const metadata = selectedTables.join(',');
+      setParams((p) => p['04_table_election'] !== 'Selected Tables'
+        ? { ...p, '01_uc_metadata': metadata, '04_table_election': 'Selected Tables' }
+        : { ...p, '01_uc_metadata': metadata }
+      );
     } else {
-      setParams((p) => ({
-        ...p,
-        catalogs: selectedCatalogs.join(','),
-        schemas: selectedSchemas.join(','),
-        tables: '',
-      }));
+      const parts = [...selectedCatalogs, ...selectedSchemas];
+      setParams((p) => ({ ...p, '01_uc_metadata': parts.join(',') }));
     }
   }, [selectedCatalogs, selectedSchemas, selectedTables]);
 
@@ -216,34 +205,34 @@ export default function LaunchPage({ settings, update, onLaunched }) {
 
   // Auto-populate inspire database when first catalog is selected
   useEffect(() => {
-    if (selectedCatalogs.length === 1 && !params.inspire_database) {
+    if (selectedCatalogs.length === 1 && !params['02_inspire_database']) {
       const autoVal = `${selectedCatalogs[0]}._inspire`;
-      setParams((p) => ({ ...p, inspire_database: autoVal }));
+      setParams((p) => ({ ...p, '02_inspire_database': autoVal }));
       update('inspireDatabase', autoVal);
     }
   }, [selectedCatalogs]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const updateParam = (key, val) => {
     setParams((p) => ({ ...p, [key]: val }));
-    if (key === 'inspire_database') {
+    if (key === '02_inspire_database') {
       update('inspireDatabase', val);
     }
   };
 
   // Launch
   const handleLaunch = async () => {
-    if (!params.business)
+    if (!params['00_business_name'])
       return setLaunchError('Business name is required.');
-    if (!params.inspire_database && !inspireDatabase)
+    if (!params['02_inspire_database'] && !inspireDatabase)
       return setLaunchError('Inspire Database is required. Set it in Settings.');
-    if (!params.catalogs && !params.schemas && !params.tables)
-      return setLaunchError('Select at least one catalog, schema, or table.');
+    if (!params['01_uc_metadata'])
+      return setLaunchError('Select at least one catalog, schema, or table for UC Metadata.');
 
     setLaunching(true);
     setLaunchError('');
     const finalParams = { ...params };
     // Always auto-generate session ID
-    finalParams.session_id =
+    finalParams['14_session_id'] =
       String(Date.now()) + String(Math.floor(Math.random() * 1e6));
 
     try {
@@ -254,8 +243,8 @@ export default function LaunchPage({ settings, update, onLaunched }) {
           params: finalParams,
         }),
       });
-      update('inspireDatabase', finalParams.inspire_database);
-      onLaunched?.(finalParams.session_id, data.run_id);
+      update('inspireDatabase', finalParams['02_inspire_database']);
+      onLaunched?.(finalParams['14_session_id'], data.run_id);
     } catch (err) {
       setLaunchError(err.message);
     } finally {
@@ -273,7 +262,7 @@ export default function LaunchPage({ settings, update, onLaunched }) {
   const filteredTables = tables.filter(
     (t) => !tableSearch || t.full_name.toLowerCase().includes(tableSearch.toLowerCase())
   );
-  const needsLanguage = params.generate.includes('PDF') || params.generate.includes('Presentation');
+  const needsLanguage = params['09_generation_options'].includes('PDF') || params['09_generation_options'].includes('Presentation');
 
   // Table select all / deselect all
   const allTablesSelected = filteredTables.length > 0 && filteredTables.every((t) => selectedTables.includes(t.full_name));
@@ -288,7 +277,7 @@ export default function LaunchPage({ settings, update, onLaunched }) {
   };
 
   // Validation state
-  const canLaunch = params.business && (params.inspire_database || inspireDatabase) && (params.catalogs || params.schemas || params.tables);
+  const canLaunch = params['00_business_name'] && (params['02_inspire_database'] || inspireDatabase) && params['01_uc_metadata'];
 
   return (
     <div className="max-w-5xl mx-auto px-6 py-8">
@@ -340,8 +329,8 @@ export default function LaunchPage({ settings, update, onLaunched }) {
               <input
                 type="text"
                 placeholder="e.g. Contoso, Acme Corp, Retail Division"
-                value={params.business}
-                onChange={(e) => updateParam('business', e.target.value)}
+                value={params['00_business_name']}
+                onChange={(e) => updateParam('00_business_name', e.target.value)}
                 className="w-full pl-10 pr-4 py-2.5 text-sm border border-border rounded-lg bg-surface text-text-primary placeholder:text-text-tertiary glow-focus transition-smooth"
               />
             </Field>
@@ -351,7 +340,7 @@ export default function LaunchPage({ settings, update, onLaunched }) {
               <input
                 type="text"
                 placeholder="e.g. my_catalog._inspire"
-                value={params.inspire_database}
+                value={params['02_inspire_database']}
                 onChange={(e) => updateParam('02_inspire_database', e.target.value)}
                 className="w-full pl-10 pr-4 py-2.5 text-sm border border-border rounded-lg bg-surface text-text-primary placeholder:text-text-tertiary glow-focus transition-smooth font-mono"
               />
@@ -505,7 +494,7 @@ export default function LaunchPage({ settings, update, onLaunched }) {
                 )}
 
                 {/* UC Metadata preview — collapsible & scrollable */}
-                {(params.catalogs || params.schemas || params.tables) && (
+                {params['01_uc_metadata'] && (
                   <div className="mt-3 rounded-lg border border-success/20 bg-success-bg overflow-hidden">
                     <button
                       type="button"
@@ -515,13 +504,13 @@ export default function LaunchPage({ settings, update, onLaunched }) {
                       <CheckCircle2 size={14} className="text-success shrink-0" />
                       <p className="text-[10px] text-success font-semibold uppercase tracking-wider flex-1">Metadata Selected</p>
                       <span className="text-[10px] text-success/70 font-mono">
-                        {[params.catalogs, params.schemas, params.tables].filter(Boolean).join(',').split(',').filter(Boolean).length} item{[params.catalogs, params.schemas, params.tables].filter(Boolean).join(',').split(',').filter(Boolean).length > 1 ? 's' : ''}
+                        {params['01_uc_metadata'].split(',').length} item{params['01_uc_metadata'].split(',').length > 1 ? 's' : ''}
                       </span>
                       <ChevronDown size={12} className={`text-success transition-transform duration-200 ${metadataPreviewExpanded ? 'rotate-180' : ''}`} />
                     </button>
                     {metadataPreviewExpanded && (
                       <div className="px-4 pb-3 max-h-32 overflow-y-auto">
-                        <p className="text-xs text-text-primary font-mono break-all leading-relaxed">{[params.catalogs, params.schemas, params.tables].filter(Boolean).join(', ')}</p>
+                        <p className="text-xs text-text-primary font-mono break-all leading-relaxed">{params['01_uc_metadata']}</p>
                       </div>
                     )}
                   </div>
@@ -591,8 +580,8 @@ export default function LaunchPage({ settings, update, onLaunched }) {
                   <input
                     type="text"
                     placeholder="Increase market share, Reduce operational costs, Improve customer retention..."
-                    value={params.generation_instructions}
-                    onChange={(e) => updateParam('generation_instructions', e.target.value)}
+                    value={params['08_generation_instructions']}
+                    onChange={(e) => updateParam('08_generation_instructions', e.target.value)}
                     className="w-full pl-9 pr-4 py-2.5 text-sm border border-border rounded-lg bg-surface text-text-primary placeholder:text-text-tertiary glow-focus transition-smooth"
                   />
                 </div>
@@ -605,8 +594,8 @@ export default function LaunchPage({ settings, update, onLaunched }) {
                   <input
                     type="text"
                     placeholder="Sales, Marketing, Finance, Operations, Supply Chain..."
-                    value={params.business_domains}
-                    onChange={(e) => updateParam('business_domains', e.target.value)}
+                    value={params['06_business_domains']}
+                    onChange={(e) => updateParam('06_business_domains', e.target.value)}
                     className="w-full pl-9 pr-4 py-2.5 text-sm border border-border rounded-lg bg-surface text-text-primary placeholder:text-text-tertiary glow-focus transition-smooth"
                   />
                 </div>
@@ -660,8 +649,8 @@ export default function LaunchPage({ settings, update, onLaunched }) {
                 <Field label="Generation Path" icon={FileText} hint="Where to write output artifacts">
                   <input
                     type="text"
-                    value={params.generation_path}
-                    onChange={(e) => updateParam('generation_path', e.target.value)}
+                    value={params['11_generation_path']}
+                    onChange={(e) => updateParam('11_generation_path', e.target.value)}
                     className="w-full pl-10 pr-4 py-2.5 text-sm border border-border rounded-lg bg-surface text-text-primary glow-focus transition-smooth font-mono"
                   />
                 </Field>
@@ -670,8 +659,8 @@ export default function LaunchPage({ settings, update, onLaunched }) {
                   <input
                     type="text"
                     placeholder="English, French, Arabic"
-                    value={params.output_language}
-                    onChange={(e) => updateParam('output_language', e.target.value)}
+                    value={params['12_documents_languages']}
+                    onChange={(e) => updateParam('12_documents_languages', e.target.value)}
                     className="w-full pl-10 pr-4 py-2.5 text-sm border border-border rounded-lg bg-surface text-text-primary placeholder:text-text-tertiary glow-focus transition-smooth"
                   />
                 </Field>
@@ -681,8 +670,8 @@ export default function LaunchPage({ settings, update, onLaunched }) {
               <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
                 <FieldSection label="Table Election">
                   <GlowSelect
-                    value={params.table_election_mode}
-                    onChange={(v) => updateParam('table_election_mode', v)}
+                    value={params['04_table_election']}
+                    onChange={(v) => updateParam('04_table_election', v)}
                     options={TABLE_ELECTION}
                   />
                   <p className="text-[10px] text-text-tertiary mt-1">How Inspire selects tables</p>
@@ -691,12 +680,12 @@ export default function LaunchPage({ settings, update, onLaunched }) {
                 <FieldSection label="Use Cases Quality">
                   <div className="flex gap-1.5">
                     {QUALITY_OPTIONS.map((q) => {
-                      const active = params.use_cases_quality === q;
+                      const active = params['05_use_cases_quality'] === q;
                       return (
                         <button
                           key={q}
                           type="button"
-                          onClick={() => updateParam('use_cases_quality', q)}
+                          onClick={() => updateParam('05_use_cases_quality', q)}
                           className={`flex-1 py-2 rounded-lg text-[11px] font-medium transition-smooth border ${
                             active
                               ? 'border-db-red/30 bg-db-red-50 text-db-red'
@@ -722,8 +711,8 @@ export default function LaunchPage({ settings, update, onLaunched }) {
         {/* Summary chips */}
         {canLaunch && (
           <div className="flex flex-wrap items-center gap-2 mb-5">
-            <Chip icon={<Building2 size={10} />}>{params.business}</Chip>
-            <Chip icon={<Database size={10} />}>{params.inspire_database}</Chip>
+            <Chip icon={<Building2 size={10} />}>{params['00_business_name']}</Chip>
+            <Chip icon={<Database size={10} />}>{params['02_inspire_database']}</Chip>
             {selectedTables.length > 0 && (
               <Chip icon={<Table2 size={10} />}>
                 {selectedTables.length} table{selectedTables.length > 1 ? 's' : ''}
@@ -739,7 +728,7 @@ export default function LaunchPage({ settings, update, onLaunched }) {
                 {selectedSchemas.length} schema{selectedSchemas.length > 1 ? 's' : ''}
               </Chip>
             )}
-            <Chip icon={<Sliders size={10} />}>{params.use_cases_quality}</Chip>
+            <Chip icon={<Sliders size={10} />}>{params['05_use_cases_quality']}</Chip>
           </div>
         )}
 
