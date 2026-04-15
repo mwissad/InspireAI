@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, Component } from 'react';
+import { useState, useEffect, useCallback, Component } from 'react';
 import { ThemeProvider } from './ThemeContext';
 import Header from './components/Header';
 import LandingPage from './pages/LandingPage';
@@ -51,52 +51,120 @@ class ErrorBoundary extends Component {
 }
 
 export default function App() {
-  // Start in a 'loading' state — resolve environment before showing any page.
-  // This prevents the Setup Wizard from flashing on Databricks App deployments.
+  // Start in 'loading' — resolve backend config before rendering any page.
   const [page, setPage] = useState('loading');
 
-  // Persisted settings
-  const [settings, setSettings] = useState(() => ({
-    databricksHost: localStorage.getItem('db_databricks_host') || '',
-    token: localStorage.getItem('db_token') || '',
-    notebookPath: localStorage.getItem('db_notebook_path') || '',
-    warehouseId: localStorage.getItem('db_warehouse_id') || '',
-    inspireDatabase: localStorage.getItem('db_inspire_database') || '',
-    authMode: localStorage.getItem('db_auth_mode') || 'pat',
-    spClientId: localStorage.getItem('db_sp_client_id') || '',
-    spClientSecret: localStorage.getItem('db_sp_client_secret') || '',
-    spTenantId: localStorage.getItem('db_sp_tenant_id') || '',
-  }));
+  // Settings: server defaults (from /api/defaults) are the source of truth.
+  // localStorage is just a cache for non-App mode (local dev with PAT).
+  const [settings, setSettings] = useState({
+    databricksHost: '',
+    token: '',
+    notebookPath: '',
+    warehouseId: '',
+    inspireDatabase: '',
+    authMode: 'pat',
+    spClientId: '',
+    spClientSecret: '',
+    spTenantId: '',
+  });
 
   // Session tracking
   const [sessionId, setSessionId] = useState(null);
   const [runId, setRunId] = useState(null);
 
   const update = useCallback((key, val) => {
-    setSettings((prev) => {
-      const next = { ...prev, [key]: val };
-      localStorage.setItem(
-        `db_${key.replace(/([A-Z])/g, '_$1').toLowerCase()}`,
-        val
-      );
-      return next;
-    });
+    setSettings((prev) => ({ ...prev, [key]: val }));
+    try { localStorage.setItem(`db_${key.replace(/([A-Z])/g, '_$1').toLowerCase()}`, val); } catch {}
   }, []);
 
-  // Persist all settings
+  // ── Bootstrap: fetch server config ONCE on mount, then show the app ──
+  // This runs before any page renders. In Databricks App mode, the backend
+  // provides everything via env vars + the proxy provides auth via
+  // x-forwarded-access-token. No localStorage needed.
   useEffect(() => {
-    localStorage.setItem('db_databricks_host', settings.databricksHost);
-    localStorage.setItem('db_token', settings.token);
-    localStorage.setItem('db_notebook_path', settings.notebookPath);
-    localStorage.setItem('db_warehouse_id', settings.warehouseId);
-    localStorage.setItem('db_inspire_database', settings.inspireDatabase);
-    localStorage.setItem('db_auth_mode', settings.authMode);
-    localStorage.setItem('db_sp_client_id', settings.spClientId);
-    localStorage.setItem('db_sp_client_secret', settings.spClientSecret);
-    localStorage.setItem('db_sp_tenant_id', settings.spTenantId);
-  }, [settings]);
+    (async () => {
+      try {
+        // 1. Fetch server-side defaults (always available, no auth needed)
+        const defResp = await fetch('/api/defaults');
+        const defaults = defResp.ok ? await defResp.json() : {};
 
-  // Auto-fetch SP token when in SP mode
+        // 2. Build initial settings: server defaults > localStorage cache > empty
+        const resolved = {
+          databricksHost: defaults.databricksHost || localStorage.getItem('db_databricks_host') || '',
+          token: localStorage.getItem('db_token') || '',
+          notebookPath: defaults.notebookPath || localStorage.getItem('db_notebook_path') || '',
+          warehouseId: defaults.warehouseId || localStorage.getItem('db_warehouse_id') || '',
+          inspireDatabase: defaults.inspireDatabase || localStorage.getItem('db_inspire_database') || '',
+          authMode: localStorage.getItem('db_auth_mode') || 'pat',
+          spClientId: localStorage.getItem('db_sp_client_id') || '',
+          spClientSecret: localStorage.getItem('db_sp_client_secret') || '',
+          spTenantId: localStorage.getItem('db_sp_tenant_id') || '',
+        };
+
+        // 3. Auto-detect warehouse if installer didn't set one
+        if (!resolved.warehouseId) {
+          try {
+            const whResp = await fetch('/api/warehouses');
+            if (whResp.ok) {
+              const whs = (await whResp.json()).warehouses || [];
+              const pick = whs.find(w => w.state === 'RUNNING' && w.enable_serverless_compute)
+                || whs.find(w => w.state === 'RUNNING')
+                || whs[0];
+              if (pick) resolved.warehouseId = pick.id;
+            }
+          } catch {}
+        }
+
+        // 4. Auto-publish notebook if not already set
+        if (!resolved.notebookPath) {
+          try {
+            const nbResp = await fetch('/api/notebook');
+            if (nbResp.ok) {
+              const nbData = await nbResp.json();
+              if (nbData.path) resolved.notebookPath = nbData.path;
+            }
+          } catch {}
+        }
+
+        // 5. Apply all settings at once (single state update)
+        setSettings(resolved);
+
+        // 6. Persist to localStorage for next load
+        for (const [key, val] of Object.entries(resolved)) {
+          if (val) {
+            try { localStorage.setItem(`db_${key.replace(/([A-Z])/g, '_$1').toLowerCase()}`, val); } catch {}
+          }
+        }
+
+        console.log('[bootstrap] ready:', {
+          host: resolved.databricksHost ? 'set' : 'MISSING',
+          warehouse: resolved.warehouseId ? 'set' : 'MISSING',
+          database: resolved.inspireDatabase ? 'set' : 'MISSING',
+          notebook: resolved.notebookPath ? 'set' : 'MISSING',
+          isDatabricksApp: defaults.isDatabricksApp,
+        });
+      } catch (err) {
+        console.error('[bootstrap] error:', err);
+        // Fallback: try localStorage
+        setSettings({
+          databricksHost: localStorage.getItem('db_databricks_host') || '',
+          token: localStorage.getItem('db_token') || '',
+          notebookPath: localStorage.getItem('db_notebook_path') || '',
+          warehouseId: localStorage.getItem('db_warehouse_id') || '',
+          inspireDatabase: localStorage.getItem('db_inspire_database') || '',
+          authMode: localStorage.getItem('db_auth_mode') || 'pat',
+          spClientId: localStorage.getItem('db_sp_client_id') || '',
+          spClientSecret: localStorage.getItem('db_sp_client_secret') || '',
+          spTenantId: localStorage.getItem('db_sp_tenant_id') || '',
+        });
+      }
+
+      // Show the app — settings are fully resolved
+      setPage('landing');
+    })();
+  }, []);
+
+  // Auto-fetch SP token when in SP mode (local dev only)
   useEffect(() => {
     if (settings.authMode !== 'sp' || !settings.spClientId || !settings.spClientSecret || !settings.spTenantId || !settings.databricksHost) return;
     (async () => {
@@ -115,97 +183,29 @@ export default function App() {
           const data = await resp.json();
           if (data.access_token) update('token', data.access_token);
         }
-      } catch { /* silent */ }
+      } catch {}
     })();
   }, [settings.authMode, settings.spClientId, settings.spClientSecret, settings.spTenantId, settings.databricksHost]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const [transitioning, setTransitioning] = useState(false);
-  const [prevPage, setPrevPage] = useState(null);
   const nav = useCallback((p) => {
     if (p === page) return;
     setTransitioning(true);
-    setPrevPage(page);
     setTimeout(() => {
       setPage(p);
       setTransitioning(false);
     }, 200);
   }, [page]);
 
-  // Navigation guards
   const canLaunch = true;
   const canMonitor = Boolean(sessionId || runId);
   const canResults = true;
 
-  // ── Auto-configure on mount ──
-  // In Databricks App mode, the proxy injects x-forwarded-access-token on every
-  // request — no explicit token needed. The backend reads config from env vars
-  // injected by the workspace installer. The frontend just needs to fetch and apply.
-  useEffect(() => {
-    (async () => {
-      try {
-        // 1. Fetch installer-injected defaults (public endpoint, no auth needed)
-        let defaults = {};
-        const defResp = await fetch('/api/defaults');
-        if (defResp.ok) {
-          defaults = await defResp.json();
-          console.log('[auto-config] defaults:', JSON.stringify(defaults));
-          if (defaults.databricksHost) update('databricksHost', defaults.databricksHost);
-          if (defaults.warehouseId) update('warehouseId', defaults.warehouseId);
-          if (defaults.inspireDatabase) update('inspireDatabase', defaults.inspireDatabase);
-          if (defaults.notebookPath) update('notebookPath', defaults.notebookPath);
-        }
-
-        // 2. Auto-select warehouse if not pre-configured by installer
-        //    In Databricks App mode, the proxy injects auth automatically on fetch()
-        let resolvedWarehouse = defaults.warehouseId;
-        if (!resolvedWarehouse) {
-          const whResp = await fetch('/api/warehouses');
-          if (whResp.ok) {
-            const whData = await whResp.json();
-            const whs = whData.warehouses || [];
-            const running = whs.find((w) => w.state === 'RUNNING' && w.enable_serverless_compute);
-            const first = running || whs.find((w) => w.state === 'RUNNING') || whs[0];
-            if (first) {
-              update('warehouseId', first.id);
-              resolvedWarehouse = first.id;
-            }
-          } else {
-            console.warn('[auto-config] warehouse fetch failed:', whResp.status);
-          }
-        }
-
-        // 3. Auto-publish notebook if not pre-configured by installer
-        let resolvedNotebook = defaults.notebookPath;
-        if (!resolvedNotebook) {
-          const nbResp = await fetch('/api/notebook');
-          if (nbResp.ok) {
-            const nbData = await nbResp.json();
-            if (nbData.path) {
-              update('notebookPath', nbData.path);
-              resolvedNotebook = nbData.path;
-            }
-          } else {
-            console.warn('[auto-config] notebook publish failed:', nbResp.status);
-          }
-        }
-
-        console.log('[auto-config] resolved:', { host: defaults.databricksHost, warehouse: resolvedWarehouse, db: defaults.inspireDatabase, notebook: resolvedNotebook, isDatabricksApp: defaults.isDatabricksApp });
-
-        // 4. Go to landing — all config is in place
-        setPage('landing');
-      } catch (err) {
-        console.error('[auto-config] error:', err);
-        setPage('landing');
-      }
-    })();
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
   return (
     <ThemeProvider>
     <div className="min-h-screen bg-bg text-text-primary relative">
-      {/* Ambient particle field — visible on all pages */}
       <ParticleField count={40} />
-      {/* Header (hidden on landing) */}
+
       {page !== 'landing' && page !== 'loading' && (
         <Header
           page={page}
@@ -216,7 +216,6 @@ export default function App() {
         />
       )}
 
-      {/* Main content */}
       <main className={transitioning ? 'page-exit' : 'page-enter'} key={page}>
         {page === 'loading' && (
           <div className="min-h-screen flex items-center justify-center">
@@ -271,10 +270,8 @@ export default function App() {
             </div>
           </ErrorBoundary>
         )}
-
       </main>
 
-      {/* Scroll progress ring — bottom-right corner */}
       {page !== 'landing' && <ScrollProgressRing />}
     </div>
     </ThemeProvider>
