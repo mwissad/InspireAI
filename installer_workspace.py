@@ -272,6 +272,53 @@ except Exception:
         print(f"Warning: Could not create service principal ({resp.status_code}): {resp.text[:300]}")
         print("The app will rely on user OAuth tokens (x-forwarded-access-token).")
 
+# Create OAuth secret for the SP so the app can generate its own tokens
+SP_CLIENT_ID = None
+SP_CLIENT_SECRET = None
+if SP_ID:
+    try:
+        # Generate an OAuth secret (client credentials)
+        secret_resp = api_post(f"/api/2.0/preview/scim/v2/ServicePrincipals/{SP_ID}/credentials/secrets", {})
+        if secret_resp.status_code in (200, 201):
+            secret_data = secret_resp.json()
+            SP_CLIENT_SECRET = secret_data.get("secret", "")
+            # The applicationId is the client_id for OAuth
+            if SP_APP_ID:
+                SP_CLIENT_ID = SP_APP_ID
+                print(f"  OAuth secret created for SP (client_id: {SP_CLIENT_ID[:8]}...)")
+            else:
+                print(f"  Warning: OAuth secret created but no applicationId found")
+        else:
+            print(f"  Warning: Could not create OAuth secret ({secret_resp.status_code}): {secret_resp.text[:200]}")
+    except Exception as e:
+        print(f"  Warning: OAuth secret creation failed: {e}")
+
+    # Generate a token right now to set as DATABRICKS_TOKEN
+    if SP_CLIENT_ID and SP_CLIENT_SECRET:
+        try:
+            token_resp = requests.post(
+                f"{api_base}/oidc/v1/token",
+                data={
+                    "grant_type": "client_credentials",
+                    "client_id": SP_CLIENT_ID,
+                    "client_secret": SP_CLIENT_SECRET,
+                    "scope": "all-apis",
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            if token_resp.status_code == 200:
+                SP_TOKEN = token_resp.json().get("access_token", "")
+                if SP_TOKEN:
+                    print(f"  OAuth token acquired (len={len(SP_TOKEN)})")
+            else:
+                print(f"  Warning: Token generation failed ({token_resp.status_code}): {token_resp.text[:200]}")
+                SP_TOKEN = None
+        except Exception as e:
+            print(f"  Warning: Token generation failed: {e}")
+            SP_TOKEN = None
+    else:
+        SP_TOKEN = None
+
 # Grant SP permissions on catalog/schema
 if SP_ID:
     # Grant USE CATALOG
@@ -334,6 +381,10 @@ if WAREHOUSE_ID:
     inject_vars["INSPIRE_WAREHOUSE_ID"] = WAREHOUSE_ID
 if NOTEBOOK_PATH:
     inject_vars["NOTEBOOK_PATH"] = NOTEBOOK_PATH
+# SP OAuth credentials — backend uses these to generate fresh tokens
+if SP_CLIENT_ID and SP_CLIENT_SECRET:
+    inject_vars["SP_CLIENT_ID"] = SP_CLIENT_ID
+    inject_vars["SP_CLIENT_SECRET"] = SP_CLIENT_SECRET
 
 # Update or add each env var
 existing_names = {e["name"] for e in app_config["env"] if isinstance(e, dict) and "name" in e}

@@ -31,7 +31,13 @@ const DEFAULT_INSPIRE_DB = process.env.INSPIRE_DATABASE || '';
 // Optional: when deployed as a Databricks App, the runtime may inject a
 // service-principal token automatically. Individual users can still
 // override this by passing their own PAT via the Authorization header.
-const SERVICE_TOKEN = process.env.DATABRICKS_TOKEN || '';
+let SERVICE_TOKEN = process.env.DATABRICKS_TOKEN || '';
+
+// SP OAuth credentials — set by installer when DATABRICKS_TOKEN isn't injected by runtime.
+// The backend uses client_credentials flow to generate fresh tokens on-the-fly.
+const SP_CLIENT_ID = process.env.SP_CLIENT_ID || '';
+const SP_CLIENT_SECRET = process.env.SP_CLIENT_SECRET || '';
+let spTokenExpiry = 0; // epoch ms when cached SP token expires
 
 // Path to the bundled notebook file — try several candidate locations
 // v47: switched from DBC archive to direct JUPYTER (.ipynb) format
@@ -129,6 +135,45 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 
 //  Helpers
 // ═══════════════════════════════════════════════════
 
+// Refresh SP token using client_credentials OAuth2 flow
+async function ensureSpToken() {
+  // Already have a valid token?
+  if (SERVICE_TOKEN && Date.now() < spTokenExpiry) return SERVICE_TOKEN;
+  // No credentials? Can't refresh.
+  if (!SP_CLIENT_ID || !SP_CLIENT_SECRET) return SERVICE_TOKEN || '';
+
+  let host = DATABRICKS_HOST || '';
+  if (host && !host.startsWith('http')) host = `https://${host}`;
+  if (!host) return SERVICE_TOKEN || '';
+
+  try {
+    console.log('🔑 Refreshing SP OAuth token...');
+    const resp = await fetch(`${host}/oidc/v1/token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'client_credentials',
+        client_id: SP_CLIENT_ID,
+        client_secret: SP_CLIENT_SECRET,
+        scope: 'all-apis',
+      }),
+    });
+    if (resp.ok) {
+      const data = await resp.json();
+      SERVICE_TOKEN = data.access_token || '';
+      // Expire 5 minutes before actual expiry to avoid edge cases
+      const expiresIn = (data.expires_in || 3600) - 300;
+      spTokenExpiry = Date.now() + expiresIn * 1000;
+      console.log(`🔑 SP token refreshed (expires in ${data.expires_in}s)`);
+    } else {
+      console.error(`🔑 SP token refresh failed (${resp.status}): ${await resp.text()}`);
+    }
+  } catch (err) {
+    console.error('🔑 SP token refresh error:', err.message);
+  }
+  return SERVICE_TOKEN || '';
+}
+
 function resolveHost(req) {
   // Priority: 1) per-request header  2) env var
   let host = req.headers['x-databricks-host'] || DATABRICKS_HOST || '';
@@ -161,7 +206,7 @@ async function dbFetch(host, token, apiPath, options = {}) {
   }
 }
 
-function getToken(req) {
+function getTokenSync(req) {
   // 1) Custom PAT from frontend (local dev / manual config)
   const customToken = req.headers['x-db-pat-token'];
   if (customToken) return customToken;
@@ -173,15 +218,13 @@ function getToken(req) {
     if (bearer) return bearer;
   }
 
-  // 3) Service principal token from env (set by installer / Databricks App runtime)
-  //    This is the most reliable token for Databricks App deployments.
-  if (SERVICE_TOKEN) return SERVICE_TOKEN;
+  // 3) Cached service principal token (from env or OAuth refresh)
+  if (SERVICE_TOKEN && Date.now() < spTokenExpiry) return SERVICE_TOKEN;
+  if (SERVICE_TOKEN && !SP_CLIENT_ID) return SERVICE_TOKEN; // static token, no expiry tracking
 
   // 4) Databricks App proxy injects the user's OAuth token
-  //    Fallback when no SP is configured.
   const forwarded = req.headers['x-forwarded-access-token'];
   if (forwarded) {
-    // Strip "Bearer " prefix if present
     const clean = forwarded.startsWith('Bearer ') ? forwarded.slice(7).trim() : forwarded.trim();
     if (clean) return clean;
   }
@@ -189,15 +232,31 @@ function getToken(req) {
   return null;
 }
 
-function requireToken(req, res, next) {
-  const token = getToken(req);
+// Async version — tries to refresh SP token if needed
+async function getToken(req) {
+  // Check sync sources first
+  const sync = getTokenSync(req);
+  if (sync) return sync;
+
+  // Try refreshing SP token via OAuth
+  if (SP_CLIENT_ID && SP_CLIENT_SECRET) {
+    const freshToken = await ensureSpToken();
+    if (freshToken) return freshToken;
+  }
+
+  return null;
+}
+
+async function requireToken(req, res, next) {
+  const token = await getToken(req);
   if (!token) {
     console.error(`   🔒 Auth failed for ${req.method} ${req.path} — no token found.`);
     console.error(`      x-forwarded-access-token: ${req.headers['x-forwarded-access-token'] ? 'present' : 'MISSING'}`);
     console.error(`      x-db-pat-token: ${req.headers['x-db-pat-token'] ? 'present' : 'MISSING'}`);
     console.error(`      authorization: ${req.headers['authorization'] ? 'present' : 'MISSING'}`);
     console.error(`      DATABRICKS_TOKEN env: ${SERVICE_TOKEN ? 'present' : 'MISSING'}`);
-    return res.status(401).json({ error: 'Databricks token required. Set it in Settings or configure DATABRICKS_TOKEN.' });
+    console.error(`      SP_CLIENT_ID: ${SP_CLIENT_ID ? 'set' : 'MISSING'}`);
+    return res.status(401).json({ error: 'Databricks token required. Configure DATABRICKS_TOKEN or SP_CLIENT_ID/SP_CLIENT_SECRET.' });
   }
   req.dbToken = token;
   req.dbHost = resolveHost(req);
@@ -532,7 +591,7 @@ app.get('/api/health', (req, res) => {
   const hasBundledNotebook = fs.existsSync(BUNDLED_NOTEBOOK_PATH);
   const host = resolveHost(req);
   const forwardedToken = req.headers['x-forwarded-access-token'] || '';
-  const resolvedToken = getToken(req);
+  const syncToken = getTokenSync(req);
   res.json({
     status: 'ok',
     host: host ? host.replace(/https?:\/\//, '').split('.')[0] + '...' : 'not configured',
@@ -544,10 +603,13 @@ app.get('/api/health', (req, res) => {
     isDatabricksApp: !!forwardedToken || !!DATABRICKS_HOST,
     hasForwardedToken: !!forwardedToken,
     forwardedTokenPreview: forwardedToken ? `${forwardedToken.slice(0, 8)}...${forwardedToken.slice(-4)} (len=${forwardedToken.length})` : 'NONE',
-    resolvedTokenSource: resolvedToken === SERVICE_TOKEN ? 'SERVICE_TOKEN' : forwardedToken && resolvedToken ? 'x-forwarded-access-token' : resolvedToken ? 'header' : 'NONE',
+    resolvedTokenSource: syncToken === SERVICE_TOKEN && SERVICE_TOKEN ? 'SERVICE_TOKEN' : forwardedToken && syncToken ? 'x-forwarded-access-token' : syncToken ? 'header' : SP_CLIENT_ID ? 'SP_OAUTH (will refresh)' : 'NONE',
+    hasSpCredentials: !!(SP_CLIENT_ID && SP_CLIENT_SECRET),
     envVars: {
       DATABRICKS_HOST: DATABRICKS_HOST ? 'set' : 'NOT SET',
       DATABRICKS_TOKEN: SERVICE_TOKEN ? 'set' : 'NOT SET',
+      SP_CLIENT_ID: SP_CLIENT_ID ? 'set' : 'NOT SET',
+      SP_CLIENT_SECRET: SP_CLIENT_SECRET ? 'set' : 'NOT SET',
       INSPIRE_WAREHOUSE_ID: DEFAULT_WAREHOUSE_ID || 'NOT SET',
       INSPIRE_DATABASE: DEFAULT_INSPIRE_DB || 'NOT SET',
       NOTEBOOK_PATH: DEFAULT_NOTEBOOK_PATH || 'NOT SET',
