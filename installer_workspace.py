@@ -1,16 +1,23 @@
 # Databricks notebook source
 
 # MAGIC %md
-# MAGIC # Inspire AI — Workspace Installer
+# MAGIC # Inspire AI v4.7 — Workspace Installer
 # MAGIC
-# MAGIC Deploys **Inspire AI** from a folder already uploaded to your workspace.
+# MAGIC **Fully self-contained installer** — deploys Inspire AI as a Databricks App
+# MAGIC with zero manual configuration required.
 # MAGIC
-# MAGIC **Steps:**
-# MAGIC 1. Upload / unzip InspireAI into your workspace (e.g. drag-and-drop)
-# MAGIC 2. Run this notebook — it auto-detects your folder and deploys
+# MAGIC **What it does:**
+# MAGIC 1. Creates a service principal for the app
+# MAGIC 2. Detects a SQL warehouse (or uses the one you specify)
+# MAGIC 3. Creates the Inspire database schema
+# MAGIC 4. Publishes the notebook to the workspace
+# MAGIC 5. Injects all config into `app.yaml` env vars
+# MAGIC 6. Creates & deploys the Databricks App
+# MAGIC
+# MAGIC **Prerequisites:** DBR 13.3+ · Unity Catalog enabled
 # MAGIC
 # MAGIC ---
-# MAGIC **Prerequisites:** DBR 13.3+ · Unity Catalog enabled
+# MAGIC **Usage:** Upload/clone InspireAI into your workspace, then Run All.
 
 # COMMAND ----------
 
@@ -19,7 +26,7 @@
 
 # COMMAND ----------
 
-import os, time, json, requests
+import os, time, json, requests, base64
 from databricks.sdk import WorkspaceClient
 
 w = WorkspaceClient()
@@ -34,12 +41,14 @@ dbutils.widgets.text("source_folder", DEFAULT_SOURCE, "1. Source Folder")
 dbutils.widgets.text("app_name", "inspire-ai", "2. App Name")
 dbutils.widgets.text("catalog", "workspace", "3. Catalog")
 dbutils.widgets.text("schema", "_inspire", "4. Schema")
+dbutils.widgets.text("warehouse_id", "", "5. Warehouse ID (leave empty to auto-detect)")
 
 SOURCE_FOLDER = dbutils.widgets.get("source_folder")
 APP_NAME = dbutils.widgets.get("app_name")
 CATALOG = dbutils.widgets.get("catalog")
 SCHEMA = dbutils.widgets.get("schema")
 INSPIRE_DB = f"{CATALOG}.{SCHEMA}"
+USER_WAREHOUSE_ID = dbutils.widgets.get("warehouse_id").strip()
 
 # REST API setup
 api_base = WORKSPACE_HOST.rstrip("/")
@@ -62,26 +71,51 @@ def api_post(path, body=None):
     r = requests.post(f"{api_base}{path}", headers=api_headers, json=body or {})
     return r
 
-# Detect SQL warehouse
-warehouses = list(w.warehouses.list())
-WAREHOUSE_ID = None
-WAREHOUSE_NAME = None
-for wh in warehouses:
-    if wh.state and wh.state.value == "RUNNING":
-        WAREHOUSE_ID = wh.id
-        WAREHOUSE_NAME = wh.name
-        break
-if not WAREHOUSE_ID and warehouses:
-    WAREHOUSE_ID = warehouses[0].id
-    WAREHOUSE_NAME = warehouses[0].name
+def api_put(path, body=None):
+    r = requests.put(f"{api_base}{path}", headers=api_headers, json=body or {})
+    return r
 
-# Validate
+def api_patch(path, body=None):
+    r = requests.patch(f"{api_base}{path}", headers=api_headers, json=body or {})
+    return r
+
+# Detect SQL warehouse
+WAREHOUSE_ID = USER_WAREHOUSE_ID
+WAREHOUSE_NAME = None
+
+if WAREHOUSE_ID:
+    # User specified a warehouse — validate it
+    try:
+        wh_data = api_get(f"/api/2.0/sql/warehouses/{WAREHOUSE_ID}")
+        WAREHOUSE_NAME = wh_data.get("name", WAREHOUSE_ID)
+    except Exception as e:
+        print(f"Warning: Could not validate warehouse {WAREHOUSE_ID}: {e}")
+        WAREHOUSE_NAME = WAREHOUSE_ID
+else:
+    # Auto-detect: prefer running serverless, then running, then first available
+    warehouses = list(w.warehouses.list())
+    for wh in warehouses:
+        if wh.state and wh.state.value == "RUNNING" and getattr(wh, "enable_serverless_compute", False):
+            WAREHOUSE_ID = wh.id
+            WAREHOUSE_NAME = wh.name
+            break
+    if not WAREHOUSE_ID:
+        for wh in warehouses:
+            if wh.state and wh.state.value == "RUNNING":
+                WAREHOUSE_ID = wh.id
+                WAREHOUSE_NAME = wh.name
+                break
+    if not WAREHOUSE_ID and warehouses:
+        WAREHOUSE_ID = warehouses[0].id
+        WAREHOUSE_NAME = warehouses[0].name
+
+# Validate source folder
 assert os.path.exists(SOURCE_FOLDER), f"Source folder not found: {SOURCE_FOLDER}"
 assert os.path.exists(f"{SOURCE_FOLDER}/app.yaml"), f"No app.yaml in {SOURCE_FOLDER} — is this the right folder?"
 assert os.path.exists(f"{SOURCE_FOLDER}/start.sh"), f"No start.sh in {SOURCE_FOLDER}"
 
 print("=" * 60)
-print("  Inspire AI — Workspace Installer")
+print("  Inspire AI v4.7 — Workspace Installer")
 print("=" * 60)
 print(f"  Source folder:     {SOURCE_FOLDER}")
 print(f"  App name:          {APP_NAME}")
@@ -94,7 +128,171 @@ print("=" * 60)
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Inject Configuration
+# MAGIC ## Step 1: Create Database Schema
+
+# COMMAND ----------
+
+from databricks.sdk.service.sql import StatementState
+
+if WAREHOUSE_ID:
+    sql = f"CREATE SCHEMA IF NOT EXISTS `{CATALOG}`.`{SCHEMA}`"
+    print(f"Executing: {sql}")
+    stmt = w.statement_execution.execute_statement(warehouse_id=WAREHOUSE_ID, statement=sql, wait_timeout="30s")
+    if stmt.status and stmt.status.state in (StatementState.SUCCEEDED,):
+        print(f"Schema {INSPIRE_DB} is ready.")
+    else:
+        print(f"Warning: Schema creation returned {stmt.status.state if stmt.status else 'UNKNOWN'}")
+else:
+    print(f"No warehouse found. Create manually: CREATE SCHEMA IF NOT EXISTS `{CATALOG}`.`{SCHEMA}`")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Step 2: Publish Notebook to Workspace
+
+# COMMAND ----------
+
+NOTEBOOK_DEST = f"/Shared/{APP_NAME}/dbx_inspire_ai_agent"
+NOTEBOOK_PATH = None
+
+# Look for the notebook in the source folder
+notebook_candidates = [
+    f"{SOURCE_FOLDER}/dbx_inspire_ai_agent.ipynb",
+    f"{SOURCE_FOLDER}/databricks_inspire_v46.dbc",
+]
+
+notebook_source = None
+for candidate in notebook_candidates:
+    if os.path.exists(candidate):
+        notebook_source = candidate
+        break
+
+if notebook_source:
+    print(f"Publishing notebook: {notebook_source}")
+    print(f"  Destination: {NOTEBOOK_DEST}")
+
+    with open(notebook_source, "rb") as f:
+        content_b64 = base64.b64encode(f.read()).decode("utf-8")
+
+    is_ipynb = notebook_source.endswith(".ipynb")
+    import_format = "JUPYTER" if is_ipynb else "DBC"
+
+    # Delete old if exists
+    try:
+        api_post("/api/2.0/workspace/delete", {"path": f"/Shared/{APP_NAME}", "recursive": True})
+    except Exception:
+        pass
+
+    # Import
+    import_payload = {
+        "path": NOTEBOOK_DEST,
+        "format": import_format,
+        "content": content_b64,
+        "overwrite": True,
+    }
+    if is_ipynb:
+        import_payload["language"] = "PYTHON"
+
+    resp = api_post("/api/2.0/workspace/import", import_payload)
+    if resp.status_code in (200, 201):
+        NOTEBOOK_PATH = NOTEBOOK_DEST
+        print(f"Notebook published: {NOTEBOOK_PATH}")
+    else:
+        print(f"Warning: Notebook publish failed ({resp.status_code}): {resp.text[:300]}")
+        # For DBC, the notebook may be inside a folder
+        if not is_ipynb:
+            try:
+                list_resp = api_get(f"/api/2.0/workspace/list?path=/Shared/{APP_NAME}")
+                for obj in list_resp.get("objects", []):
+                    if obj.get("object_type") == "NOTEBOOK":
+                        NOTEBOOK_PATH = obj["path"]
+                        print(f"Found notebook in folder: {NOTEBOOK_PATH}")
+                        break
+            except Exception:
+                pass
+else:
+    print("Warning: No notebook file found in source folder. Publish will be handled by the app.")
+
+if NOTEBOOK_PATH:
+    print(f"Notebook path: {NOTEBOOK_PATH}")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Step 3: Create Service Principal
+
+# COMMAND ----------
+
+SP_NAME = f"{APP_NAME}-sp"
+SP_APP_ID = None
+SP_ID = None
+
+# Check if SP already exists
+try:
+    sps = api_get(f"/api/2.0/preview/scim/v2/ServicePrincipals?filter=displayName eq \"{SP_NAME}\"")
+    existing = sps.get("Resources", [])
+    if existing:
+        SP_ID = existing[0]["id"]
+        SP_APP_ID = existing[0].get("applicationId", existing[0].get("externalId", ""))
+        print(f"Service principal '{SP_NAME}' already exists (ID: {SP_ID})")
+    else:
+        raise Exception("Not found")
+except Exception:
+    # Create new service principal
+    print(f"Creating service principal '{SP_NAME}'...")
+    resp = api_post("/api/2.0/preview/scim/v2/ServicePrincipals", {
+        "displayName": SP_NAME,
+        "schemas": ["urn:ietf:params:scim:schemas:core:2.0:ServicePrincipal"],
+        "active": True,
+    })
+    if resp.status_code in (200, 201):
+        sp_data = resp.json()
+        SP_ID = sp_data["id"]
+        SP_APP_ID = sp_data.get("applicationId", sp_data.get("externalId", ""))
+        print(f"Service principal created (ID: {SP_ID}, AppID: {SP_APP_ID})")
+    else:
+        print(f"Warning: Could not create service principal ({resp.status_code}): {resp.text[:300]}")
+        print("The app will rely on user OAuth tokens (x-forwarded-access-token).")
+
+# Grant SP permissions on catalog/schema
+if SP_ID:
+    # Grant USE CATALOG
+    try:
+        resp = api_post("/api/2.1/unity-catalog/permissions/catalog/" + CATALOG, {
+            "changes": [{"principal": SP_NAME, "add": ["USE_CATALOG"]}]
+        })
+        if resp.status_code == 200:
+            print(f"  Granted USE_CATALOG on '{CATALOG}' to {SP_NAME}")
+    except Exception as e:
+        print(f"  Warning: Could not grant USE_CATALOG: {e}")
+
+    # Grant USE/CREATE on schema
+    try:
+        resp = api_post(f"/api/2.1/unity-catalog/permissions/schema/{CATALOG}.{SCHEMA}", {
+            "changes": [{"principal": SP_NAME, "add": ["USE_SCHEMA", "CREATE_TABLE", "SELECT", "MODIFY"]}]
+        })
+        if resp.status_code == 200:
+            print(f"  Granted schema permissions on '{INSPIRE_DB}' to {SP_NAME}")
+    except Exception as e:
+        print(f"  Warning: Could not grant schema permissions: {e}")
+
+    # Grant warehouse access
+    if WAREHOUSE_ID:
+        try:
+            resp = api_put(f"/api/2.0/permissions/sql/warehouses/{WAREHOUSE_ID}", {
+                "access_control_list": [
+                    {"service_principal_name": SP_NAME, "all_permissions": [{"permission_level": "CAN_USE"}]}
+                ]
+            })
+            if resp.status_code == 200:
+                print(f"  Granted CAN_USE on warehouse to {SP_NAME}")
+        except Exception as e:
+            print(f"  Warning: Could not grant warehouse permission: {e}")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Step 4: Inject Configuration into app.yaml
 
 # COMMAND ----------
 
@@ -108,6 +306,7 @@ with open(app_yaml_path, "r") as f:
 if "env" not in app_config or app_config["env"] is None:
     app_config["env"] = []
 
+# Build the complete set of env vars the app needs
 inject_vars = {
     "NODE_ENV": "production",
     "INSPIRE_DATABASE": INSPIRE_DB,
@@ -115,16 +314,30 @@ inject_vars = {
 }
 if WAREHOUSE_ID:
     inject_vars["INSPIRE_WAREHOUSE_ID"] = WAREHOUSE_ID
+if NOTEBOOK_PATH:
+    inject_vars["NOTEBOOK_PATH"] = NOTEBOOK_PATH
 
+# Update or add each env var
 existing_names = {e["name"] for e in app_config["env"] if isinstance(e, dict) and "name" in e}
 for name, value in inject_vars.items():
     if name in existing_names:
         for e in app_config["env"]:
             if isinstance(e, dict) and e.get("name") == name:
-                e["value"] = value
+                e["value"] = str(value)
                 break
     else:
-        app_config["env"].append({"name": name, "value": value})
+        app_config["env"].append({"name": name, "value": str(value)})
+
+# Add service principal as an app resource if created
+if SP_ID:
+    app_config["resources"] = [
+        {
+            "name": SP_NAME,
+            "type": "service-principal",
+            "description": "Service principal for Inspire AI to access Databricks APIs",
+            "permissions": ["CAN_USE", "CAN_MANAGE"],
+        }
+    ]
 
 with open(app_yaml_path, "w") as f:
     yaml.dump(app_config, f, default_flow_style=False, sort_keys=False)
@@ -132,11 +345,13 @@ with open(app_yaml_path, "w") as f:
 print("Injected into app.yaml:")
 for name, value in inject_vars.items():
     print(f"  {name} = {value}")
+if SP_ID:
+    print(f"  resources: [{SP_NAME} (service-principal)]")
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Create & Deploy App
+# MAGIC ## Step 5: Create & Deploy App
 
 # COMMAND ----------
 
@@ -148,7 +363,7 @@ try:
     print(f"App '{APP_NAME}' already exists. Redeploying...")
 except Exception:
     print(f"Creating app '{APP_NAME}'...")
-    resp = api_post("/api/2.0/apps", {"name": APP_NAME, "description": "Inspire AI — Data Strategy Copilot powered by Databricks"})
+    resp = api_post("/api/2.0/apps", {"name": APP_NAME, "description": "Inspire AI v4.7 — Data Strategy Copilot powered by Databricks"})
     if resp.status_code in (200, 201):
         app_url = resp.json().get("url")
         print(f"App created: {app_url}")
@@ -213,27 +428,6 @@ else:
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Create Database
-
-# COMMAND ----------
-
-from databricks.sdk.service.sql import StatementState
-
-if WAREHOUSE_ID:
-    sql = f"CREATE SCHEMA IF NOT EXISTS `{CATALOG}`.`{SCHEMA}`"
-    print(f"Executing: {sql}")
-    stmt = w.statement_execution.execute_statement(warehouse_id=WAREHOUSE_ID, statement=sql, wait_timeout="30s")
-    if stmt.status and stmt.status.state in (StatementState.SUCCEEDED,):
-        print(f"Schema {INSPIRE_DB} is ready.")
-    else:
-        print(f"Warning: Schema creation returned {stmt.status.state if stmt.status else 'UNKNOWN'}")
-        print("You can create it manually from the app's Settings page.")
-else:
-    print(f"No warehouse found. Create manually: CREATE SCHEMA IF NOT EXISTS `{CATALOG}`.`{SCHEMA}`")
-
-# COMMAND ----------
-
-# MAGIC %md
 # MAGIC ## Done!
 
 # COMMAND ----------
@@ -242,22 +436,24 @@ app_data = api_get(f"/api/2.0/apps/{APP_NAME}")
 app_url = app_data.get("url", app_url)
 
 print("=" * 60)
-print("  Inspire AI — Ready!")
+print("  Inspire AI v4.7 — Ready!")
 print("=" * 60)
-print(f"  App URL:     {app_url}")
-print(f"  Database:    {INSPIRE_DB}")
-print(f"  Warehouse:   {WAREHOUSE_NAME or 'N/A'}")
+print(f"  App URL:           {app_url}")
+print(f"  Database:          {INSPIRE_DB}")
+print(f"  Warehouse:         {WAREHOUSE_NAME or 'N/A'} ({WAREHOUSE_ID or 'N/A'})")
+print(f"  Notebook:          {NOTEBOOK_PATH or 'auto-publish on first use'}")
+print(f"  Service Principal: {SP_NAME if SP_ID else 'N/A (user OAuth)'}")
 print()
-print("  No PAT needed — Databricks auto-authenticates you.")
-print("  Just open the URL and go!")
+print("  No setup wizard needed — everything is pre-configured.")
+print("  Just open the URL and start analyzing!")
 print("=" * 60)
 
 displayHTML(f"""
 <div style="padding: 24px; background: linear-gradient(135deg, #1a1a2e, #16213e); border-radius: 12px; text-align: center; margin: 20px 0;">
-  <h2 style="color: #e0e0e0; margin-bottom: 8px;">Inspire AI is ready!</h2>
+  <h2 style="color: #e0e0e0; margin-bottom: 8px;">Inspire AI v4.7 is ready!</h2>
   <p style="color: #aaa; font-size: 13px; margin-bottom: 20px;">
-    No PAT needed — Databricks authenticates you automatically.<br/>
-    Just open the app and start using it.
+    No setup wizard. No PAT needed. Everything is pre-configured.<br/>
+    Just open the app and start analyzing your data.
   </p>
   <a href="{app_url}" target="_blank"
      style="display: inline-block; padding: 14px 36px; background: linear-gradient(135deg, #ff6b35, #f7931e);

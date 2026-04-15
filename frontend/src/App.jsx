@@ -8,7 +8,6 @@ import LaunchPage from './pages/LaunchPage';
 import MonitorPage from './pages/MonitorPage';
 import ResultsPage from './pages/ResultsPage';
 import ChoosePage from './pages/ChoosePage';
-import SetupWizard from './pages/SetupWizard';
 import ScrollProgressRing from './components/ScrollProgressRing';
 import ParticleField from './components/ParticleField';
 
@@ -53,9 +52,9 @@ class ErrorBoundary extends Component {
 }
 
 export default function App() {
-  // Detect if first-run setup is needed
-  const needsSetup = !localStorage.getItem('db_setup_complete');
-  const [page, setPage] = useState(needsSetup ? 'setup' : 'landing');
+  // Start in a 'loading' state — resolve environment before showing any page.
+  // This prevents the Setup Wizard from flashing on Databricks App deployments.
+  const [page, setPage] = useState('loading');
   const [showSettings, setShowSettings] = useState(false);
 
   // Persisted settings
@@ -139,34 +138,30 @@ export default function App() {
   const canMonitor = Boolean(sessionId || runId);
   const canResults = true;
 
-  // ── Auto-configure on mount (silent) ──
-  // When deployed as a Databricks App with workspace installer defaults,
-  // this auto-completes setup without any user interaction.
+  // ── Auto-configure on mount ──
+  // Detects the environment FIRST, then decides which page to show.
+  // Databricks App deployments with installer defaults skip straight to landing.
   useEffect(() => {
     (async () => {
       try {
-        // 0. Fetch installer-injected defaults and apply if user hasn't configured yet
+        // 1. Fetch installer-injected defaults
         let defaults = {};
         try {
           const defResp = await fetch('/api/defaults');
           if (defResp.ok) {
             defaults = await defResp.json();
-            if (defaults.databricksHost && !settings.databricksHost) update('databricksHost', defaults.databricksHost);
-            if (defaults.warehouseId && !settings.warehouseId) update('warehouseId', defaults.warehouseId);
-            if (defaults.inspireDatabase && !settings.inspireDatabase) update('inspireDatabase', defaults.inspireDatabase);
-            if (defaults.notebookPath && !settings.notebookPath) update('notebookPath', defaults.notebookPath);
+            if (defaults.databricksHost) update('databricksHost', defaults.databricksHost);
+            if (defaults.warehouseId) update('warehouseId', defaults.warehouseId);
+            if (defaults.inspireDatabase) update('inspireDatabase', defaults.inspireDatabase);
+            if (defaults.notebookPath) update('notebookPath', defaults.notebookPath);
           }
-        } catch { /* defaults endpoint may not exist in older backends */ }
+        } catch {}
 
         const headers = { 'Content-Type': 'application/json' };
-        if (settings.token) {
-          headers['Authorization'] = `Bearer ${settings.token}`;
-          headers['X-DB-PAT-Token'] = settings.token;
-        }
         const host = defaults.databricksHost || settings.databricksHost;
         if (host) headers['X-Databricks-Host'] = host;
 
-        // 1. Auto-select first running warehouse if none set
+        // 2. Auto-select first running warehouse if none set
         let resolvedWarehouse = defaults.warehouseId || settings.warehouseId;
         if (!resolvedWarehouse) {
           try {
@@ -184,7 +179,7 @@ export default function App() {
           } catch {}
         }
 
-        // 2. Auto-publish notebook (backend handles location seamlessly)
+        // 3. Auto-publish notebook
         let resolvedNotebook = defaults.notebookPath || settings.notebookPath;
         if (!resolvedNotebook) {
           try {
@@ -199,29 +194,25 @@ export default function App() {
           } catch {}
         }
 
-        // 3. Auto-complete setup when running as a Databricks App with
-        //    all required config resolved (host + warehouse + database).
-        //    The workspace installer pre-fills these via env vars so
-        //    users never see the Setup Wizard.
+        // 4. Decide which page to show
         const isDatabricksApp = defaults.isDatabricksApp || defaults.hasServiceToken;
         const resolvedDb = defaults.inspireDatabase || settings.inspireDatabase;
-        if (isDatabricksApp && host && resolvedWarehouse && resolvedDb) {
-          // Auto-create database schema if needed (silent, idempotent)
-          try {
-            await fetch('/api/setup/create-database', {
-              method: 'POST',
-              headers: { ...headers, 'Content-Type': 'application/json' },
-              body: JSON.stringify({ inspire_database: resolvedDb, warehouse_id: resolvedWarehouse }),
-            });
-          } catch {}
 
-          // Mark setup as complete — skip wizard entirely
-          if (!localStorage.getItem('db_setup_complete')) {
-            localStorage.setItem('db_setup_complete', '1');
-            setPage('landing');
-          }
+        if (isDatabricksApp && host && resolvedWarehouse && resolvedDb) {
+          // Databricks App with full config — skip setup entirely
+          localStorage.setItem('db_setup_complete', '1');
+          setPage('landing');
+        } else if (localStorage.getItem('db_setup_complete')) {
+          // Previously completed setup
+          setPage('landing');
+        } else {
+          // No Databricks App, no prior setup — show landing (settings panel available)
+          setPage('landing');
         }
-      } catch { /* silent — user can configure manually via Settings */ }
+      } catch {
+        // Fallback — go to landing, user can configure via Settings
+        setPage('landing');
+      }
     })();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -231,7 +222,7 @@ export default function App() {
       {/* Ambient particle field — visible on all pages */}
       <ParticleField count={40} />
       {/* Header (hidden on landing) */}
-      {page !== 'landing' && (
+      {page !== 'landing' && page !== 'loading' && (
         <Header
           page={page}
           setPage={nav}
@@ -244,15 +235,13 @@ export default function App() {
 
       {/* Main content */}
       <main className={transitioning ? 'page-exit' : 'page-enter'} key={page}>
-        {page === 'setup' && (
-          <SetupWizard
-            settings={settings}
-            update={update}
-            onComplete={() => {
-              localStorage.setItem('db_setup_complete', '1');
-              nav('landing');
-            }}
-          />
+        {page === 'loading' && (
+          <div className="min-h-screen flex items-center justify-center">
+            <div className="text-center space-y-4">
+              <div className="w-10 h-10 border-2 border-db-red border-t-transparent rounded-full animate-spin mx-auto" />
+              <p className="text-sm text-text-secondary">Connecting to workspace...</p>
+            </div>
+          </div>
         )}
 
         {page === 'landing' && <LandingPage onStart={() => nav('choose')} />}
