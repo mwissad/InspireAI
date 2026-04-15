@@ -162,17 +162,31 @@ async function dbFetch(host, token, apiPath, options = {}) {
 }
 
 function getToken(req) {
-  // 1) Custom header from frontend — survives Databricks App proxy (which strips Authorization)
+  // 1) Custom PAT from frontend (local dev / manual config)
   const customToken = req.headers['x-db-pat-token'];
   if (customToken) return customToken;
-  // 2) Standard Authorization header (works in local dev / non-proxy mode)
+
+  // 2) Standard Authorization header (local dev)
   const auth = req.headers.authorization;
-  if (auth && auth.startsWith('Bearer ')) return auth.slice(7);
-  // 3) Databricks Apps inject the logged-in user's OAuth token here
+  if (auth && auth.startsWith('Bearer ')) {
+    const bearer = auth.slice(7).trim();
+    if (bearer) return bearer;
+  }
+
+  // 3) Service principal token from env (set by installer / Databricks App runtime)
+  //    This is the most reliable token for Databricks App deployments.
+  if (SERVICE_TOKEN) return SERVICE_TOKEN;
+
+  // 4) Databricks App proxy injects the user's OAuth token
+  //    Fallback when no SP is configured.
   const forwarded = req.headers['x-forwarded-access-token'];
-  if (forwarded) return forwarded;
-  // 4) Fall back to service-principal token from env
-  return SERVICE_TOKEN || null;
+  if (forwarded) {
+    // Strip "Bearer " prefix if present
+    const clean = forwarded.startsWith('Bearer ') ? forwarded.slice(7).trim() : forwarded.trim();
+    if (clean) return clean;
+  }
+
+  return null;
 }
 
 function requireToken(req, res, next) {
