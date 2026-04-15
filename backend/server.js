@@ -131,8 +131,11 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 
 
 function resolveHost(req) {
   // Priority: 1) per-request header  2) env var
-  const headerHost = req.headers['x-databricks-host'];
-  return headerHost || DATABRICKS_HOST;
+  let host = req.headers['x-databricks-host'] || DATABRICKS_HOST || '';
+  // Normalize: ensure https:// prefix and no trailing slash
+  host = host.replace(/\/+$/, '');
+  if (host && !host.startsWith('http')) host = `https://${host}`;
+  return host || null;
 }
 
 async function dbFetch(host, token, apiPath, options = {}) {
@@ -174,9 +177,20 @@ function getToken(req) {
 
 function requireToken(req, res, next) {
   const token = getToken(req);
-  if (!token) return res.status(401).json({ error: 'Databricks token required. Set it in Settings or configure DATABRICKS_TOKEN.' });
+  if (!token) {
+    console.error(`   🔒 Auth failed for ${req.method} ${req.path} — no token found.`);
+    console.error(`      x-forwarded-access-token: ${req.headers['x-forwarded-access-token'] ? 'present' : 'MISSING'}`);
+    console.error(`      x-db-pat-token: ${req.headers['x-db-pat-token'] ? 'present' : 'MISSING'}`);
+    console.error(`      authorization: ${req.headers['authorization'] ? 'present' : 'MISSING'}`);
+    console.error(`      DATABRICKS_TOKEN env: ${SERVICE_TOKEN ? 'present' : 'MISSING'}`);
+    return res.status(401).json({ error: 'Databricks token required. Set it in Settings or configure DATABRICKS_TOKEN.' });
+  }
   req.dbToken = token;
   req.dbHost = resolveHost(req);
+  if (!req.dbHost) {
+    console.error(`   🌐 Host not resolved for ${req.method} ${req.path}`);
+    return res.status(400).json({ error: 'Databricks host not configured. Set DATABRICKS_HOST.' });
+  }
   next();
 }
 

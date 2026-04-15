@@ -101,6 +101,8 @@ export default function LaunchPage({ settings, update, onLaunched }) {
   const [priorityChecks, setPriorityChecks] = useState({});
 
 
+  // In Databricks App mode, the proxy injects x-forwarded-access-token automatically.
+  // Only send explicit auth headers when the user has configured a PAT token locally.
   const apiFetch = useCallback(
     async (url, opts = {}) => {
       const headers = {
@@ -118,6 +120,13 @@ export default function LaunchPage({ settings, update, onLaunched }) {
     },
     [token, databricksHost]
   );
+
+  // Trigger catalog reload when settings are populated from defaults
+  const [configReady, setConfigReady] = useState(false);
+  useEffect(() => {
+    // Mark ready once we have at least a host (from defaults) or a token (manual)
+    if (databricksHost || token) setConfigReady(true);
+  }, [databricksHost, token]);
 
   // Sync inspire database from settings
   useEffect(() => {
@@ -152,14 +161,15 @@ export default function LaunchPage({ settings, update, onLaunched }) {
     }
   }, [selectedCatalogs, selectedSchemas, selectedTables]);
 
-  // Load catalogs (try even without explicit token — Databricks Apps forward auth)
+  // Load catalogs — in Databricks App mode the proxy handles auth automatically
   useEffect(() => {
+    if (!configReady) return;
     setLoadingCatalogs(true);
     apiFetch('/api/catalogs')
       .then((data) => setCatalogs(data.catalogs || []))
-      .catch(() => {})
+      .catch((err) => console.warn('[LaunchPage] catalog load failed:', err.message))
       .finally(() => setLoadingCatalogs(false));
-  }, [apiFetch]);
+  }, [configReady, apiFetch]);
 
   // Load schemas when catalogs change
   useEffect(() => {
