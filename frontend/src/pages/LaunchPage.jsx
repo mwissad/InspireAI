@@ -121,13 +121,6 @@ export default function LaunchPage({ settings, update, onLaunched }) {
     [token, databricksHost]
   );
 
-  // Trigger catalog reload when settings are populated from defaults
-  const [configReady, setConfigReady] = useState(false);
-  useEffect(() => {
-    // Mark ready once we have at least a host (from defaults) or a token (manual)
-    if (databricksHost || token) setConfigReady(true);
-  }, [databricksHost, token]);
-
   // Sync inspire database from settings
   useEffect(() => {
     if (inspireDatabase) {
@@ -161,15 +154,14 @@ export default function LaunchPage({ settings, update, onLaunched }) {
     }
   }, [selectedCatalogs, selectedSchemas, selectedTables]);
 
-  // Load catalogs — in Databricks App mode the proxy handles auth automatically
+  // Load catalogs on mount — proxy handles auth in Databricks App mode
   useEffect(() => {
-    if (!configReady) return;
     setLoadingCatalogs(true);
     apiFetch('/api/catalogs')
       .then((data) => setCatalogs(data.catalogs || []))
       .catch((err) => console.warn('[LaunchPage] catalog load failed:', err.message))
       .finally(() => setLoadingCatalogs(false));
-  }, [configReady, apiFetch]);
+  }, [apiFetch]);
 
   // Load schemas when catalogs change
   useEffect(() => {
