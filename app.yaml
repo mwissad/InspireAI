@@ -25,11 +25,8 @@ env:
   - name: "NODE_ENV"
     value: "production"
 
-# Uncomment to add a service principal for automatic authentication:
-# resources:
-#   - name: "inspire-ai-sp"
-#     type: "service-principal"
-#     description: "Service principal for Inspire AI to access Databricks APIs"
-#     permissions:
-#       - "CAN_USE"    # Use SQL warehouses
-#       - "CAN_MANAGE" # Publish notebooks, manage workspace files
+# Service principal — the Databricks App runtime generates an OAuth token
+# and injects it as DATABRICKS_TOKEN env var automatically.
+resources:
+  - name: "inspire-ai-sp"
+    type: "service-principal"

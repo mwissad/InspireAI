@@ -346,14 +346,14 @@ for name, value in inject_vars.items():
     else:
         app_config["env"].append({"name": name, "value": str(value)})
 
-# Add service principal as an app resource if created
+# Add service principal as an app resource — ONLY name + type are valid fields.
+# The Databricks App runtime reads this, generates an OAuth token for the SP,
+# and injects it as DATABRICKS_TOKEN env var.
 if SP_ID:
     app_config["resources"] = [
         {
             "name": SP_NAME,
             "type": "service-principal",
-            "description": "Service principal for Inspire AI to access Databricks APIs",
-            "permissions": ["CAN_USE", "CAN_MANAGE"],
         }
     ]
 
