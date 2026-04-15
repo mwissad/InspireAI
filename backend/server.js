@@ -531,15 +531,27 @@ app.get('/api/workspace/export', requireToken, async (req, res) => {
 app.get('/api/health', (req, res) => {
   const hasBundledNotebook = fs.existsSync(BUNDLED_NOTEBOOK_PATH);
   const host = resolveHost(req);
-  const hasForwardedToken = !!req.headers['x-forwarded-access-token'];
+  const forwardedToken = req.headers['x-forwarded-access-token'] || '';
+  const resolvedToken = getToken(req);
   res.json({
     status: 'ok',
     host: host ? host.replace(/https?:\/\//, '').split('.')[0] + '...' : 'not configured',
+    hostFull: host || 'NOT SET',
     hostConfigured: !!host,
     hasBundledDbc: hasBundledNotebook,
     hasServiceToken: !!SERVICE_TOKEN,
-    isDatabricksApp: hasForwardedToken || !!DATABRICKS_HOST,
-    hasUserToken: hasForwardedToken,
+    serviceTokenPreview: SERVICE_TOKEN ? `${SERVICE_TOKEN.slice(0, 8)}...${SERVICE_TOKEN.slice(-4)} (len=${SERVICE_TOKEN.length})` : 'NONE',
+    isDatabricksApp: !!forwardedToken || !!DATABRICKS_HOST,
+    hasForwardedToken: !!forwardedToken,
+    forwardedTokenPreview: forwardedToken ? `${forwardedToken.slice(0, 8)}...${forwardedToken.slice(-4)} (len=${forwardedToken.length})` : 'NONE',
+    resolvedTokenSource: resolvedToken === SERVICE_TOKEN ? 'SERVICE_TOKEN' : forwardedToken && resolvedToken ? 'x-forwarded-access-token' : resolvedToken ? 'header' : 'NONE',
+    envVars: {
+      DATABRICKS_HOST: DATABRICKS_HOST ? 'set' : 'NOT SET',
+      DATABRICKS_TOKEN: SERVICE_TOKEN ? 'set' : 'NOT SET',
+      INSPIRE_WAREHOUSE_ID: DEFAULT_WAREHOUSE_ID || 'NOT SET',
+      INSPIRE_DATABASE: DEFAULT_INSPIRE_DB || 'NOT SET',
+      NOTEBOOK_PATH: DEFAULT_NOTEBOOK_PATH || 'NOT SET',
+    },
   });
 });
 
