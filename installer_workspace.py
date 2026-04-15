@@ -3,26 +3,29 @@
 # MAGIC %md
 # MAGIC # Inspire AI v4.7 — Workspace Installer
 # MAGIC
-# MAGIC **Fully self-contained installer** — deploys Inspire AI as a Databricks App
-# MAGIC with zero manual configuration required.
+# MAGIC **Fully self-contained installer** — deploys Inspire AI as a Databricks App.
+# MAGIC
+# MAGIC **Only one choice required:** pick the catalog where Inspire will store its data.
+# MAGIC Everything else is auto-detected and configured.
 # MAGIC
 # MAGIC **What it does:**
-# MAGIC 1. Creates a service principal for the app
-# MAGIC 2. Detects a SQL warehouse (or uses the one you specify)
-# MAGIC 3. Creates the Inspire database schema
-# MAGIC 4. Publishes the notebook to the workspace
-# MAGIC 5. Injects all config into `app.yaml` env vars
-# MAGIC 6. Creates & deploys the Databricks App
+# MAGIC 1. Lists your catalogs — you pick one
+# MAGIC 2. Auto-detects SQL warehouse, source folder, etc.
+# MAGIC 3. Creates the `_inspire` schema and a service principal
+# MAGIC 4. Publishes the notebook and injects all config
+# MAGIC 5. Creates & deploys the Databricks App — ready to use
 # MAGIC
 # MAGIC **Prerequisites:** DBR 13.3+ · Unity Catalog enabled
 # MAGIC
 # MAGIC ---
-# MAGIC **Usage:** Upload/clone InspireAI into your workspace, then Run All.
+# MAGIC **Usage:** Upload/clone InspireAI into your workspace, then **Run All**.
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Configuration
+# MAGIC ## Choose your catalog
+# MAGIC
+# MAGIC Select the Unity Catalog where Inspire AI will create its `_inspire` schema to store sessions and results.
 
 # COMMAND ----------
 
@@ -34,21 +37,51 @@ current_user = w.current_user.me()
 USER_EMAIL = current_user.user_name
 WORKSPACE_HOST = w.config.host
 
+# ── List available catalogs for the user to pick from ──
+available_catalogs = []
+try:
+    for cat in w.catalogs.list():
+        if cat.name not in ("system", "information_schema", "__databricks_internal"):
+            available_catalogs.append(cat.name)
+except Exception:
+    available_catalogs = ["workspace"]
+
+if not available_catalogs:
+    available_catalogs = ["workspace"]
+
+# Show catalog dropdown — this is the ONLY user interaction
+dbutils.widgets.dropdown("catalog", available_catalogs[0], available_catalogs, "Select Catalog")
+
+CATALOG = dbutils.widgets.get("catalog")
+SCHEMA = "_inspire"
+INSPIRE_DB = f"{CATALOG}.{SCHEMA}"
+
+print(f"Inspire AI will use: {INSPIRE_DB}")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Auto-detect environment
+
+# COMMAND ----------
+
 # Auto-detect the source folder
 DEFAULT_SOURCE = f"/Workspace/Users/{USER_EMAIL}/InspireAI-main"
+SOURCE_CANDIDATES = [
+    DEFAULT_SOURCE,
+    f"/Workspace/Users/{USER_EMAIL}/InspireAI",
+    f"/Workspace/Users/{USER_EMAIL}/InspireAI-dev_v_47",
+    f"/Workspace/Shared/InspireAI",
+]
+SOURCE_FOLDER = None
+for candidate in SOURCE_CANDIDATES:
+    if os.path.exists(candidate) and os.path.exists(f"{candidate}/app.yaml"):
+        SOURCE_FOLDER = candidate
+        break
 
-dbutils.widgets.text("source_folder", DEFAULT_SOURCE, "1. Source Folder")
-dbutils.widgets.text("app_name", "inspire-ai", "2. App Name")
-dbutils.widgets.text("catalog", "workspace", "3. Catalog")
-dbutils.widgets.text("schema", "_inspire", "4. Schema")
-dbutils.widgets.text("warehouse_id", "", "5. Warehouse ID (leave empty to auto-detect)")
+assert SOURCE_FOLDER, f"Could not find InspireAI source folder. Tried: {SOURCE_CANDIDATES}. Upload/clone the repo first."
 
-SOURCE_FOLDER = dbutils.widgets.get("source_folder")
-APP_NAME = dbutils.widgets.get("app_name")
-CATALOG = dbutils.widgets.get("catalog")
-SCHEMA = dbutils.widgets.get("schema")
-INSPIRE_DB = f"{CATALOG}.{SCHEMA}"
-USER_WAREHOUSE_ID = dbutils.widgets.get("warehouse_id").strip()
+APP_NAME = "inspire-ai"
 
 # REST API setup
 api_base = WORKSPACE_HOST.rstrip("/")
@@ -79,47 +112,32 @@ def api_patch(path, body=None):
     r = requests.patch(f"{api_base}{path}", headers=api_headers, json=body or {})
     return r
 
-# Detect SQL warehouse
-WAREHOUSE_ID = USER_WAREHOUSE_ID
+# Auto-detect SQL warehouse: prefer running serverless, then running, then first available
+WAREHOUSE_ID = None
 WAREHOUSE_NAME = None
-
-if WAREHOUSE_ID:
-    # User specified a warehouse — validate it
-    try:
-        wh_data = api_get(f"/api/2.0/sql/warehouses/{WAREHOUSE_ID}")
-        WAREHOUSE_NAME = wh_data.get("name", WAREHOUSE_ID)
-    except Exception as e:
-        print(f"Warning: Could not validate warehouse {WAREHOUSE_ID}: {e}")
-        WAREHOUSE_NAME = WAREHOUSE_ID
-else:
-    # Auto-detect: prefer running serverless, then running, then first available
-    warehouses = list(w.warehouses.list())
+warehouses = list(w.warehouses.list())
+for wh in warehouses:
+    if wh.state and wh.state.value == "RUNNING" and getattr(wh, "enable_serverless_compute", False):
+        WAREHOUSE_ID = wh.id
+        WAREHOUSE_NAME = wh.name
+        break
+if not WAREHOUSE_ID:
     for wh in warehouses:
-        if wh.state and wh.state.value == "RUNNING" and getattr(wh, "enable_serverless_compute", False):
+        if wh.state and wh.state.value == "RUNNING":
             WAREHOUSE_ID = wh.id
             WAREHOUSE_NAME = wh.name
             break
-    if not WAREHOUSE_ID:
-        for wh in warehouses:
-            if wh.state and wh.state.value == "RUNNING":
-                WAREHOUSE_ID = wh.id
-                WAREHOUSE_NAME = wh.name
-                break
-    if not WAREHOUSE_ID and warehouses:
-        WAREHOUSE_ID = warehouses[0].id
-        WAREHOUSE_NAME = warehouses[0].name
-
-# Validate source folder
-assert os.path.exists(SOURCE_FOLDER), f"Source folder not found: {SOURCE_FOLDER}"
-assert os.path.exists(f"{SOURCE_FOLDER}/app.yaml"), f"No app.yaml in {SOURCE_FOLDER} — is this the right folder?"
-assert os.path.exists(f"{SOURCE_FOLDER}/start.sh"), f"No start.sh in {SOURCE_FOLDER}"
+if not WAREHOUSE_ID and warehouses:
+    WAREHOUSE_ID = warehouses[0].id
+    WAREHOUSE_NAME = warehouses[0].name
 
 print("=" * 60)
 print("  Inspire AI v4.7 — Workspace Installer")
 print("=" * 60)
+print(f"  Catalog:           {CATALOG}")
+print(f"  Database:          {INSPIRE_DB}")
 print(f"  Source folder:     {SOURCE_FOLDER}")
 print(f"  App name:          {APP_NAME}")
-print(f"  Database:          {INSPIRE_DB}")
 print(f"  Workspace:         {WORKSPACE_HOST}")
 print(f"  User:              {USER_EMAIL}")
 print(f"  SQL Warehouse:     {WAREHOUSE_NAME or 'None'} ({WAREHOUSE_ID or 'N/A'})")
