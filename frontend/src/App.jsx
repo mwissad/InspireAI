@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback, useRef, Component } from 'react';
 import { ThemeProvider } from './ThemeContext';
 import Header from './components/Header';
-import SettingsPanel from './components/SettingsPanel';
 import LandingPage from './pages/LandingPage';
 import ConfigPage from './pages/ConfigPage';
 import LaunchPage from './pages/LaunchPage';
@@ -55,7 +54,6 @@ export default function App() {
   // Start in a 'loading' state — resolve environment before showing any page.
   // This prevents the Setup Wizard from flashing on Databricks App deployments.
   const [page, setPage] = useState('loading');
-  const [showSettings, setShowSettings] = useState(false);
 
   // Persisted settings
   const [settings, setSettings] = useState(() => ({
@@ -226,7 +224,6 @@ export default function App() {
         <Header
           page={page}
           setPage={nav}
-          onSettingsClick={() => setShowSettings(!showSettings)}
           canLaunch={canLaunch}
           canMonitor={canMonitor}
           canResults={canResults}
@@ -290,15 +287,6 @@ export default function App() {
         )}
 
       </main>
-
-      {/* Settings panel */}
-      {showSettings && (
-        <SettingsPanel
-          settings={settings}
-          update={update}
-          onClose={() => setShowSettings(false)}
-        />
-      )}
 
       {/* Scroll progress ring — bottom-right corner */}
       {page !== 'landing' && <ScrollProgressRing />}

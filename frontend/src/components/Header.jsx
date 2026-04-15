@@ -1,4 +1,4 @@
-import { Settings, Sun, Moon } from 'lucide-react';
+import { Sun, Moon } from 'lucide-react';
 import DatabricksLogo from './DatabricksLogo';
 import { useTheme } from '../ThemeContext';
 
@@ -11,7 +11,6 @@ const NAV = [
 export default function Header({
   page,
   setPage,
-  onSettingsClick,
   canLaunch,
   canMonitor,
   canResults,
@@ -77,7 +76,7 @@ export default function Header({
             })}
           </nav>
 
-          {/* Theme toggle + Settings */}
+          {/* Theme toggle */}
           <div className="flex items-center gap-1">
             <button
               onClick={toggle}
@@ -85,13 +84,6 @@ export default function Header({
               title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
             >
               {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
-            </button>
-            <button
-              onClick={onSettingsClick}
-              className="p-2 rounded-md text-text-secondary hover:text-db-red hover:bg-db-red-50 transition-smooth"
-              title="Settings"
-            >
-              <Settings size={18} />
             </button>
           </div>
         </div>
