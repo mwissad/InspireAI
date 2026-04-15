@@ -33,24 +33,29 @@ const DEFAULT_INSPIRE_DB = process.env.INSPIRE_DATABASE || '';
 // override this by passing their own PAT via the Authorization header.
 const SERVICE_TOKEN = process.env.DATABRICKS_TOKEN || '';
 
-// Path to the bundled DBC file — try several candidate locations
-const DBC_CANDIDATES = [
+// Path to the bundled notebook file — try several candidate locations
+// v47: switched from DBC archive to direct JUPYTER (.ipynb) format
+const NOTEBOOK_CANDIDATES = [
+  path.resolve(__dirname, '..', 'dbx_inspire_ai_agent.ipynb'),
+  path.resolve(__dirname, 'dbx_inspire_ai_agent.ipynb'),
+  path.resolve(__dirname, '..', 'notebooks', 'dbx_inspire_ai_agent.ipynb'),
+  // Legacy DBC fallback
   path.resolve(__dirname, '..', 'databricks_inspire_v46.dbc'),
   path.resolve(__dirname, 'databricks_inspire_v46.dbc'),
-  path.resolve(__dirname, '..', 'notebooks', 'databricks_inspire_v46.dbc'),
 ];
-let BUNDLED_DBC_PATH = DBC_CANDIDATES.find(p => fs.existsSync(p)) || '';
+let BUNDLED_NOTEBOOK_PATH = NOTEBOOK_CANDIDATES.find(p => fs.existsSync(p)) || '';
+const IS_IPYNB = BUNDLED_NOTEBOOK_PATH.endsWith('.ipynb');
 
-// If no physical DBC file found, try to materialize from embedded base64 bundle
-if (!BUNDLED_DBC_PATH) {
+// If no physical notebook found, try to materialize from embedded base64 bundle
+if (!BUNDLED_NOTEBOOK_PATH) {
   try {
-    const b64 = require('./dbc_bundle');
-    const materializedPath = path.resolve(__dirname, 'databricks_inspire_v46.dbc');
+    const b64 = require('./notebook_bundle');
+    const materializedPath = path.resolve(__dirname, 'dbx_inspire_ai_agent.ipynb');
     fs.writeFileSync(materializedPath, Buffer.from(b64, 'base64'));
-    BUNDLED_DBC_PATH = materializedPath;
-    console.log('DBC materialized from embedded bundle.');
+    BUNDLED_NOTEBOOK_PATH = materializedPath;
+    console.log('Notebook materialized from embedded bundle.');
   } catch (_) {
-    BUNDLED_DBC_PATH = DBC_CANDIDATES[0]; // fallback path (will show "not found")
+    BUNDLED_NOTEBOOK_PATH = NOTEBOOK_CANDIDATES[0]; // fallback path (will show "not found")
   }
 }
 
@@ -293,13 +298,15 @@ async function ensureNotebookPublished(host, token, force = false) {
     console.log('🔄 Force re-publish requested — overwriting existing notebook...');
   }
 
-  // 3. Publish the bundled DBC
-  if (!BUNDLED_DBC_PATH || !fs.existsSync(BUNDLED_DBC_PATH)) {
-    throw new Error('No bundled DBC file available to publish.');
+  // 3. Publish the bundled notebook
+  if (!BUNDLED_NOTEBOOK_PATH || !fs.existsSync(BUNDLED_NOTEBOOK_PATH)) {
+    throw new Error('No bundled notebook file available to publish.');
   }
 
-  console.log(`📦 Auto-publishing notebook to ${NOTEBOOK_DEST}...`);
-  const fileBuffer = fs.readFileSync(BUNDLED_DBC_PATH);
+  const isIpynb = BUNDLED_NOTEBOOK_PATH.endsWith('.ipynb');
+  const importFormat = isIpynb ? 'JUPYTER' : 'DBC';
+  console.log(`📦 Auto-publishing notebook (${importFormat}) to ${NOTEBOOK_DEST}...`);
+  const fileBuffer = fs.readFileSync(BUNDLED_NOTEBOOK_PATH);
   const base64Content = fileBuffer.toString('base64');
 
   // Delete old if exists
@@ -310,9 +317,16 @@ async function ensureNotebookPublished(host, token, force = false) {
     });
   } catch (_) {}
 
+  const importPath = isIpynb ? NOTEBOOK_DEST : NOTEBOOK_DEST;
   const resp = await dbFetch(host, token, '/api/2.0/workspace/import', {
     method: 'POST',
-    body: JSON.stringify({ path: NOTEBOOK_DEST, format: 'DBC', content: base64Content }),
+    body: JSON.stringify({
+      path: importPath,
+      format: importFormat,
+      content: base64Content,
+      language: isIpynb ? 'PYTHON' : undefined,
+      overwrite: true,
+    }),
   });
 
   if (!resp.ok) {
@@ -320,16 +334,21 @@ async function ensureNotebookPublished(host, token, force = false) {
     throw new Error(`Publish failed: ${err}`);
   }
 
-  // Find the notebook inside the imported folder
-  cachedNotebookPath = NOTEBOOK_DEST;
-  try {
-    const listResp = await dbFetch(host, token, `/api/2.0/workspace/list?path=${encodeURIComponent(NOTEBOOK_DEST)}`);
-    if (listResp.ok) {
-      const listData = await listResp.json();
-      const nb = (listData.objects || []).find(o => o.object_type === 'NOTEBOOK');
-      if (nb) cachedNotebookPath = nb.path;
-    }
-  } catch (_) {}
+  if (isIpynb) {
+    // JUPYTER import creates the notebook directly at the path
+    cachedNotebookPath = NOTEBOOK_DEST;
+  } else {
+    // DBC imports as a folder — find the actual notebook inside
+    cachedNotebookPath = NOTEBOOK_DEST;
+    try {
+      const listResp = await dbFetch(host, token, `/api/2.0/workspace/list?path=${encodeURIComponent(NOTEBOOK_DEST)}`);
+      if (listResp.ok) {
+        const listData = await listResp.json();
+        const nb = (listData.objects || []).find(o => o.object_type === 'NOTEBOOK');
+        if (nb) cachedNotebookPath = nb.path;
+      }
+    } catch (_) {}
+  }
 
   console.log(`✅ Notebook published: ${cachedNotebookPath}`);
   return cachedNotebookPath;
@@ -482,14 +501,14 @@ app.get('/api/workspace/export', requireToken, async (req, res) => {
 // ═══════════════════════════════════════════════════
 
 app.get('/api/health', (req, res) => {
-  const hasBundledDbc = fs.existsSync(BUNDLED_DBC_PATH);
+  const hasBundledNotebook = fs.existsSync(BUNDLED_NOTEBOOK_PATH);
   const host = resolveHost(req);
   const hasForwardedToken = !!req.headers['x-forwarded-access-token'];
   res.json({
     status: 'ok',
     host: host ? host.replace(/https?:\/\//, '').split('.')[0] + '...' : 'not configured',
     hostConfigured: !!host,
-    hasBundledDbc,
+    hasBundledDbc: hasBundledNotebook,
     hasServiceToken: !!SERVICE_TOKEN,
     isDatabricksApp: hasForwardedToken || !!DATABRICKS_HOST,
     hasUserToken: hasForwardedToken,
@@ -599,8 +618,8 @@ app.post('/api/setup/verify', async (req, res) => {
   }
 
   // 5. Notebook bundle
-  const hasDbc = fs.existsSync(BUNDLED_DBC_PATH);
-  checks.notebook = { ok: hasDbc, message: hasDbc ? 'Notebook bundle found' : 'DBC file not found — notebook publish will fail' };
+  const hasNotebook = fs.existsSync(BUNDLED_NOTEBOOK_PATH);
+  checks.notebook = { ok: hasNotebook, message: hasNotebook ? 'Notebook bundle found' : 'Notebook file not found — notebook publish will fail' };
 
   const allOk = Object.values(checks).every(c => c.ok);
   res.json({ ok: allOk, checks });
@@ -781,14 +800,16 @@ app.post('/api/publish', requireToken, async (req, res) => {
       return res.status(400).json({ error: 'destination_path is required.' });
     }
 
-    if (!fs.existsSync(BUNDLED_DBC_PATH)) {
-      return res.status(404).json({ error: 'Bundled DBC file not found on server.' });
+    if (!fs.existsSync(BUNDLED_NOTEBOOK_PATH)) {
+      return res.status(404).json({ error: 'Bundled notebook file not found on server.' });
     }
 
-    const fileBuffer = fs.readFileSync(BUNDLED_DBC_PATH);
+    const fileBuffer = fs.readFileSync(BUNDLED_NOTEBOOK_PATH);
     const base64Content = fileBuffer.toString('base64');
+    const isIpynb = BUNDLED_NOTEBOOK_PATH.endsWith('.ipynb');
+    const importFormat = isIpynb ? 'JUPYTER' : 'DBC';
 
-    // DBC format doesn't support overwrite — delete first
+    // Delete old if exists
     try {
       await dbFetch(req.dbHost, req.dbToken, '/api/2.0/workspace/delete', {
         method: 'POST',
@@ -800,8 +821,10 @@ app.post('/api/publish', requireToken, async (req, res) => {
       method: 'POST',
       body: JSON.stringify({
         path: destination_path,
-        format: 'DBC',
+        format: importFormat,
         content: base64Content,
+        language: isIpynb ? 'PYTHON' : undefined,
+        overwrite: true,
       }),
     });
 
@@ -810,18 +833,20 @@ app.post('/api/publish', requireToken, async (req, res) => {
       return res.status(response.status).json({ error: err });
     }
 
-    // DBC imports as a folder — find the actual notebook inside
     let notebookPath = destination_path;
-    try {
-      const listResp = await dbFetch(req.dbHost, req.dbToken, `/api/2.0/workspace/list?path=${encodeURIComponent(destination_path)}`);
-      if (listResp.ok) {
-        const listData = await listResp.json();
-        const notebook = (listData.objects || []).find(o => o.object_type === 'NOTEBOOK');
-        if (notebook) notebookPath = notebook.path;
-      }
-    } catch (_) {}
+    if (!isIpynb) {
+      // DBC imports as a folder — find the actual notebook inside
+      try {
+        const listResp = await dbFetch(req.dbHost, req.dbToken, `/api/2.0/workspace/list?path=${encodeURIComponent(destination_path)}`);
+        if (listResp.ok) {
+          const listData = await listResp.json();
+          const notebook = (listData.objects || []).find(o => o.object_type === 'NOTEBOOK');
+          if (notebook) notebookPath = notebook.path;
+        }
+      } catch (_) {}
+    }
 
-    console.log(`✅ Published DBC to: ${destination_path}, notebook: ${notebookPath}`);
+    console.log(`✅ Published notebook to: ${destination_path}, notebook: ${notebookPath}`);
     res.json({ success: true, path: notebookPath, folder_path: destination_path });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -877,38 +902,62 @@ app.post('/api/publish/upload', requireToken, upload.single('file'), async (req,
 
 app.get('/api/dbc/info', (req, res) => {
   try {
-    if (!fs.existsSync(BUNDLED_DBC_PATH)) {
-      return res.status(404).json({ error: 'Bundled DBC file not found.' });
+    if (!fs.existsSync(BUNDLED_NOTEBOOK_PATH)) {
+      return res.status(404).json({ error: 'Bundled notebook file not found.' });
     }
 
-    const zip = new AdmZip(BUNDLED_DBC_PATH);
-    const entries = zip.getEntries();
-    const notebooks = [];
+    const isIpynb = BUNDLED_NOTEBOOK_PATH.endsWith('.ipynb');
 
-    for (const entry of entries) {
-      if (entry.entryName.endsWith('.python') || entry.entryName.endsWith('.sql') || entry.entryName.endsWith('.scala')) {
-        try {
-          const content = entry.getData().toString('utf8');
-          const data = JSON.parse(content);
-          const commands = data.commands || [];
-          notebooks.push({
-            name: entry.entryName,
-            language: data.language || 'python',
-            command_count: commands.length,
-            version: data.version || 'unknown',
-          });
-        } catch {
-          notebooks.push({ name: entry.entryName, error: 'Could not parse' });
+    if (isIpynb) {
+      // JUPYTER notebook — parse ipynb JSON
+      const content = fs.readFileSync(BUNDLED_NOTEBOOK_PATH, 'utf8');
+      const nb = JSON.parse(content);
+      const cells = nb.cells || [];
+      res.json({
+        file: path.basename(BUNDLED_NOTEBOOK_PATH),
+        size: fs.statSync(BUNDLED_NOTEBOOK_PATH).size,
+        format: 'JUPYTER',
+        notebooks: [{
+          name: path.basename(BUNDLED_NOTEBOOK_PATH),
+          language: nb.metadata?.kernelspec?.language || 'python',
+          cell_count: cells.length,
+          code_cells: cells.filter(c => c.cell_type === 'code').length,
+          markdown_cells: cells.filter(c => c.cell_type === 'markdown').length,
+        }],
+        entry_count: 1,
+      });
+    } else {
+      // Legacy DBC archive
+      const zip = new AdmZip(BUNDLED_NOTEBOOK_PATH);
+      const entries = zip.getEntries();
+      const notebooks = [];
+
+      for (const entry of entries) {
+        if (entry.entryName.endsWith('.python') || entry.entryName.endsWith('.sql') || entry.entryName.endsWith('.scala')) {
+          try {
+            const content = entry.getData().toString('utf8');
+            const data = JSON.parse(content);
+            const commands = data.commands || [];
+            notebooks.push({
+              name: entry.entryName,
+              language: data.language || 'python',
+              command_count: commands.length,
+              version: data.version || 'unknown',
+            });
+          } catch {
+            notebooks.push({ name: entry.entryName, error: 'Could not parse' });
+          }
         }
       }
-    }
 
-    res.json({
-      file: path.basename(BUNDLED_DBC_PATH),
-      size: fs.statSync(BUNDLED_DBC_PATH).size,
-      notebooks,
-      entry_count: entries.length,
-    });
+      res.json({
+        file: path.basename(BUNDLED_NOTEBOOK_PATH),
+        size: fs.statSync(BUNDLED_NOTEBOOK_PATH).size,
+        format: 'DBC',
+        notebooks,
+        entry_count: entries.length,
+      });
+    }
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -956,7 +1005,7 @@ app.post('/api/run', requireToken, async (req, res) => {
       console.warn(`⚠️ Path verify failed: ${verifyErr.message}`);
     }
 
-    const businessName = params['00_business_name'] || 'Run';
+    const businessName = params.business || params['00_business_name'] || 'Run';
     const sanitizeTag = (v) => String(v || '').replace(/[^A-Za-z0-9._-]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '').slice(0, 255);
     const sanitizedTag = businessName.toLowerCase().replace(/[^a-z0-9_]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '') || 'run';
     const jobName = `Inspire AI - ${businessName} - ${new Date().toISOString().slice(0, 19)}`;
@@ -967,7 +1016,7 @@ app.post('/api/run', requireToken, async (req, res) => {
     const createPayload = {
       name: jobName,
       tags: {
-        inspire_version: 'v4.6',
+        inspire_version: 'v4.7',
         dbx_inspire_ai_business: sanitizeTag(businessName),
         dbx_inspire_ai_type: 'discovery',
         dbx_inspire_ai_session: sanitizeTag(jobSessionId),
@@ -1104,15 +1153,14 @@ app.get('/api/inspire/session', requireToken, async (req, res) => {
     const [catalog, schema] = inspire_database.split('.');
     const table = `\`${catalog}\`.\`${schema}\`.\`__inspire_session\``;
 
-    // v45 session table has individual widget columns instead of a single widget_values JSON
-    const widgetCols = `business_name, inspire_database_name, operation_mode, table_election_mode, use_cases_quality, strategic_goals, business_priorities, business_domains, catalogs, schemas_str, tables_str, generate_choices, generation_path, output_language, sql_generation_per_domain, technical_exclusion_strategy, json_file_path`;
-    const baseCols = `session_id, processing_status, completed_percent, create_at, last_updated, completed_on, inspire_json, results_json`;
+    // v47: widget_values is a single VARIANT/JSON column
+    const baseCols = `session_id, widget_values, processing_status, completed_percent, create_at, last_updated, completed_on, inspire_json, results_json`;
 
     let sql;
     if (session_id) {
-      sql = `SELECT ${baseCols}, ${widgetCols} FROM ${table} WHERE session_id = ${session_id} LIMIT 1`;
+      sql = `SELECT ${baseCols} FROM ${table} WHERE session_id = ${session_id} LIMIT 1`;
     } else {
-      sql = `SELECT ${baseCols}, ${widgetCols} FROM ${table} ORDER BY create_at DESC LIMIT 1`;
+      sql = `SELECT ${baseCols} FROM ${table} ORDER BY create_at DESC LIMIT 1`;
     }
 
     const result = await executeSql(req.dbHost, req.dbToken, warehouse_id, sql);
@@ -1124,26 +1172,12 @@ app.get('/api/inspire/session', requireToken, async (req, res) => {
 
     const session = rows[0];
 
-    // Reconstruct widget_values from individual columns for frontend compatibility
-    session.widget_values = {
-      business: session.business_name || '',
-      inspire_database: session.inspire_database_name || '',
-      operation_mode: session.operation_mode || '',
-      table_election_mode: session.table_election_mode || '',
-      use_cases_quality: session.use_cases_quality || '',
-      strategic_goals: session.strategic_goals || '',
-      business_priorities: session.business_priorities || '',
-      business_domains: session.business_domains || '',
-      catalogs: session.catalogs || '',
-      schemas: session.schemas_str || '',
-      tables: session.tables_str || '',
-      generate: session.generate_choices || '',
-      generation_path: session.generation_path || '',
-      output_language: session.output_language || '',
-      sql_generation_per_domain: session.sql_generation_per_domain || '',
-      technical_exclusion_strategy: session.technical_exclusion_strategy || '',
-      json_file_path: session.json_file_path || '',
-    };
+    // Parse widget_values VARIANT field
+    if (session.widget_values && typeof session.widget_values === 'string') {
+      try { session.widget_values = JSON.parse(session.widget_values); } catch { session.widget_values = {}; }
+    } else if (!session.widget_values || typeof session.widget_values !== 'object') {
+      session.widget_values = {};
+    }
 
     // Parse VARIANT fields (may come as object or string)
     for (const field of ['inspire_json', 'results_json']) {
@@ -1297,14 +1331,14 @@ app.get('/api/inspire/step-results', requireToken, async (req, res) => {
         }
       }
 
-      // 5) SQL Generation
-      if (prompt === 'USE_CASE_SQL_GEN_PROMPT' && rj.sql_preview) {
-        // entity_id format: USE_CASE_SQL_GEN_PROMPT:SQL_Gen:uc_42
+      // 5) Genie Code Instructions (v47) / SQL Generation (legacy)
+      if ((prompt === 'USE_CASE_GENIE_CODE_INSTRUCTION_GEN_PROMPT' || prompt === 'USE_CASE_SQL_GEN_PROMPT') && (rj.response_chars || rj.sql_preview)) {
+        // entity_id format: USE_CASE_GENIE_CODE_INSTRUCTION_GEN_PROMPT:Genie_Instruction_Generator:uc_42
         const ucIdMatch = (rj.entity_id || '').match(/uc_(\d+)/);
         if (ucIdMatch) {
           const id = ucIdMatch[1];
           const existing = ucMap.get(id) || {};
-          ucMap.set(id, { ...existing, No: id, SQL: rj.sql_preview });
+          ucMap.set(id, { ...existing, No: id, _hasGenieCode: true });
         }
       }
 
@@ -1391,9 +1425,16 @@ app.get('/api/inspire/usecases', requireToken, async (req, res) => {
     }
     const [catalog, schema] = inspire_database.split('.');
     const table = `\`${catalog}\`.\`${schema}\`.\`__inspire_usecases\``;
-    const sql = `SELECT * FROM ${table} WHERE session_id = ${session_id} ORDER BY No`;
+    // v47 schema: session_id, id, use_case, short_name, updated_at
+    const sql = `SELECT session_id, id, use_case, short_name, updated_at FROM ${table} WHERE session_id = ${session_id} ORDER BY id`;
     const result = await executeSql(req.dbHost, req.dbToken, warehouse_id, sql);
     const rows = sqlResultToObjects(result);
+    // Normalize for frontend compatibility
+    for (const row of rows) {
+      row.No = row.id || '';
+      row.Name = row.use_case || '';
+      row.short_name = row.short_name || '';
+    }
     console.log(`   📋 usecases: ${rows.length} rows for session ${session_id}`);
     res.json({ usecases: rows, count: rows.length });
   } catch (err) {
@@ -1483,20 +1524,18 @@ app.get('/api/inspire/sessions', requireToken, async (req, res) => {
 
     const [catalog, schema] = inspire_database.split('.');
     const table = `\`${catalog}\`.\`${schema}\`.\`__inspire_session\``;
-    const sql = `SELECT session_id, processing_status, completed_percent, create_at, completed_on, business_name, inspire_database_name, operation_mode, generation_path, business_domains, catalogs, results_json FROM ${table} ORDER BY create_at DESC LIMIT 20`;
+    const sql = `SELECT session_id, widget_values, processing_status, completed_percent, create_at, completed_on, results_json FROM ${table} ORDER BY create_at DESC LIMIT 20`;
 
     const result = await executeSql(req.dbHost, req.dbToken, warehouse_id, sql);
     const sessions = sqlResultToObjects(result);
 
     for (const s of sessions) {
-      // Reconstruct minimal widget_values for frontend compatibility
-      s.widget_values = {
-        business: s.business_name || '',
-        '00_business_name': s.business_name || '',
-        inspire_database: s.inspire_database_name || '',
-        operation_mode: s.operation_mode || '',
-        generation_path: s.generation_path || '',
-      };
+      // Parse widget_values VARIANT field
+      if (s.widget_values && typeof s.widget_values === 'string') {
+        try { s.widget_values = JSON.parse(s.widget_values); } catch { s.widget_values = {}; }
+      } else if (!s.widget_values || typeof s.widget_values !== 'object') {
+        s.widget_values = {};
+      }
       s.completed_percent = parseFloat(s.completed_percent) || 0;
       // Parse results_json for session summary
       if (s.results_json && typeof s.results_json === 'string') {
@@ -1641,12 +1680,12 @@ if (fs.existsSync(STATIC_DIR)) {
 
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
-  const hasDbc = fs.existsSync(BUNDLED_DBC_PATH);
+  const hasNotebook = fs.existsSync(BUNDLED_NOTEBOOK_PATH);
   const servingStatic = fs.existsSync(STATIC_DIR);
   console.log(`\n🚀 Inspire AI running on http://localhost:${PORT}`);
   console.log(`   Databricks Host: ${DATABRICKS_HOST || '⚠️  Not configured — set DATABRICKS_HOST'}`);
   console.log(`   Service Token:   ${SERVICE_TOKEN ? '✅ Configured' : '—  (users must provide PAT)'}`);
-  console.log(`   Bundled DBC:     ${hasDbc ? '✅ Found' : '❌ Not found'}`);
+  console.log(`   Bundled DBC:     ${hasNotebook ? '✅ Found' : '❌ Not found'}`);
   console.log(`   Static Frontend: ${servingStatic ? '✅ Serving from ' + STATIC_DIR : '—  (dev proxy mode)'}`);
   console.log(`   Default Notebook: ${DEFAULT_NOTEBOOK_PATH || '(publish via UI)'}`);
   console.log(`   MCP Server:      ✅ SSE at /mcp/sse  |  API docs at /api-docs\n`);

@@ -97,19 +97,21 @@ Returns a run_id — use inspire_get_run_status and inspire_get_session to monit
         const { token, host, cluster_id, notebook_path, ...rest } = args;
         // Map flat args to the params object the API expects
         const params = {
-          '00_business_name': rest.business_name,
+          business: rest.business_name,
           inspire_database: rest.inspire_database,
           warehouse_id: rest.warehouse_id,
-          operation_mode: rest.operation_mode,
+          operation_mode: rest.operation_mode || 'Discover Usecases',
           catalogs: rest.catalogs,
           schemas: rest.schemas,
           tables: rest.tables,
           business_domains: rest.business_domains,
-          strategic_goals: rest.strategic_goals,
+          generation_instructions: rest.strategic_goals || '',
           business_priorities: rest.business_priorities,
-          generate_choices: rest.generate_choices,
+          generate: rest.generate_choices,
           generation_path: rest.generation_path,
           output_language: rest.output_language,
+          json_file_path: '',
+          session_id: String(Date.now()) + String(Math.floor(Math.random() * 1e6)),
         };
         // Strip undefined values
         for (const k of Object.keys(params)) {

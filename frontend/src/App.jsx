@@ -140,14 +140,17 @@ export default function App() {
   const canResults = true;
 
   // ── Auto-configure on mount (silent) ──
+  // When deployed as a Databricks App with workspace installer defaults,
+  // this auto-completes setup without any user interaction.
   useEffect(() => {
     (async () => {
       try {
         // 0. Fetch installer-injected defaults and apply if user hasn't configured yet
+        let defaults = {};
         try {
           const defResp = await fetch('/api/defaults');
           if (defResp.ok) {
-            const defaults = await defResp.json();
+            defaults = await defResp.json();
             if (defaults.databricksHost && !settings.databricksHost) update('databricksHost', defaults.databricksHost);
             if (defaults.warehouseId && !settings.warehouseId) update('warehouseId', defaults.warehouseId);
             if (defaults.inspireDatabase && !settings.inspireDatabase) update('inspireDatabase', defaults.inspireDatabase);
@@ -160,25 +163,62 @@ export default function App() {
           headers['Authorization'] = `Bearer ${settings.token}`;
           headers['X-DB-PAT-Token'] = settings.token;
         }
-        if (settings.databricksHost) headers['X-Databricks-Host'] = settings.databricksHost;
+        const host = defaults.databricksHost || settings.databricksHost;
+        if (host) headers['X-Databricks-Host'] = host;
 
         // 1. Auto-select first running warehouse if none set
-        if (!settings.warehouseId) {
-          const whResp = await fetch('/api/warehouses', { headers });
-          if (whResp.ok) {
-            const whData = await whResp.json();
-            const running = (whData.warehouses || []).find((w) => w.state === 'RUNNING');
-            const first = running || (whData.warehouses || [])[0];
-            if (first) update('warehouseId', first.id);
-          }
+        let resolvedWarehouse = defaults.warehouseId || settings.warehouseId;
+        if (!resolvedWarehouse) {
+          try {
+            const whResp = await fetch('/api/warehouses', { headers });
+            if (whResp.ok) {
+              const whData = await whResp.json();
+              const whs = whData.warehouses || [];
+              const running = whs.find((w) => w.state === 'RUNNING' && w.enable_serverless_compute);
+              const first = running || whs.find((w) => w.state === 'RUNNING') || whs[0];
+              if (first) {
+                update('warehouseId', first.id);
+                resolvedWarehouse = first.id;
+              }
+            }
+          } catch {}
         }
 
         // 2. Auto-publish notebook (backend handles location seamlessly)
-        if (!settings.notebookPath) {
-          const nbResp = await fetch('/api/notebook', { headers });
-          if (nbResp.ok) {
-            const nbData = await nbResp.json();
-            if (nbData.path) update('notebookPath', nbData.path);
+        let resolvedNotebook = defaults.notebookPath || settings.notebookPath;
+        if (!resolvedNotebook) {
+          try {
+            const nbResp = await fetch('/api/notebook', { headers });
+            if (nbResp.ok) {
+              const nbData = await nbResp.json();
+              if (nbData.path) {
+                update('notebookPath', nbData.path);
+                resolvedNotebook = nbData.path;
+              }
+            }
+          } catch {}
+        }
+
+        // 3. Auto-complete setup when running as a Databricks App with
+        //    all required config resolved (host + warehouse + database).
+        //    The workspace installer pre-fills these via env vars so
+        //    users never see the Setup Wizard.
+        const isDatabricksApp = defaults.isDatabricksApp || defaults.hasServiceToken;
+        const resolvedDb = defaults.inspireDatabase || settings.inspireDatabase;
+        if (isDatabricksApp && host && resolvedWarehouse && resolvedDb) {
+          // Auto-create database schema if needed (silent, idempotent)
+          try {
+            await fetch('/api/setup/create-database', {
+              method: 'POST',
+              headers: { ...headers, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ inspire_database: resolvedDb, warehouse_id: resolvedWarehouse }),
+            });
+          } catch {}
+
+          // Mark setup as complete — skip wizard entirely
+          if (!localStorage.getItem('db_setup_complete')) {
+            localStorage.setItem('db_setup_complete', '1');
+            setPage('landing');
           }
         }
       } catch { /* silent — user can configure manually via Settings */ }

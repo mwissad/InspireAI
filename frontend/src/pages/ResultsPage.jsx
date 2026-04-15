@@ -584,7 +584,7 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
   const selectedSession = sessions.find(s => String(s.session_id) === String(selectedSessionId));
   const generationRootPath = selectedSession?.generation_path || selectedSession?.widget_values?.generation_path || '';
   // Build experiment-specific path: {generation_path}/{sanitized(business_name)}
-  const businessName = selectedSession?.widget_values?.['00_business_name'] || selectedSession?.business_name || '';
+  const businessName = selectedSession?.widget_values?.business || selectedSession?.widget_values?.['00_business_name'] || selectedSession?.business_name || '';
   const sanitizedName = businessName ? businessName.toLowerCase().replace(/[^a-z0-9_]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '') || '_' : '';
   // Resolve relative generation_path using the notebook's workspace location
   const notebookPath = settings?.notebookPath || '';
@@ -807,8 +807,8 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
                     >
                       <div>
                         <span className="text-sm font-semibold text-text-primary">
-                          {s.widget_values?.['00_business_name'] ||
-                            s.widget_values?.business ||
+                          {s.widget_values?.business ||
+                            s.widget_values?.['00_business_name'] ||
                             'Session'}
                         </span>
                         <div className="text-[10px] text-text-tertiary flex items-center gap-3 mt-1">

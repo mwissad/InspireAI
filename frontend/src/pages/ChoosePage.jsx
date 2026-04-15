@@ -227,9 +227,9 @@ export default function ChoosePage({ settings, onNewExperiment, onViewResults })
             {(showAll ? sessions : sessions.slice(0, 5)).map((session) => {
               const status = getStatus(session);
               const cfg = STATUS_CONFIG[status];
-              const name = session.widget_values?.['00_business_name'] || session.business_name || `Session ${session.session_id}`;
+              const name = session.widget_values?.business || session.widget_values?.['00_business_name'] || session.business_name || `Session ${session.session_id}`;
               const date = session.completed_on || session.create_at;
-              const mode = session.widget_values?.['02_operation_mode'] || session.operation_mode || '';
+              const mode = session.widget_values?.operation_mode || session.widget_values?.['02_operation_mode'] || session.operation_mode || '';
               const isCompleted = session.completed_percent >= 100;
               const summary = isCompleted ? getSessionSummary(session) : null;
 

@@ -10,7 +10,7 @@ variables:
     default: "main.inspire"
   notebook_path:
     description: "Workspace path for the Inspire notebook"
-    default: "/Shared/inspire/databricks_inspire_v46"
+    default: "/Shared/inspire/dbx_inspire_ai_agent"
 
 targets:
   # ── Development (local workspace) ──
@@ -51,7 +51,7 @@ resources:
     inspire_pipeline:
       name: "Inspire AI Pipeline"
       tags:
-        inspire_version: "v4.6"
+        inspire_version: "v4.7"
         dbx_inspire_ai_type: "discovery"
       tasks:
         - task_key: inspire_notebook

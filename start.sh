@@ -56,11 +56,11 @@ else
   echo "   To fix: cd frontend && npm install && npm run build"
 fi
 
-# ─── 4. Verify DBC notebook bundle ───
-if [ -f "databricks_inspire_v46.dbc" ] || [ -f "backend/dbc_bundle.js" ]; then
+# ─── 4. Verify notebook bundle ───
+if [ -f "dbx_inspire_ai_agent.ipynb" ] || [ -f "backend/notebook_bundle.js" ] || [ -f "databricks_inspire_v46.dbc" ] || [ -f "backend/dbc_bundle.js" ]; then
   echo "✅ Notebook bundle found."
 else
-  echo "⚠️  WARNING: No DBC notebook found. Publish feature will be unavailable."
+  echo "⚠️  WARNING: No notebook bundle found. Publish feature will be unavailable."
 fi
 
 # ─── 5. Show Databricks connection info ───

@@ -42,21 +42,58 @@ export default function SetupWizard({ settings, update, onComplete }) {
   }, [token, databricksHost]);
 
   // Auto-detect host and Databricks App mode from environment
+  // When all defaults are available, auto-complete the entire wizard
   useEffect(() => {
-    fetch('/api/health').then(r => r.json()).then(data => {
-      if (data.isDatabricksApp) {
-        setIsDatabricksApp(true);
-        // When running as a Databricks App, the proxy auto-injects the user's
-        // OAuth token via x-forwarded-access-token — no PAT needed.
-        if (data.hostConfigured) {
-          // Fetch full host from defaults endpoint
-          fetch('/api/defaults').then(r => r.json()).then(d => {
-            if (d.databricksHost && !databricksHost) update('databricksHost', d.databricksHost);
-          }).catch(() => {});
+    (async () => {
+      try {
+        const healthResp = await fetch('/api/health');
+        const health = await healthResp.json();
+
+        if (health.isDatabricksApp) {
+          setIsDatabricksApp(true);
+
+          const defResp = await fetch('/api/defaults');
+          const defaults = await defResp.json();
+
+          if (defaults.databricksHost && !databricksHost) update('databricksHost', defaults.databricksHost);
+          if (defaults.warehouseId && !warehouseId) update('warehouseId', defaults.warehouseId);
+          if (defaults.inspireDatabase && !inspireDatabase) update('inspireDatabase', defaults.inspireDatabase);
+
+          // If workspace installer provided all required config, auto-complete setup
+          const host = defaults.databricksHost || databricksHost;
+          const wh = defaults.warehouseId || warehouseId;
+          const db = defaults.inspireDatabase || inspireDatabase;
+
+          if (host && wh && db) {
+            const autoHeaders = { 'Content-Type': 'application/json' };
+            if (host) autoHeaders['X-Databricks-Host'] = host;
+
+            // Auto-create database
+            try {
+              await fetch('/api/setup/create-database', {
+                method: 'POST',
+                headers: autoHeaders,
+                body: JSON.stringify({ inspire_database: db, warehouse_id: wh }),
+              });
+            } catch {}
+
+            // Auto-publish notebook
+            try {
+              const nbResp = await fetch('/api/notebook', { headers: autoHeaders });
+              if (nbResp.ok) {
+                const nbData = await nbResp.json();
+                if (nbData.path) update('notebookPath', nbData.path);
+              }
+            } catch {}
+
+            // Complete setup immediately
+            onComplete();
+            return;
+          }
         }
-      }
-    }).catch(() => {});
-  }, []);
+      } catch {}
+    })();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Load warehouses when auth is ready (or in Databricks App mode where token is auto-injected)
   useEffect(() => {
