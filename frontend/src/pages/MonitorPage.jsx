@@ -66,11 +66,13 @@ export default function MonitorPage({ settings, update, sessionId, runId, onComp
   const apiFetch = useCallback(
     async (url, opts = {}) => {
       const headers = {
-        Authorization: `Bearer ${token}`,
-        'X-DB-PAT-Token': token,
         'Content-Type': 'application/json',
         ...opts.headers,
       };
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+        headers['X-DB-PAT-Token'] = token;
+      }
       if (databricksHost) headers['X-Databricks-Host'] = databricksHost;
       const resp = await fetch(url, { ...opts, headers });
       if (!resp.ok) throw new Error(`${resp.status}`);

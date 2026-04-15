@@ -26,16 +26,15 @@ export default function TableBrowser({
   const [error, setError] = useState(null);
 
   const apiFetch = useCallback(async (url) => {
-    const resp = await fetch(url, {
-      headers: { Authorization: `Bearer ${token}`, 'X-DB-PAT-Token': token },
-    });
+    const headers = {};
+    if (token) { headers['Authorization'] = `Bearer ${token}`; headers['X-DB-PAT-Token'] = token; }
+    const resp = await fetch(url, { headers });
     if (!resp.ok) throw new Error(`API error ${resp.status}`);
     return resp.json();
   }, [token]);
 
-  // Load catalogs on mount
+  // Load catalogs on mount (token not required in Databricks App mode — proxy handles auth)
   useEffect(() => {
-    if (!token) return;
     setError(null);
     apiFetch('/api/catalogs')
       .then((d) => setCatalogs(d.catalogs || []))
@@ -96,10 +95,10 @@ export default function TableBrowser({
     return filtered;
   };
 
-  if (!token) {
+  if (!token && catalogs.length === 0 && error) {
     return (
       <div className="h-full flex items-center justify-center p-6 text-text-tertiary text-sm">
-        Configure your token to browse tables.
+        Could not load catalogs. Check your connection settings.
       </div>
     );
   }

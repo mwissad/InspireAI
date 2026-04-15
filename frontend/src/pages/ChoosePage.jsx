@@ -77,10 +77,11 @@ export default function ChoosePage({ settings, onNewExperiment, onViewResults })
   const [expandedQuickView, setExpandedQuickView] = useState(null);
 
   const deleteSession = useCallback(async (sessionId) => {
-    if (!token || !inspireDatabase || !warehouseId) return;
+    if (!inspireDatabase || !warehouseId) return;
     setDeleting(sessionId);
     try {
-      const headers = { Authorization: `Bearer ${token}`, 'X-DB-PAT-Token': token };
+      const headers = {};
+      if (token) { headers['Authorization'] = `Bearer ${token}`; headers['X-DB-PAT-Token'] = token; }
       if (databricksHost) headers['X-Databricks-Host'] = databricksHost;
       const q = new URLSearchParams({ inspire_database: inspireDatabase, warehouse_id: warehouseId, session_id: String(sessionId) });
       const resp = await fetch(`/api/inspire/session?${q}`, { method: 'DELETE', headers });
@@ -93,14 +94,15 @@ export default function ChoosePage({ settings, onNewExperiment, onViewResults })
   }, [token, databricksHost, warehouseId, inspireDatabase]);
 
   useEffect(() => {
-    if (!token || !inspireDatabase || !warehouseId) {
+    if (!inspireDatabase || !warehouseId) {
       setLoading(false);
       return;
     }
 
     (async () => {
       try {
-        const headers = { Authorization: `Bearer ${token}`, 'X-DB-PAT-Token': token };
+        const headers = {};
+        if (token) { headers['Authorization'] = `Bearer ${token}`; headers['X-DB-PAT-Token'] = token; }
         if (databricksHost) headers['X-Databricks-Host'] = databricksHost;
         const q = new URLSearchParams({ inspire_database: inspireDatabase, warehouse_id: warehouseId });
         const resp = await fetch(`/api/inspire/sessions?${q}`, { headers });

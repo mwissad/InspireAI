@@ -129,7 +129,8 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
 
   const apiFetch = useCallback(
     async (url) => {
-      const headers = { Authorization: `Bearer ${token}`, 'X-DB-PAT-Token': token };
+      const headers = {};
+      if (token) { headers['Authorization'] = `Bearer ${token}`; headers['X-DB-PAT-Token'] = token; }
       if (databricksHost) headers['X-Databricks-Host'] = databricksHost;
       const resp = await fetch(url, { headers });
       if (!resp.ok) throw new Error(`${resp.status}`);
@@ -372,14 +373,15 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
 
   // Load generation artifacts — tries multiple path variations
   const artifactHeaders = useCallback(() => {
-    const h = { Authorization: `Bearer ${token}`, 'X-DB-PAT-Token': token };
+    const h = {};
+    if (token) { h['Authorization'] = `Bearer ${token}`; h['X-DB-PAT-Token'] = token; }
     if (databricksHost) h['X-Databricks-Host'] = databricksHost;
     return h;
   }, [token, databricksHost]);
 
   // Recursively scan a folder to discover all file paths (notebooks, PDFs, CSVs, etc.)
   const deepScanFolder = useCallback(async (folderPath) => {
-    if (!folderPath || !token) return;
+    if (!folderPath) return;
     const headers = artifactHeaders();
     const discovered = [];
     const scan = async (dir) => {
@@ -404,7 +406,7 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
   }, [token, artifactHeaders]);
 
   const loadArtifacts = useCallback(async (genPath) => {
-    if (!genPath || !token) return;
+    if (!genPath) return;
     setArtifactsLoading(true);
     setArtifactsRootFiles(null);
     const headers = artifactHeaders();
@@ -446,7 +448,7 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
   }, [token, databricksHost, artifactHeaders, deepScanFolder]);
 
   const loadFolder = useCallback(async (folderPath) => {
-    if (!folderPath || !token) return;
+    if (!folderPath) return;
     setArtifactTree(prev => ({ ...prev, [folderPath]: { files: [], loading: true, error: null } }));
     const headers = artifactHeaders();
     try {
@@ -1820,11 +1822,12 @@ function UseCaseCard({ uc, index, expanded, onToggle, resolveTable, token, datab
       setShowNotebook(true);
       return;
     }
-    if (!notebookPath || !token) return;
+    if (!notebookPath) return;
     setNotebookLoading(true);
     setNotebookError('');
     try {
-      const headers = { Authorization: `Bearer ${token}`, 'X-DB-PAT-Token': token };
+      const headers = {};
+      if (token) { headers['Authorization'] = `Bearer ${token}`; headers['X-DB-PAT-Token'] = token; }
       if (databricksHost) headers['X-Databricks-Host'] = databricksHost;
       const resp = await fetch(`/api/workspace/export?path=${encodeURIComponent(notebookPath)}`, { headers });
       if (resp.ok) {
