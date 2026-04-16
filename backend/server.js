@@ -221,18 +221,20 @@ function getTokenSync(req) {
     if (bearer) return bearer;
   }
 
-  // 3) Static service token from env (DATABRICKS_TOKEN)
-  if (SERVICE_TOKEN) return SERVICE_TOKEN;
-
-  // 4) Cached SP OAuth token (from client_credentials refresh)
-  if (spTokenCache && Date.now() < spTokenExpiry) return spTokenCache;
-
-  // 5) Databricks App proxy injects the user's token (on-behalf-of)
+  // 3) User's token from Databricks App proxy (on-behalf-of user)
+  //    Preferred for user-facing ops (catalog browsing, table listing)
+  //    because it reflects the user's own Unity Catalog permissions.
   const forwarded = req.headers['x-forwarded-access-token'];
   if (forwarded) {
     const clean = forwarded.startsWith('Bearer ') ? forwarded.slice(7).trim() : forwarded.trim();
     if (clean) return clean;
   }
+
+  // 4) Static service token from env (DATABRICKS_TOKEN)
+  if (SERVICE_TOKEN) return SERVICE_TOKEN;
+
+  // 5) Cached SP OAuth token (from client_credentials refresh)
+  if (spTokenCache && Date.now() < spTokenExpiry) return spTokenCache;
 
   return null;
 }
@@ -242,7 +244,7 @@ async function getToken(req) {
   const sync = getTokenSync(req);
   if (sync) return sync;
 
-  // No token found — try generating one from SP credentials
+  // No user or static token — try generating one from SP credentials
   if (SP_CLIENT_ID && SP_CLIENT_SECRET) {
     const freshToken = await ensureSpToken();
     if (freshToken) return freshToken;
