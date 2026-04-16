@@ -4,7 +4,7 @@
   "private": true,
   "description": "Inspire AI — Data Strategy Copilot powered by Databricks",
   "scripts": {
-    "postinstall": "if [ ! -d backend/node_modules ]; then cd backend && npm install --omit=dev --no-audit --no-fund; fi",
+    "postinstall": "cd backend && npm install --omit=dev --no-audit --no-fund",
     "install:all": "cd frontend && npm install && cd ../backend && npm install",
     "dev:backend": "cd backend && node --watch server.js",
     "dev:frontend": "cd frontend && npm run dev",

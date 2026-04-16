@@ -135,28 +135,6 @@ print("  Clean ✅")
 
 # COMMAND ----------
 
-# Install backend dependencies so the Databricks App runtime doesn't need to
-import subprocess
-backend_dir = f"{SOURCE_FOLDER}/backend"
-if not os.path.exists(f"{backend_dir}/node_modules"):
-    print("Installing backend dependencies...")
-    result = subprocess.run(
-        ["npm", "install", "--omit=dev", "--no-audit", "--no-fund"],
-        cwd=backend_dir, capture_output=True, text=True, timeout=120
-    )
-    if result.returncode == 0:
-        print(f"  Dependencies: ✅")
-    else:
-        print(f"  Dependencies: ⚠️ {result.stderr[:200]}")
-        # Try with legacy peer deps
-        result = subprocess.run(
-            ["npm", "install", "--omit=dev", "--no-audit", "--no-fund", "--legacy-peer-deps"],
-            cwd=backend_dir, capture_output=True, text=True, timeout=120
-        )
-        print(f"  Retry: {'✅' if result.returncode == 0 else '⚠️ ' + result.stderr[:200]}")
-else:
-    print("Dependencies: ✅ (already installed)")
-
 # Schema
 if WAREHOUSE_ID:
     stmt = w.statement_execution.execute_statement(warehouse_id=WAREHOUSE_ID, statement=f"CREATE SCHEMA IF NOT EXISTS `{CATALOG}`.`{SCHEMA}`", wait_timeout="30s")
