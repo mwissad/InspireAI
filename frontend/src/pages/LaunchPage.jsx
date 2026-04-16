@@ -322,7 +322,8 @@ export default function LaunchPage({ settings, update, onLaunched }) {
   };
 
   // Validation state
-  const canLaunch = params['00_business_name'] && (params['02_inspire_database'] || inspireDatabase) && params['01_uc_metadata'];
+  const effectiveDb = params['02_inspire_database'] || inspireDatabase;
+  const canLaunch = params['00_business_name'] && effectiveDb && params['01_uc_metadata'];
 
   return (
     <div className="max-w-5xl mx-auto px-6 py-8">
@@ -377,17 +378,6 @@ export default function LaunchPage({ settings, update, onLaunched }) {
                 value={params['00_business_name']}
                 onChange={(e) => updateParam('00_business_name', e.target.value)}
                 className="w-full pl-10 pr-4 py-2.5 text-sm border border-border rounded-lg bg-surface text-text-primary placeholder:text-text-tertiary glow-focus transition-smooth"
-              />
-            </Field>
-
-            {/* Inspire Database */}
-            <Field label="Inspire Database" required icon={Database} hint="catalog.schema format — where Inspire stores tracking tables">
-              <input
-                type="text"
-                placeholder="e.g. my_catalog._inspire"
-                value={params['02_inspire_database']}
-                onChange={(e) => updateParam('02_inspire_database', e.target.value)}
-                className="w-full pl-10 pr-4 py-2.5 text-sm border border-border rounded-lg bg-surface text-text-primary placeholder:text-text-tertiary glow-focus transition-smooth font-mono"
               />
             </Field>
 
@@ -591,6 +581,17 @@ export default function LaunchPage({ settings, update, onLaunched }) {
           {showAdvanced && (
             <div className="px-6 pb-6 pt-2 border-t border-border space-y-6">
 
+              {/* Inspire Database */}
+              <Field label="Inspire Database" icon={Database} hint="catalog.schema format — where Inspire stores session tracking tables">
+                <input
+                  type="text"
+                  placeholder="e.g. my_catalog._inspire"
+                  value={params['02_inspire_database']}
+                  onChange={(e) => updateParam('02_inspire_database', e.target.value)}
+                  className="w-full pl-10 pr-4 py-2.5 text-sm border border-border rounded-lg bg-surface text-text-primary placeholder:text-text-tertiary glow-focus transition-smooth font-mono"
+                />
+              </Field>
+
               {/* Business Priorities */}
               <FieldSection label="Business Priorities" hint="Select what matters most">
                 <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
@@ -618,16 +619,16 @@ export default function LaunchPage({ settings, update, onLaunched }) {
                 </div>
               </FieldSection>
 
-              {/* Strategic Goals */}
-              <FieldSection label="Strategic Goals" hint="Highest priority influence on use case generation">
+              {/* Generation Instructions */}
+              <FieldSection label="Generation Instructions" hint="Free-text instructions to guide use case generation (e.g. focus areas, join hints, exclusions)">
                 <div className="relative">
-                  <Target size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-tertiary" />
-                  <input
-                    type="text"
-                    placeholder="Increase market share, Reduce operational costs, Improve customer retention..."
+                  <Target size={14} className="absolute left-3 top-3 text-text-tertiary" />
+                  <textarea
+                    rows={3}
+                    placeholder="Focus on fraud detection, join orders with customers on customer_id, exclude staging tables..."
                     value={params['08_generation_instructions']}
                     onChange={(e) => updateParam('08_generation_instructions', e.target.value)}
-                    className="w-full pl-9 pr-4 py-2.5 text-sm border border-border rounded-lg bg-surface text-text-primary placeholder:text-text-tertiary glow-focus transition-smooth"
+                    className="w-full pl-9 pr-4 py-2.5 text-sm border border-border rounded-lg bg-surface text-text-primary placeholder:text-text-tertiary glow-focus transition-smooth resize-none"
                   />
                 </div>
               </FieldSection>
