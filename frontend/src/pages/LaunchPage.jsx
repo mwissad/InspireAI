@@ -279,13 +279,17 @@ export default function LaunchPage({ settings, update, onLaunched }) {
       String(Date.now()) + String(Math.floor(Math.random() * 1e6));
 
     try {
-      const data = await apiFetch('/api/run', {
+      const resp = await fetch('/api/run', {
         method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           notebook_path: notebookPath,
           params: finalParams,
+          warehouse_id: warehouseId,
         }),
       });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || `Launch failed (${resp.status})`);
       update('inspireDatabase', finalParams['02_inspire_database']);
       onLaunched?.(finalParams['14_session_id'], data.run_id);
     } catch (err) {

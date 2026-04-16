@@ -1089,7 +1089,7 @@ app.get('/api/dbc/info', (req, res) => {
 
 app.post('/api/run', requireToken, async (req, res) => {
   try {
-    const { params, cluster_id, notebook_path } = req.body;
+    const { params, cluster_id, notebook_path, warehouse_id } = req.body;
 
     let resolvedPath = notebook_path || DEFAULT_NOTEBOOK_PATH;
     if (!resolvedPath) {
@@ -1150,8 +1150,21 @@ app.post('/api/run', requireToken, async (req, res) => {
             base_parameters: params,
             source: 'WORKSPACE',
           },
-          ...(cluster_id ? { existing_cluster_id: cluster_id } : {}),
+          // Compute: use explicit cluster if provided, otherwise serverless
+          ...(cluster_id
+            ? { existing_cluster_id: cluster_id }
+            : { environment_key: 'Default' }
+          ),
       }],
+      // Serverless environment definition (used when no cluster_id)
+      ...(!cluster_id ? {
+        environments: [{
+          environment_key: 'Default',
+          spec: {
+            client: '1',
+          },
+        }],
+      } : {}),
       max_concurrent_runs: 1,
     };
 
