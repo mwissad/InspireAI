@@ -154,24 +154,37 @@ export default function LaunchPage({ settings, update, onLaunched }) {
     }
   }, [selectedCatalogs, selectedSchemas, selectedTables]);
 
-  // Load catalogs once on mount — backend handles auth (SP token pre-warmed on startup)
-  const [catalogsLoaded, setCatalogsLoaded] = useState(false);
+  // Load catalogs — retry until we get them
   useEffect(() => {
-    if (catalogsLoaded) return;
-    setLoadingCatalogs(true);
-    fetch('/api/catalogs', {
-      headers: token ? { 'Authorization': `Bearer ${token}`, 'X-DB-PAT-Token': token } : {},
-    })
-      .then(r => { if (!r.ok) throw new Error(`${r.status}`); return r.json(); })
-      .then((data) => {
-        const cats = data.catalogs || [];
-        console.log('[LaunchPage] catalogs loaded:', cats.length, cats.map(c => c.name));
-        setCatalogs(cats);
-        setCatalogsLoaded(true);
-      })
-      .catch((err) => console.warn('[LaunchPage] catalog load failed:', err.message))
-      .finally(() => setLoadingCatalogs(false));
-  }, [catalogsLoaded, token]);
+    let cancelled = false;
+    const load = async () => {
+      setLoadingCatalogs(true);
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          const resp = await fetch('/api/catalogs');
+          if (!resp.ok) {
+            console.warn(`[catalogs] attempt ${attempt} failed: ${resp.status}`);
+            await new Promise(r => setTimeout(r, 2000));
+            continue;
+          }
+          const data = await resp.json();
+          const cats = data.catalogs || [];
+          console.log(`[catalogs] loaded ${cats.length}:`, cats.map(c => c.name));
+          if (!cancelled) {
+            setCatalogs(cats);
+            setLoadingCatalogs(false);
+          }
+          return;
+        } catch (err) {
+          console.warn(`[catalogs] attempt ${attempt} error:`, err.message);
+          await new Promise(r => setTimeout(r, 2000));
+        }
+      }
+      if (!cancelled) setLoadingCatalogs(false);
+    };
+    load();
+    return () => { cancelled = true; };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Load schemas when catalogs change
   useEffect(() => {
