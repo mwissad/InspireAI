@@ -81,17 +81,20 @@ def api_get(path):
     r.raise_for_status()
     return r.json()
 
-# Warehouse
+# Warehouse — collect into a list first (iterators exhaust on re-use)
 WAREHOUSE_ID = WAREHOUSE_NAME = None
-for wh in w.warehouses.list():
+all_warehouses = list(w.warehouses.list())
+for wh in all_warehouses:
     if wh.state and wh.state.value == "RUNNING" and getattr(wh, "enable_serverless_compute", False):
         WAREHOUSE_ID, WAREHOUSE_NAME = wh.id, wh.name
         break
 if not WAREHOUSE_ID:
-    for wh in w.warehouses.list():
+    for wh in all_warehouses:
         if wh.state and wh.state.value == "RUNNING":
             WAREHOUSE_ID, WAREHOUSE_NAME = wh.id, wh.name
             break
+if not WAREHOUSE_ID and all_warehouses:
+    WAREHOUSE_ID, WAREHOUSE_NAME = all_warehouses[0].id, all_warehouses[0].name
 
 print(f"Catalog: {CATALOG} | Database: {INSPIRE_DB} | Warehouse: {WAREHOUSE_NAME} ({WAREHOUSE_ID})")
 print(f"Source:  {SOURCE_FOLDER}")
