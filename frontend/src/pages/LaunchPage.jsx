@@ -33,7 +33,7 @@ import {
 
 /* ─── Constants (v45 notebook widget options) ─── */
 const QUALITY_OPTIONS = ['Good Quality', 'High Quality', 'Very High Quality'];
-const TABLE_ELECTION = ['Let Inspire Decides', 'Selected Tables', 'All Tables', 'Transactional Only'];
+const TABLE_ELECTION = ['Let Inspire Decides', 'All Tables', 'Transactional Only'];
 const GENERATION_OPTIONS = [
   { key: 'Genie Code Instructions', icon: Sparkles, desc: 'Generate Genie code instructions per use case' },
   { key: 'PDF Catalog', icon: FileText, desc: 'Professional PDF use case catalog' },
@@ -147,9 +147,7 @@ export default function LaunchPage({ settings, update, onLaunched }) {
     if (selectedTables.length > 0) {
       // Tables are the most specific — use full 3-level names (catalog.schema.table)
       metadata = selectedTables.join(',');
-      setParams((p) => p['04_table_election'] !== 'Selected Tables'
-        ? { ...p, '01_uc_metadata': metadata, '04_table_election': 'Selected Tables' }
-        : { ...p, '01_uc_metadata': metadata }
+      setParams((p) => ({ ...p, '01_uc_metadata': metadata, '04_table_election': 'All Tables' })
       );
     } else if (selectedSchemas.length > 0) {
       // Schemas selected — use 2-level names (catalog.schema)
