@@ -448,92 +448,38 @@ export default function LaunchPage({ settings, update, onLaunched }) {
                 </button>
 
                 {pickerExpanded && (
-                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-                    {/* Catalogs */}
-                    <div>
-                      <div className="flex items-center gap-1.5 mb-2">
-                        <span className="text-[11px] font-semibold text-text-secondary">Catalogs</span>
-                        {loadingCatalogs && <Loader2 size={10} className="animate-spin text-text-tertiary" />}
-                      </div>
-                      <PickerList
-                        items={filteredCatalogs}
-                        selected={selectedCatalogs}
-                        onToggle={(name) => {
-                          if (selectedCatalogs.includes(name)) {
-                            setSelectedCatalogs((p) => p.filter((x) => x !== name));
-                            setSelectedSchemas((p) => p.filter((x) => !x.startsWith(name + '.')));
-                            setSelectedTables((p) => p.filter((x) => !x.startsWith(name + '.')));
-                          } else {
-                            setSelectedCatalogs((p) => [...p, name]);
-                          }
-                        }}
-                        getKey={(c) => c.name}
-                        getLabel={(c) => c.name}
-                        searchValue={catalogSearch}
-                        onSearch={setCatalogSearch}
-                        searchPlaceholder="Search catalogs..."
-                        emptyText={loadingCatalogs ? 'Loading...' : 'No catalogs found'}
-                      />
-                    </div>
-
-                    {/* Schemas */}
-                    <div>
-                      <div className="flex items-center gap-1.5 mb-2">
-                        <span className="text-[11px] font-semibold text-text-secondary">Schemas</span>
-                        {loadingSchemas && <Loader2 size={10} className="animate-spin text-text-tertiary" />}
-                      </div>
-                      <PickerList
-                        items={filteredSchemas}
-                        selected={selectedSchemas}
-                        onToggle={(name) => {
-                          if (selectedSchemas.includes(name)) {
-                            setSelectedSchemas((p) => p.filter((x) => x !== name));
-                            setSelectedTables((p) => p.filter((x) => !x.startsWith(name + '.')));
-                          } else {
-                            setSelectedSchemas((p) => [...p, name]);
-                          }
-                        }}
-                        getKey={(s) => s.full_name}
-                        getLabel={(s) => selectedCatalogs.length > 1 ? s.full_name : s.name}
-                        searchValue={schemaSearch}
-                        onSearch={setSchemaSearch}
-                        searchPlaceholder="Search schemas..."
-                        emptyText={selectedCatalogs.length === 0 ? 'Select catalogs first' : loadingSchemas ? 'Loading...' : 'No schemas found'}
-                      />
-                    </div>
-
-                    {/* Tables */}
-                    <div>
-                      <div className="flex items-center gap-1.5 mb-2">
-                        <span className="text-[11px] font-semibold text-text-secondary">Tables</span>
-                        <span className="text-[10px] text-text-tertiary">primary selection</span>
-                        {loadingTables && <Loader2 size={10} className="animate-spin text-text-tertiary" />}
-                      </div>
-                      {filteredTables.length > 0 && (
-                        <button
-                          type="button"
-                          onClick={toggleAllTables}
-                          className="mb-1.5 px-2.5 py-1 rounded-md text-[10px] font-semibold transition-smooth border border-border hover:border-border-strong text-text-secondary hover:text-db-red"
-                        >
-                          {allTablesSelected ? 'Deselect All' : 'Select All'}
-                        </button>
-                      )}
-                      <PickerList
-                        items={filteredTables}
-                        selected={selectedTables}
-                        onToggle={(name) => {
-                          if (selectedTables.includes(name)) setSelectedTables((p) => p.filter((x) => x !== name));
-                          else setSelectedTables((p) => [...p, name]);
-                        }}
-                        getKey={(t) => t.full_name}
-                        getLabel={(t) => selectedSchemas.length > 1 ? `${t.schema_name}.${t.name}` : t.name}
-                        searchValue={tableSearch}
-                        onSearch={setTableSearch}
-                        searchPlaceholder="Search tables..."
-                        emptyText={selectedSchemas.length === 0 ? 'Select schemas first' : loadingTables ? 'Loading...' : 'No tables found'}
-                      />
-                    </div>
-                  </div>
+                  <CatalogTree
+                    catalogs={filteredCatalogs}
+                    schemas={schemas}
+                    tables={tables}
+                    selectedCatalogs={selectedCatalogs}
+                    selectedSchemas={selectedSchemas}
+                    selectedTables={selectedTables}
+                    loadingCatalogs={loadingCatalogs}
+                    loadingSchemas={loadingSchemas}
+                    loadingTables={loadingTables}
+                    onToggleCatalog={(name) => {
+                      if (selectedCatalogs.includes(name)) {
+                        setSelectedCatalogs((p) => p.filter((x) => x !== name));
+                        setSelectedSchemas((p) => p.filter((x) => !x.startsWith(name + '.')));
+                        setSelectedTables((p) => p.filter((x) => !x.startsWith(name + '.')));
+                      } else {
+                        setSelectedCatalogs((p) => [...p, name]);
+                      }
+                    }}
+                    onToggleSchema={(name) => {
+                      if (selectedSchemas.includes(name)) {
+                        setSelectedSchemas((p) => p.filter((x) => x !== name));
+                        setSelectedTables((p) => p.filter((x) => !x.startsWith(name + '.')));
+                      } else {
+                        setSelectedSchemas((p) => [...p, name]);
+                      }
+                    }}
+                    onToggleTable={(name) => {
+                      if (selectedTables.includes(name)) setSelectedTables((p) => p.filter((x) => x !== name));
+                      else setSelectedTables((p) => [...p, name]);
+                    }}
+                  />
                 )}
 
                 {/* UC Metadata preview — collapsible & scrollable */}
@@ -853,6 +799,107 @@ function GlowSelect({ value, onChange, options }) {
         <option key={o} value={o}>{o}</option>
       ))}
     </select>
+  );
+}
+
+function CatalogTree({ catalogs, schemas, tables, selectedCatalogs, selectedSchemas, selectedTables, loadingCatalogs, loadingSchemas, loadingTables, onToggleCatalog, onToggleSchema, onToggleTable }) {
+  const [expandedCatalogs, setExpandedCatalogs] = useState({});
+  const [expandedSchemas, setExpandedSchemas] = useState({});
+  const [search, setSearch] = useState('');
+
+  const toggleExpand = (key, setter) => setter(prev => ({ ...prev, [key]: !prev[key] }));
+
+  const matchSearch = (name) => !search || name.toLowerCase().includes(search.toLowerCase());
+
+  return (
+    <div className="rounded-lg border border-border bg-bg overflow-hidden">
+      <div className="relative">
+        <Search size={12} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-tertiary" />
+        <input type="text" className="w-full bg-transparent border-b border-border pl-8 pr-3 py-2 text-xs text-text-primary placeholder:text-text-tertiary focus:outline-none" placeholder="Search catalogs, schemas, tables..." value={search} onChange={(e) => setSearch(e.target.value)} />
+      </div>
+      <div className="max-h-64 overflow-y-auto p-1">
+        {loadingCatalogs && <p className="text-[10px] text-text-tertiary p-3 text-center">Loading catalogs...</p>}
+        {!loadingCatalogs && catalogs.length === 0 && <p className="text-[10px] text-text-tertiary p-3 text-center">No catalogs found</p>}
+        {catalogs.filter(c => matchSearch(c.name)).map((cat) => {
+          const catName = cat.name;
+          const catSelected = selectedCatalogs.includes(catName);
+          const isExpanded = expandedCatalogs[catName];
+          const catSchemas = schemas.filter(s => s.full_name && s.full_name.startsWith(catName + '.'));
+
+          return (
+            <div key={catName}>
+              {/* Catalog row */}
+              <div className="flex items-center gap-1 group">
+                <button type="button" onClick={() => { toggleExpand(catName, setExpandedCatalogs); if (!selectedCatalogs.includes(catName)) onToggleCatalog(catName); }} className="p-1 text-text-tertiary hover:text-text-primary">
+                  <ChevronDown size={12} className={`transition-transform duration-150 ${isExpanded ? '' : '-rotate-90'}`} />
+                </button>
+                <button type="button" onClick={() => onToggleCatalog(catName)} className={`flex-1 flex items-center gap-2 px-2 py-1.5 rounded-md text-xs transition-all ${catSelected ? 'bg-db-red-50 text-db-red' : 'text-text-primary hover:bg-bg-subtle'}`}>
+                  <div className={`w-3 h-3 rounded border flex items-center justify-center shrink-0 ${catSelected ? 'bg-db-red border-db-red' : 'border-border-strong'}`}>
+                    {catSelected && <CheckCircle2 size={8} className="text-white" />}
+                  </div>
+                  <Database size={11} className="shrink-0 opacity-50" />
+                  <span className="font-mono font-medium truncate">{catName}</span>
+                </button>
+              </div>
+
+              {/* Schemas under this catalog */}
+              {isExpanded && (
+                <div className="ml-5 border-l border-border/50 pl-1">
+                  {loadingSchemas && catSchemas.length === 0 && <p className="text-[10px] text-text-tertiary py-1 pl-4">Loading schemas...</p>}
+                  {!loadingSchemas && catSchemas.length === 0 && <p className="text-[10px] text-text-tertiary py-1 pl-4">No schemas</p>}
+                  {catSchemas.filter(s => matchSearch(s.name) || matchSearch(s.full_name)).map((sch) => {
+                    const schName = sch.full_name;
+                    const schSelected = selectedSchemas.includes(schName);
+                    const isSchExpanded = expandedSchemas[schName];
+                    const schTables = tables.filter(t => t.full_name && t.full_name.startsWith(schName + '.'));
+
+                    return (
+                      <div key={schName}>
+                        {/* Schema row */}
+                        <div className="flex items-center gap-1">
+                          <button type="button" onClick={() => { toggleExpand(schName, setExpandedSchemas); if (!selectedSchemas.includes(schName)) onToggleSchema(schName); }} className="p-1 text-text-tertiary hover:text-text-primary">
+                            <ChevronDown size={10} className={`transition-transform duration-150 ${isSchExpanded ? '' : '-rotate-90'}`} />
+                          </button>
+                          <button type="button" onClick={() => onToggleSchema(schName)} className={`flex-1 flex items-center gap-2 px-2 py-1 rounded-md text-[11px] transition-all ${schSelected ? 'bg-db-red-50 text-db-red' : 'text-text-primary hover:bg-bg-subtle'}`}>
+                            <div className={`w-2.5 h-2.5 rounded border flex items-center justify-center shrink-0 ${schSelected ? 'bg-db-red border-db-red' : 'border-border-strong'}`}>
+                              {schSelected && <CheckCircle2 size={7} className="text-white" />}
+                            </div>
+                            <Layers size={10} className="shrink-0 opacity-50" />
+                            <span className="font-mono truncate">{sch.name}</span>
+                          </button>
+                        </div>
+
+                        {/* Tables under this schema */}
+                        {isSchExpanded && (
+                          <div className="ml-5 border-l border-border/30 pl-1">
+                            {loadingTables && schTables.length === 0 && <p className="text-[10px] text-text-tertiary py-1 pl-4">Loading tables...</p>}
+                            {!loadingTables && schTables.length === 0 && <p className="text-[10px] text-text-tertiary py-1 pl-4">No tables</p>}
+                            {schTables.filter(t => matchSearch(t.name) || matchSearch(t.full_name)).map((tbl) => {
+                              const tblName = tbl.full_name;
+                              const tblSelected = selectedTables.includes(tblName);
+                              return (
+                                <button key={tblName} type="button" onClick={() => onToggleTable(tblName)} className={`w-full flex items-center gap-2 px-2 py-1 ml-2 rounded-md text-[11px] transition-all ${tblSelected ? 'bg-db-red-50 text-db-red' : 'text-text-primary hover:bg-bg-subtle'}`}>
+                                  <div className={`w-2.5 h-2.5 rounded border flex items-center justify-center shrink-0 ${tblSelected ? 'bg-db-red border-db-red' : 'border-border-strong'}`}>
+                                    {tblSelected && <CheckCircle2 size={7} className="text-white" />}
+                                  </div>
+                                  <FileText size={10} className="shrink-0 opacity-50" />
+                                  <span className="font-mono truncate">{tbl.name}</span>
+                                  {tbl.table_type && <span className="text-[9px] text-text-tertiary ml-auto shrink-0">{tbl.table_type}</span>}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 
