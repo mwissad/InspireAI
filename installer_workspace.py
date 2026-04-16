@@ -144,61 +144,46 @@ if WAREHOUSE_ID:
     stmt = w.statement_execution.execute_statement(warehouse_id=WAREHOUSE_ID, statement=f"CREATE SCHEMA IF NOT EXISTS `{CATALOG}`.`{SCHEMA}`", wait_timeout="30s")
     print(f"Schema: {'✅' if stmt.status and stmt.status.state == StatementState.SUCCEEDED else '⚠️ ' + str(stmt.status)}")
 
-# Notebook — find, publish, and VERIFY it exists in workspace
+# Notebook — find in source folder (Databricks strips .ipynb extension on upload)
 NOTEBOOK_DEST = f"/Shared/{APP_NAME}/dbx_inspire_ai_agent"
 NOTEBOOK_PATH = None
 
-# Find notebook source file
-notebook_candidates = [
-    f"{SOURCE_FOLDER}/dbx_inspire_ai_agent.ipynb",
-    f"{SOURCE_FOLDER}/databricks_inspire_v46.dbc",
-]
-notebook_source = None
-for nb in notebook_candidates:
-    if os.path.exists(nb):
-        notebook_source = nb
-        break
+# The notebook is already in the workspace as part of the uploaded repo.
+# Databricks strips .ipynb extension, so it appears as just "dbx_inspire_ai_agent".
+# Use it directly from the source folder — no need to re-publish.
+notebook_workspace_path = f"{SOURCE_FOLDER}/dbx_inspire_ai_agent"
 
-if not notebook_source:
-    print(f"⚠️  Notebook NOT FOUND in source folder!")
-    print(f"   Looked for:")
-    for nb in notebook_candidates:
-        print(f"     {nb} — {'EXISTS' if os.path.exists(nb) else 'NOT FOUND'}")
-    print(f"   Source folder contents: {os.listdir(SOURCE_FOLDER)[:20]}")
+# Check if it exists as a workspace notebook (no extension)
+if os.path.exists(notebook_workspace_path):
+    NOTEBOOK_PATH = notebook_workspace_path
+    print(f"Notebook: ✅ Found at {NOTEBOOK_PATH}")
+elif os.path.exists(notebook_workspace_path + ".ipynb"):
+    NOTEBOOK_PATH = notebook_workspace_path
+    print(f"Notebook: ✅ Found at {NOTEBOOK_PATH}.ipynb")
 else:
-    print(f"Notebook source: {notebook_source} ({os.path.getsize(notebook_source)} bytes)")
-    with open(notebook_source, "rb") as f:
-        b64 = base64.b64encode(f.read()).decode("utf-8")
-    is_ipynb = notebook_source.endswith(".ipynb")
+    # Try publishing from .ipynb or .dbc file
+    for nb in [notebook_workspace_path + ".ipynb", f"{SOURCE_FOLDER}/databricks_inspire_v46.dbc"]:
+        if os.path.exists(nb):
+            print(f"Publishing {nb}...")
+            with open(nb, "rb") as f:
+                b64 = base64.b64encode(f.read()).decode("utf-8")
+            is_ipynb = nb.endswith(".ipynb")
+            try: api("POST", "/api/2.0/workspace/mkdirs", {"path": f"/Shared/{APP_NAME}"})
+            except: pass
+            payload = {"path": NOTEBOOK_DEST, "format": "JUPYTER" if is_ipynb else "DBC", "content": b64, "overwrite": True}
+            if is_ipynb: payload["language"] = "PYTHON"
+            resp = api("POST", "/api/2.0/workspace/import", payload)
+            if resp.status_code in (200, 201):
+                NOTEBOOK_PATH = NOTEBOOK_DEST
+                print(f"Notebook published: ✅ {NOTEBOOK_PATH}")
+            else:
+                print(f"Notebook publish: ⚠️ {resp.status_code} {resp.text[:200]}")
+            break
 
-    # Create folder + delete old
-    try: api("POST", "/api/2.0/workspace/mkdirs", {"path": f"/Shared/{APP_NAME}"})
-    except: pass
-    try: api("POST", "/api/2.0/workspace/delete", {"path": NOTEBOOK_DEST})
-    except: pass
+    if not NOTEBOOK_PATH:
+        print(f"⚠️ Notebook not found. Source folder: {os.listdir(SOURCE_FOLDER)[:20]}")
 
-    # Import
-    payload = {"path": NOTEBOOK_DEST, "format": "JUPYTER" if is_ipynb else "DBC", "content": b64, "overwrite": True}
-    if is_ipynb: payload["language"] = "PYTHON"
-    resp = api("POST", "/api/2.0/workspace/import", payload)
-    if resp.status_code in (200, 201):
-        NOTEBOOK_PATH = NOTEBOOK_DEST
-        print(f"Notebook published: ✅ {NOTEBOOK_PATH}")
-    else:
-        print(f"Notebook publish: ⚠️ {resp.status_code} {resp.text[:300]}")
-
-    # VERIFY it exists in workspace
-    try:
-        verify = api("GET", f"/api/2.0/workspace/get-status?path={requests.utils.quote(NOTEBOOK_DEST)}")
-        if verify.status_code == 200:
-            vdata = verify.json()
-            print(f"Notebook verified: ✅ {vdata.get('object_type')} at {vdata.get('path')}")
-        else:
-            print(f"Notebook verify: ⚠️ {verify.status_code} — notebook may not be accessible")
-    except Exception as e:
-        print(f"Notebook verify: ⚠️ {e}")
-
-assert NOTEBOOK_PATH, "❌ CRITICAL: Notebook was not published. Cannot deploy without it."
+assert NOTEBOOK_PATH, "❌ Notebook not found. Ensure dbx_inspire_ai_agent.ipynb is in the repo."
 print(f"NOTEBOOK_PATH = {NOTEBOOK_PATH}")
 
 # COMMAND ----------
