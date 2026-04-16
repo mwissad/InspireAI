@@ -135,151 +135,109 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 
 //  Helpers
 // ═══════════════════════════════════════════════════
 
-// Refresh SP token using client_credentials OAuth2 flow
-// Works with both runtime-injected credentials (DATABRICKS_CLIENT_ID/SECRET)
-// and installer-injected credentials (SP_CLIENT_ID/SECRET).
-let spTokenRefreshPromise = null; // mutex: only one refresh at a time
-async function ensureSpToken() {
-  // Already have a valid cached token?
-  if (spTokenCache && Date.now() < spTokenExpiry) return spTokenCache;
-  // No credentials? Can't refresh.
-  if (!SP_CLIENT_ID || !SP_CLIENT_SECRET) return SERVICE_TOKEN || '';
-  // Another refresh already in progress? Wait for it.
-  if (spTokenRefreshPromise) return spTokenRefreshPromise;
-
+// ── SP Token Management ──
+// Refresh token using client_credentials OAuth2 flow.
+// Called once on startup and then on a timer before expiry.
+// All request handling is SYNCHRONOUS — no async middleware.
+async function refreshSpToken() {
+  if (!SP_CLIENT_ID || !SP_CLIENT_SECRET) return;
   let host = DATABRICKS_HOST || '';
   if (host && !host.startsWith('http')) host = `https://${host}`;
-  if (!host) return SERVICE_TOKEN || '';
-
-  // Start refresh and store the promise so concurrent callers wait for the same result
-  spTokenRefreshPromise = (async () => {
-    try {
-      console.log(`🔑 Refreshing SP OAuth token (client_id: ${SP_CLIENT_ID.slice(0, 8)}...)...`);
-      const resp = await fetch(`${host}/oidc/v1/token`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({
-          grant_type: 'client_credentials',
-          client_id: SP_CLIENT_ID,
-          client_secret: SP_CLIENT_SECRET,
-          scope: 'all-apis',
-        }),
-      });
-      if (resp.ok) {
-        const data = await resp.json();
-        spTokenCache = data.access_token || '';
-        const expiresIn = (data.expires_in || 3600) - 300;
-        spTokenExpiry = Date.now() + expiresIn * 1000;
-        console.log(`🔑 SP token refreshed (expires in ${data.expires_in}s)`);
-        return spTokenCache;
-      } else {
-        console.error(`🔑 SP token refresh failed (${resp.status}): ${await resp.text()}`);
-      }
-    } catch (err) {
-      console.error('🔑 SP token refresh error:', err.message);
-    }
-    return spTokenCache || SERVICE_TOKEN || '';
-  })();
+  if (!host) return;
 
   try {
-    return await spTokenRefreshPromise;
-  } finally {
-    spTokenRefreshPromise = null;
+    console.log(`🔑 Refreshing SP OAuth token...`);
+    const resp = await fetch(`${host}/oidc/v1/token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'client_credentials',
+        client_id: SP_CLIENT_ID,
+        client_secret: SP_CLIENT_SECRET,
+        scope: 'all-apis',
+      }),
+    });
+    if (resp.ok) {
+      const data = await resp.json();
+      spTokenCache = data.access_token || '';
+      const expiresIn = data.expires_in || 3600;
+      spTokenExpiry = Date.now() + expiresIn * 1000;
+      console.log(`🔑 SP token ready (expires in ${expiresIn}s)`);
+      // Schedule next refresh 5 minutes before expiry
+      const refreshIn = Math.max((expiresIn - 300) * 1000, 60000);
+      setTimeout(refreshSpToken, refreshIn);
+    } else {
+      const errText = await resp.text();
+      console.error(`🔑 SP token refresh failed (${resp.status}): ${errText}`);
+      // Retry in 30 seconds
+      setTimeout(refreshSpToken, 30000);
+    }
+  } catch (err) {
+    console.error('🔑 SP token refresh error:', err.message);
+    setTimeout(refreshSpToken, 30000);
   }
 }
 
 function resolveHost(req) {
-  // Priority: 1) per-request header  2) env var
   let host = req.headers['x-databricks-host'] || DATABRICKS_HOST || '';
-  // Normalize: ensure https:// prefix and no trailing slash
   host = host.replace(/\/+$/, '');
   if (host && !host.startsWith('http')) host = `https://${host}`;
   return host || null;
 }
 
 async function dbFetch(host, token, apiPath, options = {}) {
-  if (!host) throw new Error('Databricks host not configured. Set DATABRICKS_HOST or provide it in Settings.');
+  if (!host) throw new Error('Databricks host not configured.');
   const url = `${host}${apiPath}`;
-  try {
-    const resp = await fetch(url, {
-      ...options,
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json',
-        ...options.headers,
-      },
-    });
-    if (!resp.ok && resp.status === 401) {
-      const tokenPreview = token ? `${token.slice(0, 4)}...${token.slice(-4)} (len=${token.length})` : 'MISSING';
-      console.error(`   🔑 Token debug: ${tokenPreview}, Host: ${host}, API: ${apiPath}`);
-    }
-    return resp;
-  } catch (err) {
-    console.error(`❌ Fetch failed for ${apiPath}:`, err.message);
-    throw new Error(`Network error calling Databricks API (${apiPath}): ${err.message}`);
-  }
+  const resp = await fetch(url, {
+    ...options,
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+  return resp;
 }
 
-function getTokenSync(req) {
-  // 1) Custom PAT from frontend (local dev / manual config)
-  const customToken = req.headers['x-db-pat-token'];
-  if (customToken) return customToken;
+// Synchronous token resolution — uses pre-warmed cached token.
+function getToken(req) {
+  // 1) Explicit PAT from frontend header
+  const pat = req.headers['x-db-pat-token'];
+  if (pat) return pat;
 
-  // 2) Standard Authorization header (local dev)
+  // 2) Authorization Bearer header
   const auth = req.headers.authorization;
   if (auth && auth.startsWith('Bearer ')) {
     const bearer = auth.slice(7).trim();
     if (bearer) return bearer;
   }
 
-  // 3) User's token from Databricks App proxy (on-behalf-of user)
-  //    Preferred for user-facing ops (catalog browsing, table listing)
-  //    because it reflects the user's own Unity Catalog permissions.
+  // 3) User's token from Databricks App proxy
   const forwarded = req.headers['x-forwarded-access-token'];
   if (forwarded) {
     const clean = forwarded.startsWith('Bearer ') ? forwarded.slice(7).trim() : forwarded.trim();
     if (clean) return clean;
   }
 
-  // 4) Static service token from env (DATABRICKS_TOKEN)
+  // 4) Static DATABRICKS_TOKEN from env
   if (SERVICE_TOKEN) return SERVICE_TOKEN;
 
-  // 5) Cached SP OAuth token (from client_credentials refresh)
-  if (spTokenCache && Date.now() < spTokenExpiry) return spTokenCache;
+  // 5) Pre-warmed SP OAuth token (refreshed on timer)
+  if (spTokenCache) return spTokenCache;
 
   return null;
 }
 
-// Async version — tries to refresh SP token via OAuth if no other token found
-async function getToken(req) {
-  const sync = getTokenSync(req);
-  if (sync) return sync;
-
-  // No user or static token — try generating one from SP credentials
-  if (SP_CLIENT_ID && SP_CLIENT_SECRET) {
-    const freshToken = await ensureSpToken();
-    if (freshToken) return freshToken;
-  }
-
-  return null;
-}
-
-async function requireToken(req, res, next) {
-  const token = await getToken(req);
+function requireToken(req, res, next) {
+  const token = getToken(req);
   if (!token) {
-    console.error(`   🔒 Auth failed for ${req.method} ${req.path} — no token found.`);
-    console.error(`      x-forwarded-access-token: ${req.headers['x-forwarded-access-token'] ? 'present' : 'MISSING'}`);
-    console.error(`      x-db-pat-token: ${req.headers['x-db-pat-token'] ? 'present' : 'MISSING'}`);
-    console.error(`      authorization: ${req.headers['authorization'] ? 'present' : 'MISSING'}`);
-    console.error(`      DATABRICKS_TOKEN env: ${SERVICE_TOKEN ? 'present' : 'MISSING'}`);
-    console.error(`      SP_CLIENT_ID: ${SP_CLIENT_ID ? 'set' : 'MISSING'}`);
-    return res.status(401).json({ error: 'Databricks token required. Configure DATABRICKS_TOKEN or SP_CLIENT_ID/SP_CLIENT_SECRET.' });
+    console.error(`🔒 No token for ${req.method} ${req.path} | forwarded=${!!req.headers['x-forwarded-access-token']} spCache=${!!spTokenCache} serviceToken=${!!SERVICE_TOKEN}`);
+    return res.status(401).json({ error: 'No authentication token available.' });
   }
   req.dbToken = token;
   req.dbHost = resolveHost(req);
   if (!req.dbHost) {
-    console.error(`   🌐 Host not resolved for ${req.method} ${req.path}`);
-    return res.status(400).json({ error: 'Databricks host not configured. Set DATABRICKS_HOST.' });
+    return res.status(400).json({ error: 'Databricks host not configured.' });
   }
   next();
 }
@@ -607,7 +565,7 @@ app.get('/api/workspace/export', requireToken, async (req, res) => {
 // Debug: check what auth headers the proxy sends (call from browser console: fetch('/api/debug/auth').then(r=>r.json()).then(console.log))
 app.get('/api/debug/auth', async (req, res) => {
   const forwarded = req.headers['x-forwarded-access-token'] || '';
-  const token = await getToken(req);
+  const token = getToken(req);
   let testResult = null;
 
   // If we got a token, test it against the catalogs API
@@ -648,7 +606,7 @@ app.get('/api/health', (req, res) => {
   const hasBundledNotebook = fs.existsSync(BUNDLED_NOTEBOOK_PATH);
   const host = resolveHost(req);
   const forwardedToken = req.headers['x-forwarded-access-token'] || '';
-  const syncToken = getTokenSync(req);
+  const syncToken = getToken(req);
   res.json({
     status: 'ok',
     host: host ? host.replace(/https?:\/\//, '').split('.')[0] + '...' : 'not configured',
@@ -660,7 +618,7 @@ app.get('/api/health', (req, res) => {
     isDatabricksApp: !!forwardedToken || !!DATABRICKS_HOST,
     hasForwardedToken: !!forwardedToken,
     forwardedTokenPreview: forwardedToken ? `${forwardedToken.slice(0, 8)}...${forwardedToken.slice(-4)} (len=${forwardedToken.length})` : 'NONE',
-    resolvedTokenSource: syncToken === SERVICE_TOKEN && SERVICE_TOKEN ? 'DATABRICKS_TOKEN' : syncToken === spTokenCache && spTokenCache ? 'SP_OAUTH_CACHE' : forwardedToken && syncToken ? 'x-forwarded-access-token' : syncToken ? 'header' : SP_CLIENT_ID ? 'SP_OAUTH (will refresh on first API call)' : 'NONE',
+    resolvedTokenSource: syncToken === SERVICE_TOKEN && SERVICE_TOKEN ? 'DATABRICKS_TOKEN' : syncToken === spTokenCache && spTokenCache ? 'SP_OAUTH' : forwardedToken && syncToken ? 'x-forwarded-access-token' : syncToken ? 'header' : 'NONE',
     hasSpCredentials: !!(SP_CLIENT_ID && SP_CLIENT_SECRET),
     spTokenCached: !!(spTokenCache && Date.now() < spTokenExpiry),
     envVars: {
@@ -1840,27 +1798,27 @@ if (fs.existsSync(STATIC_DIR)) {
 //  Start server
 // ═══════════════════════════════════════════════════
 
+// ── Start server ──
+// Pre-warm SP token BEFORE listening so the first request already has a valid token.
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, async () => {
-  const hasNotebook = fs.existsSync(BUNDLED_NOTEBOOK_PATH);
-  const servingStatic = fs.existsSync(STATIC_DIR);
-  console.log(`\n🚀 Inspire AI running on http://localhost:${PORT}`);
-  console.log(`   Databricks Host: ${DATABRICKS_HOST || '⚠️  Not configured — set DATABRICKS_HOST'}`);
-  console.log(`   Service Token:   ${SERVICE_TOKEN ? '✅ Configured' : '—  (users must provide PAT)'}`);
-  console.log(`   SP Credentials:  ${SP_CLIENT_ID && SP_CLIENT_SECRET ? '✅ Set (will generate OAuth token)' : '—  Not configured'}`);
-  console.log(`   Bundled DBC:     ${hasNotebook ? '✅ Found' : '❌ Not found'}`);
-  console.log(`   Static Frontend: ${servingStatic ? '✅ Serving from ' + STATIC_DIR : '—  (dev proxy mode)'}`);
-  console.log(`   Default Notebook: ${DEFAULT_NOTEBOOK_PATH || '(publish via UI)'}`);
-  console.log(`   MCP Server:      ✅ SSE at /mcp/sse  |  API docs at /api-docs`);
 
-  // Pre-warm SP token so the first API request doesn't have to wait
+(async () => {
+  // Pre-warm SP OAuth token before accepting any requests
   if (SP_CLIENT_ID && SP_CLIENT_SECRET && !SERVICE_TOKEN) {
-    const token = await ensureSpToken();
-    if (token) {
-      console.log(`   🔑 SP OAuth:     ✅ Token pre-warmed (ready for requests)`);
-    } else {
-      console.log(`   🔑 SP OAuth:     ❌ Pre-warm failed (will retry on first request)`);
-    }
+    await refreshSpToken();
   }
-  console.log('');
-});
+
+  app.listen(PORT, () => {
+    const hasNotebook = fs.existsSync(BUNDLED_NOTEBOOK_PATH);
+    const servingStatic = fs.existsSync(STATIC_DIR);
+    console.log(`\n🚀 Inspire AI running on http://localhost:${PORT}`);
+    console.log(`   Databricks Host: ${DATABRICKS_HOST || '⚠️  Not configured'}`);
+    console.log(`   Auth:            ${spTokenCache ? '✅ SP OAuth token ready' : SERVICE_TOKEN ? '✅ Static token' : '⚠️  No token (user auth required)'}`);
+    console.log(`   SP Credentials:  ${SP_CLIENT_ID ? '✅ Set' : '—  Not configured'}`);
+    console.log(`   Notebook:        ${hasNotebook ? '✅ Found' : '❌ Not found'}`);
+    console.log(`   Frontend:        ${servingStatic ? '✅ ' + STATIC_DIR : '—  (dev proxy mode)'}`);
+    console.log(`   Warehouse:       ${DEFAULT_WAREHOUSE_ID || '—  Not configured'}`);
+    console.log(`   Database:        ${DEFAULT_INSPIRE_DB || '—  Not configured'}`);
+    console.log(`   MCP:             ✅ SSE at /mcp/sse\n`);
+  });
+})();
