@@ -195,9 +195,13 @@ if notebook_source:
     is_ipynb = notebook_source.endswith(".ipynb")
     import_format = "JUPYTER" if is_ipynb else "DBC"
 
-    # Delete old if exists
+    # Create parent folder and delete old notebook if exists
     try:
-        api_post("/api/2.0/workspace/delete", {"path": f"/Shared/{APP_NAME}", "recursive": True})
+        api_post("/api/2.0/workspace/mkdirs", {"path": f"/Shared/{APP_NAME}"})
+    except Exception:
+        pass
+    try:
+        api_post("/api/2.0/workspace/delete", {"path": NOTEBOOK_DEST, "recursive": False})
     except Exception:
         pass
 
