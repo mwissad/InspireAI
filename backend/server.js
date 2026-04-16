@@ -1286,14 +1286,15 @@ app.get('/api/inspire/session', requireToken, async (req, res) => {
     const [catalog, schema] = inspire_database.split('.');
     const table = `\`${catalog}\`.\`${schema}\`.\`__inspire_session\``;
 
-    // v47: widget_values is a single VARIANT/JSON column
-    const baseCols = `session_id, widget_values, processing_status, completed_percent, create_at, last_updated, completed_on, inspire_json, results_json`;
+    // Notebook uses individual widget columns (not a single widget_values VARIANT)
+    const widgetCols = `business_name, inspire_database_name, operation_mode, table_election_mode, use_cases_quality, strategic_goals, business_priorities, business_domains, catalogs, schemas_str, tables_str, generate_choices, generation_path, output_language, sql_generation_per_domain, technical_exclusion_strategy, json_file_path`;
+    const baseCols = `session_id, processing_status, completed_percent, create_at, last_updated, completed_on, inspire_json, results_json`;
 
     let sql;
     if (session_id) {
-      sql = `SELECT ${baseCols} FROM ${table} WHERE session_id = ${session_id} LIMIT 1`;
+      sql = `SELECT ${baseCols}, ${widgetCols} FROM ${table} WHERE session_id = ${session_id} LIMIT 1`;
     } else {
-      sql = `SELECT ${baseCols} FROM ${table} ORDER BY create_at DESC LIMIT 1`;
+      sql = `SELECT ${baseCols}, ${widgetCols} FROM ${table} ORDER BY create_at DESC LIMIT 1`;
     }
 
     const result = await executeSql(req.dbHost, req.dbToken, warehouse_id, sql);
@@ -1305,12 +1306,24 @@ app.get('/api/inspire/session', requireToken, async (req, res) => {
 
     const session = rows[0];
 
-    // Parse widget_values VARIANT field
-    if (session.widget_values && typeof session.widget_values === 'string') {
-      try { session.widget_values = JSON.parse(session.widget_values); } catch { session.widget_values = {}; }
-    } else if (!session.widget_values || typeof session.widget_values !== 'object') {
-      session.widget_values = {};
-    }
+    // Reconstruct widget_values from individual columns for frontend compatibility
+    session.widget_values = {
+      business: session.business_name || '',
+      '00_business_name': session.business_name || '',
+      inspire_database: session.inspire_database_name || '',
+      operation_mode: session.operation_mode || '',
+      table_election_mode: session.table_election_mode || '',
+      use_cases_quality: session.use_cases_quality || '',
+      strategic_goals: session.strategic_goals || '',
+      business_priorities: session.business_priorities || '',
+      business_domains: session.business_domains || '',
+      catalogs: session.catalogs || '',
+      schemas: session.schemas_str || '',
+      tables: session.tables_str || '',
+      generate: session.generate_choices || '',
+      generation_path: session.generation_path || '',
+      output_language: session.output_language || '',
+    };
 
     // Parse VARIANT fields (may come as object or string)
     for (const field of ['inspire_json', 'results_json']) {
@@ -1558,16 +1571,9 @@ app.get('/api/inspire/usecases', requireToken, async (req, res) => {
     }
     const [catalog, schema] = inspire_database.split('.');
     const table = `\`${catalog}\`.\`${schema}\`.\`__inspire_usecases\``;
-    // v47 schema: session_id, id, use_case, short_name, updated_at
-    const sql = `SELECT session_id, id, use_case, short_name, updated_at FROM ${table} WHERE session_id = ${session_id} ORDER BY id`;
+    const sql = `SELECT * FROM ${table} WHERE session_id = ${session_id} ORDER BY id`;
     const result = await executeSql(req.dbHost, req.dbToken, warehouse_id, sql);
     const rows = sqlResultToObjects(result);
-    // Normalize for frontend compatibility
-    for (const row of rows) {
-      row.No = row.id || '';
-      row.Name = row.use_case || '';
-      row.short_name = row.short_name || '';
-    }
     console.log(`   📋 usecases: ${rows.length} rows for session ${session_id}`);
     res.json({ usecases: rows, count: rows.length });
   } catch (err) {
@@ -1657,20 +1663,21 @@ app.get('/api/inspire/sessions', requireToken, async (req, res) => {
 
     const [catalog, schema] = inspire_database.split('.');
     const table = `\`${catalog}\`.\`${schema}\`.\`__inspire_session\``;
-    const sql = `SELECT session_id, widget_values, processing_status, completed_percent, create_at, completed_on, results_json FROM ${table} ORDER BY create_at DESC LIMIT 20`;
+    const sql = `SELECT session_id, processing_status, completed_percent, create_at, completed_on, business_name, inspire_database_name, operation_mode, generation_path, business_domains, catalogs, results_json FROM ${table} ORDER BY create_at DESC LIMIT 20`;
 
     const result = await executeSql(req.dbHost, req.dbToken, warehouse_id, sql);
     const sessions = sqlResultToObjects(result);
 
     for (const s of sessions) {
-      // Parse widget_values VARIANT field
-      if (s.widget_values && typeof s.widget_values === 'string') {
-        try { s.widget_values = JSON.parse(s.widget_values); } catch { s.widget_values = {}; }
-      } else if (!s.widget_values || typeof s.widget_values !== 'object') {
-        s.widget_values = {};
-      }
+      // Reconstruct widget_values from individual columns
+      s.widget_values = {
+        business: s.business_name || '',
+        '00_business_name': s.business_name || '',
+        inspire_database: s.inspire_database_name || '',
+        operation_mode: s.operation_mode || '',
+        generation_path: s.generation_path || '',
+      };
       s.completed_percent = parseFloat(s.completed_percent) || 0;
-      // Parse results_json for session summary
       if (s.results_json && typeof s.results_json === 'string') {
         try { s.results_json = JSON.parse(s.results_json); } catch { s.results_json = null; }
       }
