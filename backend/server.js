@@ -593,6 +593,46 @@ app.get('/api/workspace/export', requireToken, async (req, res) => {
 //  Basic endpoints
 // ═══════════════════════════════════════════════════
 
+// Debug: check what auth headers the proxy sends (call from browser console: fetch('/api/debug/auth').then(r=>r.json()).then(console.log))
+app.get('/api/debug/auth', async (req, res) => {
+  const forwarded = req.headers['x-forwarded-access-token'] || '';
+  const token = await getToken(req);
+  let testResult = null;
+
+  // If we got a token, test it against the catalogs API
+  if (token) {
+    try {
+      const host = resolveHost(req);
+      const testResp = await fetch(`${host}/api/2.1/unity-catalog/catalogs`, {
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+      });
+      testResult = { status: testResp.status, ok: testResp.ok };
+      if (testResp.ok) {
+        const data = await testResp.json();
+        testResult.catalogCount = (data.catalogs || []).length;
+        testResult.catalogNames = (data.catalogs || []).map(c => c.name).slice(0, 10);
+      } else {
+        testResult.error = (await testResp.text()).slice(0, 200);
+      }
+    } catch (err) {
+      testResult = { error: err.message };
+    }
+  }
+
+  res.json({
+    headers: {
+      'x-forwarded-access-token': forwarded ? `present (len=${forwarded.length}, starts=${forwarded.slice(0, 12)}...)` : 'MISSING',
+      'x-db-pat-token': req.headers['x-db-pat-token'] ? 'present' : 'MISSING',
+      'authorization': req.headers['authorization'] ? `present (${req.headers['authorization'].slice(0, 20)}...)` : 'MISSING',
+    },
+    tokenSource: !token ? 'NONE' : forwarded && token === forwarded.trim() ? 'x-forwarded-access-token' : token === SERVICE_TOKEN ? 'SERVICE_TOKEN' : spTokenCache && token === spTokenCache ? 'SP_OAUTH' : 'other',
+    hasToken: !!token,
+    host: resolveHost(req),
+    spCredentials: { clientId: SP_CLIENT_ID ? 'set' : 'MISSING', clientSecret: SP_CLIENT_SECRET ? 'set' : 'MISSING' },
+    catalogTest: testResult,
+  });
+});
+
 app.get('/api/health', (req, res) => {
   const hasBundledNotebook = fs.existsSync(BUNDLED_NOTEBOOK_PATH);
   const host = resolveHost(req);
