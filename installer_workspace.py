@@ -14,6 +14,10 @@
 
 # COMMAND ----------
 
+# MAGIC %pip install pyyaml -q
+
+# COMMAND ----------
+
 import os, time, json, requests, base64
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.sql import StatementState
