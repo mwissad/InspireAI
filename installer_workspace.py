@@ -283,15 +283,29 @@ except Exception:
 
 # Grant SP permissions on catalog/schema
 if SP_ID:
-    # Grant USE CATALOG
+    # Grant BROWSE + USE CATALOG on the selected catalog
     try:
         resp = api_post("/api/2.1/unity-catalog/permissions/catalog/" + CATALOG, {
-            "changes": [{"principal": SP_NAME, "add": ["USE_CATALOG"]}]
+            "changes": [{"principal": SP_NAME, "add": ["USE_CATALOG", "BROWSE"]}]
         })
         if resp.status_code == 200:
-            print(f"  Granted USE_CATALOG on '{CATALOG}' to {SP_NAME}")
+            print(f"  Granted USE_CATALOG + BROWSE on '{CATALOG}' to {SP_NAME}")
+        else:
+            print(f"  Warning: Catalog permission grant returned {resp.status_code}: {resp.text[:200]}")
     except Exception as e:
         print(f"  Warning: Could not grant USE_CATALOG: {e}")
+
+    # Also grant BROWSE on ALL catalogs so the SP can list them for the catalog browser
+    try:
+        for cat in available_catalogs:
+            if cat != CATALOG:
+                resp = api_post("/api/2.1/unity-catalog/permissions/catalog/" + cat, {
+                    "changes": [{"principal": SP_NAME, "add": ["BROWSE"]}]
+                })
+                if resp.status_code == 200:
+                    print(f"  Granted BROWSE on '{cat}' to {SP_NAME}")
+    except Exception as e:
+        print(f"  Warning: Could not grant BROWSE on other catalogs: {e}")
 
     # Grant USE/CREATE on schema
     try:

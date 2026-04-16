@@ -138,43 +138,54 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 
 // Refresh SP token using client_credentials OAuth2 flow
 // Works with both runtime-injected credentials (DATABRICKS_CLIENT_ID/SECRET)
 // and installer-injected credentials (SP_CLIENT_ID/SECRET).
+let spTokenRefreshPromise = null; // mutex: only one refresh at a time
 async function ensureSpToken() {
   // Already have a valid cached token?
   if (spTokenCache && Date.now() < spTokenExpiry) return spTokenCache;
   // No credentials? Can't refresh.
   if (!SP_CLIENT_ID || !SP_CLIENT_SECRET) return SERVICE_TOKEN || '';
+  // Another refresh already in progress? Wait for it.
+  if (spTokenRefreshPromise) return spTokenRefreshPromise;
 
   let host = DATABRICKS_HOST || '';
   if (host && !host.startsWith('http')) host = `https://${host}`;
   if (!host) return SERVICE_TOKEN || '';
 
-  try {
-    console.log(`🔑 Refreshing SP OAuth token (client_id: ${SP_CLIENT_ID.slice(0, 8)}...)...`);
-    const resp = await fetch(`${host}/oidc/v1/token`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        grant_type: 'client_credentials',
-        client_id: SP_CLIENT_ID,
-        client_secret: SP_CLIENT_SECRET,
-        scope: 'all-apis',
-      }),
-    });
-    if (resp.ok) {
-      const data = await resp.json();
-      spTokenCache = data.access_token || '';
-      // Expire 5 minutes before actual expiry to avoid edge cases
-      const expiresIn = (data.expires_in || 3600) - 300;
-      spTokenExpiry = Date.now() + expiresIn * 1000;
-      console.log(`🔑 SP token refreshed (expires in ${data.expires_in}s)`);
-      return spTokenCache;
-    } else {
-      console.error(`🔑 SP token refresh failed (${resp.status}): ${await resp.text()}`);
+  // Start refresh and store the promise so concurrent callers wait for the same result
+  spTokenRefreshPromise = (async () => {
+    try {
+      console.log(`🔑 Refreshing SP OAuth token (client_id: ${SP_CLIENT_ID.slice(0, 8)}...)...`);
+      const resp = await fetch(`${host}/oidc/v1/token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          grant_type: 'client_credentials',
+          client_id: SP_CLIENT_ID,
+          client_secret: SP_CLIENT_SECRET,
+          scope: 'all-apis',
+        }),
+      });
+      if (resp.ok) {
+        const data = await resp.json();
+        spTokenCache = data.access_token || '';
+        const expiresIn = (data.expires_in || 3600) - 300;
+        spTokenExpiry = Date.now() + expiresIn * 1000;
+        console.log(`🔑 SP token refreshed (expires in ${data.expires_in}s)`);
+        return spTokenCache;
+      } else {
+        console.error(`🔑 SP token refresh failed (${resp.status}): ${await resp.text()}`);
+      }
+    } catch (err) {
+      console.error('🔑 SP token refresh error:', err.message);
     }
-  } catch (err) {
-    console.error('🔑 SP token refresh error:', err.message);
+    return spTokenCache || SERVICE_TOKEN || '';
+  })();
+
+  try {
+    return await spTokenRefreshPromise;
+  } finally {
+    spTokenRefreshPromise = null;
   }
-  return SERVICE_TOKEN || '';
 }
 
 function resolveHost(req) {
@@ -1830,14 +1841,26 @@ if (fs.existsSync(STATIC_DIR)) {
 // ═══════════════════════════════════════════════════
 
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   const hasNotebook = fs.existsSync(BUNDLED_NOTEBOOK_PATH);
   const servingStatic = fs.existsSync(STATIC_DIR);
   console.log(`\n🚀 Inspire AI running on http://localhost:${PORT}`);
   console.log(`   Databricks Host: ${DATABRICKS_HOST || '⚠️  Not configured — set DATABRICKS_HOST'}`);
   console.log(`   Service Token:   ${SERVICE_TOKEN ? '✅ Configured' : '—  (users must provide PAT)'}`);
+  console.log(`   SP Credentials:  ${SP_CLIENT_ID && SP_CLIENT_SECRET ? '✅ Set (will generate OAuth token)' : '—  Not configured'}`);
   console.log(`   Bundled DBC:     ${hasNotebook ? '✅ Found' : '❌ Not found'}`);
   console.log(`   Static Frontend: ${servingStatic ? '✅ Serving from ' + STATIC_DIR : '—  (dev proxy mode)'}`);
   console.log(`   Default Notebook: ${DEFAULT_NOTEBOOK_PATH || '(publish via UI)'}`);
-  console.log(`   MCP Server:      ✅ SSE at /mcp/sse  |  API docs at /api-docs\n`);
+  console.log(`   MCP Server:      ✅ SSE at /mcp/sse  |  API docs at /api-docs`);
+
+  // Pre-warm SP token so the first API request doesn't have to wait
+  if (SP_CLIENT_ID && SP_CLIENT_SECRET && !SERVICE_TOKEN) {
+    const token = await ensureSpToken();
+    if (token) {
+      console.log(`   🔑 SP OAuth:     ✅ Token pre-warmed (ready for requests)`);
+    } else {
+      console.log(`   🔑 SP OAuth:     ❌ Pre-warm failed (will retry on first request)`);
+    }
+  }
+  console.log('');
 });
