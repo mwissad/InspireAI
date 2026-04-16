@@ -1092,10 +1092,12 @@ app.post('/api/run', requireToken, async (req, res) => {
     const { params, cluster_id, notebook_path, warehouse_id } = req.body;
 
     let resolvedPath = notebook_path || DEFAULT_NOTEBOOK_PATH;
+    console.log(`📓 Notebook resolution: frontend="${notebook_path || ''}", env="${DEFAULT_NOTEBOOK_PATH}", resolved="${resolvedPath}"`);
     if (!resolvedPath) {
       // Auto-publish seamlessly
       try {
         resolvedPath = await ensureNotebookPublished(req.dbHost, req.dbToken);
+        console.log(`📓 Auto-published: ${resolvedPath}`);
       } catch (pubErr) {
         return res.status(400).json({ error: `Could not auto-publish notebook: ${pubErr.message}` });
       }
@@ -1198,8 +1200,8 @@ app.post('/api/run', requireToken, async (req, res) => {
     }
 
     const data = await response.json();
-    console.log(`✅ Run submitted: ${data.run_id}`);
-    res.json({ run_id: data.run_id });
+    console.log(`✅ Run submitted: ${data.run_id}, notebook: ${resolvedPath}`);
+    res.json({ run_id: data.run_id, notebook_path: resolvedPath });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
