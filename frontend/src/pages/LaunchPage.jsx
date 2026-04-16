@@ -186,47 +186,55 @@ export default function LaunchPage({ settings, update, onLaunched }) {
     return () => { cancelled = true; };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Load schemas when catalogs change
+  // Load schemas when catalogs selected — plain fetch, no token dependency
   useEffect(() => {
     if (selectedCatalogs.length === 0) { setSchemas([]); return; }
+    let cancelled = false;
     setLoadingSchemas(true);
     Promise.all(
       selectedCatalogs.map((cat) =>
-        apiFetch(`/api/catalogs/${encodeURIComponent(cat)}/schemas`)
-          .then((d) => d.schemas || [])
+        fetch(`/api/catalogs/${encodeURIComponent(cat)}/schemas`)
+          .then(r => r.ok ? r.json() : { schemas: [] })
+          .then(d => d.schemas || [])
           .catch(() => [])
       )
-    )
-      .then((r) => setSchemas(r.flat()))
-      .finally(() => setLoadingSchemas(false));
-  }, [selectedCatalogs, apiFetch]);
+    ).then((r) => {
+      if (!cancelled) {
+        const all = r.flat();
+        console.log(`[schemas] loaded ${all.length} for ${selectedCatalogs.join(',')}`);
+        setSchemas(all);
+      }
+    }).finally(() => { if (!cancelled) setLoadingSchemas(false); });
+    return () => { cancelled = true; };
+  }, [selectedCatalogs]);
 
-  // Load tables when selectedSchemas changes
+  // Load tables when schemas selected — plain fetch, no token dependency
   useEffect(() => {
     if (selectedSchemas.length === 0) { setTables([]); return; }
+    let cancelled = false;
     setLoadingTables(true);
     Promise.all(
       selectedSchemas.map((schemaFullName) => {
-        const parts = schemaFullName.split('.');
-        const catalog = parts[0];
-        const schema = parts[1];
-        return apiFetch(`/api/tables/${encodeURIComponent(catalog)}/${encodeURIComponent(schema)}`)
-          .then((d) => (d.tables || []).map((t) => ({
+        const [catalog, schema] = schemaFullName.split('.');
+        return fetch(`/api/tables/${encodeURIComponent(catalog)}/${encodeURIComponent(schema)}`)
+          .then(r => r.ok ? r.json() : { tables: [] })
+          .then(d => (d.tables || []).map(t => ({
             ...t,
             full_name: t.full_name || `${catalog}.${schema}.${t.name}`,
           })))
           .catch(() => []);
       })
-    )
-      .then((r) => {
+    ).then((r) => {
+      if (!cancelled) {
         const allTables = r.flat();
+        console.log(`[tables] loaded ${allTables.length} for ${selectedSchemas.join(',')}`);
         setTables(allTables);
-        // Remove selected tables that are no longer in available tables
-        const availableNames = new Set(allTables.map((t) => t.full_name));
-        setSelectedTables((prev) => prev.filter((t) => availableNames.has(t)));
-      })
-      .finally(() => setLoadingTables(false));
-  }, [selectedSchemas, apiFetch]);
+        const availableNames = new Set(allTables.map(t => t.full_name));
+        setSelectedTables(prev => prev.filter(t => availableNames.has(t)));
+      }
+    }).finally(() => { if (!cancelled) setLoadingTables(false); });
+    return () => { cancelled = true; };
+  }, [selectedSchemas]);
 
   // Auto-populate inspire database when first catalog is selected
   useEffect(() => {
