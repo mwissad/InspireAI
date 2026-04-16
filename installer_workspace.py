@@ -280,6 +280,7 @@ if NEW_SP_APP_ID and WAREHOUSE_ID:
     sp = NEW_SP_APP_ID
     print(f"Granting permissions to {sp}...")
 
+    # Full permissions on the selected catalog + schema
     grants = [
         f"GRANT USE_CATALOG ON CATALOG `{CATALOG}` TO `{sp}`",
         f"GRANT BROWSE ON CATALOG `{CATALOG}` TO `{sp}`",
@@ -288,9 +289,18 @@ if NEW_SP_APP_ID and WAREHOUSE_ID:
         f"GRANT SELECT ON SCHEMA `{CATALOG}`.`{SCHEMA}` TO `{sp}`",
         f"GRANT MODIFY ON SCHEMA `{CATALOG}`.`{SCHEMA}` TO `{sp}`",
     ]
-    for cat in available_catalogs:
-        if cat != CATALOG and cat != "samples":
+    # BROWSE on ALL catalogs so the SP can list them in the catalog browser
+    all_catalogs = set(available_catalogs)
+    try:
+        for cat in w.catalogs.list():
+            all_catalogs.add(cat.name)
+    except Exception:
+        pass
+    for cat in all_catalogs:
+        if cat not in ("samples", "system", "__databricks_internal", "information_schema"):
             grants.append(f"GRANT BROWSE ON CATALOG `{cat}` TO `{sp}`")
+            if cat != CATALOG:
+                grants.append(f"GRANT USE_CATALOG ON CATALOG `{cat}` TO `{sp}`")
 
     for sql in grants:
         try:
