@@ -28,16 +28,16 @@ const DEFAULT_NOTEBOOK_PATH = process.env.NOTEBOOK_PATH || '';
 const DEFAULT_WAREHOUSE_ID = process.env.INSPIRE_WAREHOUSE_ID || '';
 const DEFAULT_INSPIRE_DB = process.env.INSPIRE_DATABASE || '';
 
-// Optional: when deployed as a Databricks App, the runtime may inject a
-// service-principal token automatically. Individual users can still
-// override this by passing their own PAT via the Authorization header.
+// Static token (legacy / manual config)
 let SERVICE_TOKEN = process.env.DATABRICKS_TOKEN || '';
 
-// SP OAuth credentials — set by installer when DATABRICKS_TOKEN isn't injected by runtime.
-// The backend uses client_credentials flow to generate fresh tokens on-the-fly.
-const SP_CLIENT_ID = process.env.SP_CLIENT_ID || '';
-const SP_CLIENT_SECRET = process.env.SP_CLIENT_SECRET || '';
-let spTokenExpiry = 0; // epoch ms when cached SP token expires
+// SP OAuth credentials — Databricks App runtime injects these automatically
+// when a service principal resource is declared in app.yaml.
+// Fallback: installer may also set these via SP_CLIENT_ID/SP_CLIENT_SECRET env vars.
+const SP_CLIENT_ID = process.env.DATABRICKS_CLIENT_ID || process.env.SP_CLIENT_ID || '';
+const SP_CLIENT_SECRET = process.env.DATABRICKS_CLIENT_SECRET || process.env.SP_CLIENT_SECRET || '';
+let spTokenCache = '';    // cached OAuth token
+let spTokenExpiry = 0;    // epoch ms when cached token expires
 
 // Path to the bundled notebook file — try several candidate locations
 // v47: switched from DBC archive to direct JUPYTER (.ipynb) format
@@ -136,9 +136,11 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 
 // ═══════════════════════════════════════════════════
 
 // Refresh SP token using client_credentials OAuth2 flow
+// Works with both runtime-injected credentials (DATABRICKS_CLIENT_ID/SECRET)
+// and installer-injected credentials (SP_CLIENT_ID/SECRET).
 async function ensureSpToken() {
-  // Already have a valid token?
-  if (SERVICE_TOKEN && Date.now() < spTokenExpiry) return SERVICE_TOKEN;
+  // Already have a valid cached token?
+  if (spTokenCache && Date.now() < spTokenExpiry) return spTokenCache;
   // No credentials? Can't refresh.
   if (!SP_CLIENT_ID || !SP_CLIENT_SECRET) return SERVICE_TOKEN || '';
 
@@ -147,7 +149,7 @@ async function ensureSpToken() {
   if (!host) return SERVICE_TOKEN || '';
 
   try {
-    console.log('🔑 Refreshing SP OAuth token...');
+    console.log(`🔑 Refreshing SP OAuth token (client_id: ${SP_CLIENT_ID.slice(0, 8)}...)...`);
     const resp = await fetch(`${host}/oidc/v1/token`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -160,11 +162,12 @@ async function ensureSpToken() {
     });
     if (resp.ok) {
       const data = await resp.json();
-      SERVICE_TOKEN = data.access_token || '';
+      spTokenCache = data.access_token || '';
       // Expire 5 minutes before actual expiry to avoid edge cases
       const expiresIn = (data.expires_in || 3600) - 300;
       spTokenExpiry = Date.now() + expiresIn * 1000;
       console.log(`🔑 SP token refreshed (expires in ${data.expires_in}s)`);
+      return spTokenCache;
     } else {
       console.error(`🔑 SP token refresh failed (${resp.status}): ${await resp.text()}`);
     }
@@ -218,11 +221,13 @@ function getTokenSync(req) {
     if (bearer) return bearer;
   }
 
-  // 3) Cached service principal token (from env or OAuth refresh)
-  if (SERVICE_TOKEN && Date.now() < spTokenExpiry) return SERVICE_TOKEN;
-  if (SERVICE_TOKEN && !SP_CLIENT_ID) return SERVICE_TOKEN; // static token, no expiry tracking
+  // 3) Static service token from env (DATABRICKS_TOKEN)
+  if (SERVICE_TOKEN) return SERVICE_TOKEN;
 
-  // 4) Databricks App proxy injects the user's OAuth token
+  // 4) Cached SP OAuth token (from client_credentials refresh)
+  if (spTokenCache && Date.now() < spTokenExpiry) return spTokenCache;
+
+  // 5) Databricks App proxy injects the user's token (on-behalf-of)
   const forwarded = req.headers['x-forwarded-access-token'];
   if (forwarded) {
     const clean = forwarded.startsWith('Bearer ') ? forwarded.slice(7).trim() : forwarded.trim();
@@ -232,13 +237,12 @@ function getTokenSync(req) {
   return null;
 }
 
-// Async version — tries to refresh SP token if needed
+// Async version — tries to refresh SP token via OAuth if no other token found
 async function getToken(req) {
-  // Check sync sources first
   const sync = getTokenSync(req);
   if (sync) return sync;
 
-  // Try refreshing SP token via OAuth
+  // No token found — try generating one from SP credentials
   if (SP_CLIENT_ID && SP_CLIENT_SECRET) {
     const freshToken = await ensureSpToken();
     if (freshToken) return freshToken;
@@ -603,13 +607,16 @@ app.get('/api/health', (req, res) => {
     isDatabricksApp: !!forwardedToken || !!DATABRICKS_HOST,
     hasForwardedToken: !!forwardedToken,
     forwardedTokenPreview: forwardedToken ? `${forwardedToken.slice(0, 8)}...${forwardedToken.slice(-4)} (len=${forwardedToken.length})` : 'NONE',
-    resolvedTokenSource: syncToken === SERVICE_TOKEN && SERVICE_TOKEN ? 'SERVICE_TOKEN' : forwardedToken && syncToken ? 'x-forwarded-access-token' : syncToken ? 'header' : SP_CLIENT_ID ? 'SP_OAUTH (will refresh)' : 'NONE',
+    resolvedTokenSource: syncToken === SERVICE_TOKEN && SERVICE_TOKEN ? 'DATABRICKS_TOKEN' : syncToken === spTokenCache && spTokenCache ? 'SP_OAUTH_CACHE' : forwardedToken && syncToken ? 'x-forwarded-access-token' : syncToken ? 'header' : SP_CLIENT_ID ? 'SP_OAUTH (will refresh on first API call)' : 'NONE',
     hasSpCredentials: !!(SP_CLIENT_ID && SP_CLIENT_SECRET),
+    spTokenCached: !!(spTokenCache && Date.now() < spTokenExpiry),
     envVars: {
       DATABRICKS_HOST: DATABRICKS_HOST ? 'set' : 'NOT SET',
       DATABRICKS_TOKEN: SERVICE_TOKEN ? 'set' : 'NOT SET',
-      SP_CLIENT_ID: SP_CLIENT_ID ? 'set' : 'NOT SET',
-      SP_CLIENT_SECRET: SP_CLIENT_SECRET ? 'set' : 'NOT SET',
+      DATABRICKS_CLIENT_ID: process.env.DATABRICKS_CLIENT_ID ? 'set (runtime)' : 'NOT SET',
+      DATABRICKS_CLIENT_SECRET: process.env.DATABRICKS_CLIENT_SECRET ? 'set (runtime)' : 'NOT SET',
+      SP_CLIENT_ID_resolved: SP_CLIENT_ID ? `set (${SP_CLIENT_ID.slice(0, 8)}...)` : 'NOT SET',
+      SP_CLIENT_SECRET_resolved: SP_CLIENT_SECRET ? 'set' : 'NOT SET',
       INSPIRE_WAREHOUSE_ID: DEFAULT_WAREHOUSE_ID || 'NOT SET',
       INSPIRE_DATABASE: DEFAULT_INSPIRE_DB || 'NOT SET',
       NOTEBOOK_PATH: DEFAULT_NOTEBOOK_PATH || 'NOT SET',
