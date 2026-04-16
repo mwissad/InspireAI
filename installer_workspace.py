@@ -8,13 +8,10 @@
 # MAGIC **Only one choice required:** pick the catalog where Inspire will store its data.
 # MAGIC Everything else is auto-detected and configured.
 # MAGIC
-# MAGIC **What it does:**
-# MAGIC 1. Lists your catalogs — you pick one
-# MAGIC 2. Auto-detects SQL warehouse, source folder, etc.
-# MAGIC 3. Creates the `_inspire` schema
-# MAGIC 4. Publishes the notebook
-# MAGIC 5. Deploys the Databricks App with a service principal
-# MAGIC 6. Grants the runtime SP all needed permissions
+# MAGIC **Clean install every time:**
+# MAGIC 1. Deletes old app + all legacy service principals
+# MAGIC 2. Creates fresh app with a new SP
+# MAGIC 3. Grants the new SP all needed permissions
 # MAGIC
 # MAGIC **Prerequisites:** DBR 13.3+ · Unity Catalog enabled
 
@@ -27,6 +24,7 @@
 
 import os, time, json, requests, base64
 from databricks.sdk import WorkspaceClient
+from databricks.sdk.service.sql import StatementState
 
 w = WorkspaceClient()
 current_user = w.current_user.me()
@@ -49,6 +47,8 @@ dbutils.widgets.dropdown("catalog", available_catalogs[0], available_catalogs, "
 CATALOG = dbutils.widgets.get("catalog")
 SCHEMA = "_inspire"
 INSPIRE_DB = f"{CATALOG}.{SCHEMA}"
+APP_NAME = "inspire-ai"
+SP_NAME = f"{APP_NAME}-sp"
 
 print(f"Inspire AI will use: {INSPIRE_DB}")
 
@@ -59,9 +59,9 @@ print(f"Inspire AI will use: {INSPIRE_DB}")
 
 # COMMAND ----------
 
-DEFAULT_SOURCE = f"/Workspace/Users/{USER_EMAIL}/InspireAI-main"
+# Find source folder
 SOURCE_CANDIDATES = [
-    DEFAULT_SOURCE,
+    f"/Workspace/Users/{USER_EMAIL}/InspireAI-main",
     f"/Workspace/Users/{USER_EMAIL}/InspireAI",
     f"/Workspace/Users/{USER_EMAIL}/InspireAI-dev_v_47",
     f"/Workspace/Shared/InspireAI",
@@ -71,11 +71,7 @@ for candidate in SOURCE_CANDIDATES:
     if os.path.exists(candidate) and os.path.exists(f"{candidate}/app.yaml"):
         SOURCE_FOLDER = candidate
         break
-
-assert SOURCE_FOLDER, f"Could not find InspireAI source folder. Tried: {SOURCE_CANDIDATES}. Upload/clone the repo first."
-
-APP_NAME = "inspire-ai"
-SP_NAME = f"{APP_NAME}-sp"
+assert SOURCE_FOLDER, f"Source folder not found. Tried: {SOURCE_CANDIDATES}"
 
 # REST API helpers
 api_base = WORKSPACE_HOST.rstrip("/")
@@ -100,199 +96,197 @@ def api_put(path, body=None):
 def api_patch(path, body=None):
     return requests.patch(f"{api_base}{path}", headers=api_headers, json=body or {})
 
+def api_delete(path):
+    return requests.delete(f"{api_base}{path}", headers=api_headers)
+
 # Auto-detect warehouse
 WAREHOUSE_ID = None
 WAREHOUSE_NAME = None
-warehouses = list(w.warehouses.list())
-for wh in warehouses:
+for wh in w.warehouses.list():
     if wh.state and wh.state.value == "RUNNING" and getattr(wh, "enable_serverless_compute", False):
         WAREHOUSE_ID = wh.id
         WAREHOUSE_NAME = wh.name
         break
 if not WAREHOUSE_ID:
-    for wh in warehouses:
+    for wh in w.warehouses.list():
         if wh.state and wh.state.value == "RUNNING":
             WAREHOUSE_ID = wh.id
             WAREHOUSE_NAME = wh.name
             break
-if not WAREHOUSE_ID and warehouses:
-    WAREHOUSE_ID = warehouses[0].id
-    WAREHOUSE_NAME = warehouses[0].name
 
 print("=" * 60)
-print("  Inspire AI v4.7 — Workspace Installer")
+print("  Inspire AI v4.7 — Clean Install")
 print("=" * 60)
-print(f"  Catalog:           {CATALOG}")
-print(f"  Database:          {INSPIRE_DB}")
-print(f"  Source folder:     {SOURCE_FOLDER}")
-print(f"  Workspace:         {WORKSPACE_HOST}")
-print(f"  User:              {USER_EMAIL}")
-print(f"  SQL Warehouse:     {WAREHOUSE_NAME or 'None'} ({WAREHOUSE_ID or 'N/A'})")
+print(f"  Catalog:       {CATALOG}")
+print(f"  Database:      {INSPIRE_DB}")
+print(f"  Source:        {SOURCE_FOLDER}")
+print(f"  Warehouse:     {WAREHOUSE_NAME or 'N/A'} ({WAREHOUSE_ID or 'N/A'})")
 print("=" * 60)
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Step 1: Create Database Schema
+# MAGIC ## Step 1: Clean up — delete old app and legacy SPs
 
 # COMMAND ----------
 
-from databricks.sdk.service.sql import StatementState
+# Delete existing app
+print("Cleaning up old deployment...")
+try:
+    api_delete(f"/api/2.0/apps/{APP_NAME}")
+    print(f"  Deleted app '{APP_NAME}'")
+    # Wait for cleanup
+    time.sleep(5)
+except Exception:
+    print(f"  No existing app to delete")
 
+# Delete ALL legacy service principals matching the app name
+print("Removing legacy service principals...")
+deleted_count = 0
+try:
+    # Search broadly for any SP related to this app
+    for search in [APP_NAME, SP_NAME, "inspire-ai", "inspire_ai"]:
+        try:
+            sps = api_get(f"/api/2.0/preview/scim/v2/ServicePrincipals?filter=displayName co \"{search}\"")
+            for sp in sps.get("Resources", []):
+                sp_id = sp.get("id")
+                sp_name = sp.get("displayName", "")
+                sp_app_id = sp.get("applicationId", "")
+                print(f"  Deleting SP: {sp_name} (ID: {sp_id}, AppID: {sp_app_id})")
+                try:
+                    resp = api_delete(f"/api/2.0/preview/scim/v2/ServicePrincipals/{sp_id}")
+                    if resp.status_code in (200, 204):
+                        deleted_count += 1
+                        print(f"    ✅ Deleted")
+                    else:
+                        print(f"    ⚠️ {resp.status_code}: {resp.text[:100]}")
+                except Exception as e:
+                    print(f"    ⚠️ {e}")
+        except Exception:
+            pass
+except Exception as e:
+    print(f"  Warning: {e}")
+
+print(f"  Cleaned up {deleted_count} legacy SP(s)")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Step 2: Create database + publish notebook
+
+# COMMAND ----------
+
+# Create schema
 if WAREHOUSE_ID:
     sql = f"CREATE SCHEMA IF NOT EXISTS `{CATALOG}`.`{SCHEMA}`"
-    print(f"Executing: {sql}")
+    print(f"Creating schema: {sql}")
     stmt = w.statement_execution.execute_statement(warehouse_id=WAREHOUSE_ID, statement=sql, wait_timeout="30s")
-    if stmt.status and stmt.status.state in (StatementState.SUCCEEDED,):
-        print(f"Schema {INSPIRE_DB} is ready.")
-    else:
-        print(f"Warning: Schema creation returned {stmt.status.state if stmt.status else 'UNKNOWN'}")
-else:
-    print(f"No warehouse found. Create manually: CREATE SCHEMA IF NOT EXISTS `{CATALOG}`.`{SCHEMA}`")
+    print(f"  Schema: {'✅ Ready' if stmt.status and stmt.status.state == StatementState.SUCCEEDED else '⚠️ ' + str(stmt.status)}")
 
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## Step 2: Publish Notebook
-
-# COMMAND ----------
-
+# Publish notebook
 NOTEBOOK_DEST = f"/Shared/{APP_NAME}/dbx_inspire_ai_agent"
 NOTEBOOK_PATH = None
 
-notebook_candidates = [
-    f"{SOURCE_FOLDER}/dbx_inspire_ai_agent.ipynb",
-    f"{SOURCE_FOLDER}/databricks_inspire_v46.dbc",
-]
-
 notebook_source = None
-for candidate in notebook_candidates:
+for candidate in [f"{SOURCE_FOLDER}/dbx_inspire_ai_agent.ipynb", f"{SOURCE_FOLDER}/databricks_inspire_v46.dbc"]:
     if os.path.exists(candidate):
         notebook_source = candidate
         break
 
 if notebook_source:
-    print(f"Publishing notebook: {notebook_source}")
+    print(f"Publishing: {notebook_source}")
     with open(notebook_source, "rb") as f:
         content_b64 = base64.b64encode(f.read()).decode("utf-8")
-
     is_ipynb = notebook_source.endswith(".ipynb")
-    import_format = "JUPYTER" if is_ipynb else "DBC"
 
-    # Create parent folder
     try:
         api_post("/api/2.0/workspace/mkdirs", {"path": f"/Shared/{APP_NAME}"})
     except Exception:
         pass
-    # Delete old notebook
     try:
         api_post("/api/2.0/workspace/delete", {"path": NOTEBOOK_DEST, "recursive": False})
     except Exception:
         pass
 
-    import_payload = {"path": NOTEBOOK_DEST, "format": import_format, "content": content_b64, "overwrite": True}
+    payload = {"path": NOTEBOOK_DEST, "format": "JUPYTER" if is_ipynb else "DBC", "content": content_b64, "overwrite": True}
     if is_ipynb:
-        import_payload["language"] = "PYTHON"
+        payload["language"] = "PYTHON"
 
-    resp = api_post("/api/2.0/workspace/import", import_payload)
+    resp = api_post("/api/2.0/workspace/import", payload)
     if resp.status_code in (200, 201):
         NOTEBOOK_PATH = NOTEBOOK_DEST
-        print(f"Notebook published: {NOTEBOOK_PATH}")
+        print(f"  Notebook: ✅ {NOTEBOOK_PATH}")
     else:
-        print(f"Warning: Notebook publish failed ({resp.status_code}): {resp.text[:300]}")
-else:
-    print("Warning: No notebook file found in source folder.")
+        print(f"  Notebook: ⚠️ {resp.status_code} {resp.text[:200]}")
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Step 3: Configure & Deploy App
+# MAGIC ## Step 3: Deploy fresh app (runtime creates a new SP)
 
 # COMMAND ----------
 
 import yaml
 
+# Configure app.yaml
 app_yaml_path = f"{SOURCE_FOLDER}/app.yaml"
-
 with open(app_yaml_path, "r") as f:
     app_config = yaml.safe_load(f)
 
-if "env" not in app_config or app_config["env"] is None:
-    app_config["env"] = []
+app_config["env"] = [e for e in (app_config.get("env") or []) if isinstance(e, dict) and e.get("name") not in ("NODE_ENV", "INSPIRE_DATABASE", "INSPIRE_AUTO_SETUP", "INSPIRE_WAREHOUSE_ID", "NOTEBOOK_PATH")]
 
-# Env vars
-inject_vars = {
-    "NODE_ENV": "production",
-    "INSPIRE_DATABASE": INSPIRE_DB,
-    "INSPIRE_AUTO_SETUP": "true",
-}
+inject = {"NODE_ENV": "production", "INSPIRE_DATABASE": INSPIRE_DB, "INSPIRE_AUTO_SETUP": "true"}
 if WAREHOUSE_ID:
-    inject_vars["INSPIRE_WAREHOUSE_ID"] = WAREHOUSE_ID
+    inject["INSPIRE_WAREHOUSE_ID"] = WAREHOUSE_ID
 if NOTEBOOK_PATH:
-    inject_vars["NOTEBOOK_PATH"] = NOTEBOOK_PATH
+    inject["NOTEBOOK_PATH"] = NOTEBOOK_PATH
 
-existing_names = {e["name"] for e in app_config["env"] if isinstance(e, dict) and "name" in e}
-for name, value in inject_vars.items():
-    if name in existing_names:
-        for e in app_config["env"]:
-            if isinstance(e, dict) and e.get("name") == name:
-                e["value"] = str(value)
-                break
-    else:
-        app_config["env"].append({"name": name, "value": str(value)})
+for name, value in inject.items():
+    app_config["env"].append({"name": name, "value": str(value)})
 
-# SP resource — runtime will create an SP and inject DATABRICKS_CLIENT_ID/SECRET
 app_config["resources"] = [{"name": SP_NAME, "type": "service-principal"}]
 
 with open(app_yaml_path, "w") as f:
     yaml.dump(app_config, f, default_flow_style=False, sort_keys=False)
 
-print("app.yaml configured:")
-for name, value in inject_vars.items():
-    print(f"  {name} = {value}")
+print("app.yaml ready:")
+for k, v in inject.items():
+    print(f"  {k} = {v}")
 print(f"  resources: [{SP_NAME}]")
 
-# Deploy
-app_url = None
-try:
-    resp = api_get(f"/api/2.0/apps/{APP_NAME}")
-    app_url = resp.get("url")
-    print(f"\nApp '{APP_NAME}' exists. Redeploying...")
-except Exception:
-    print(f"\nCreating app '{APP_NAME}'...")
-    resp = api_post("/api/2.0/apps", {"name": APP_NAME, "description": "Inspire AI v4.7 — Data Strategy Copilot"})
-    if resp.status_code in (200, 201):
-        app_url = resp.json().get("url")
-        print(f"App created: {app_url}")
-    elif "already exists" in resp.text.lower():
-        data = api_get(f"/api/2.0/apps/{APP_NAME}")
-        app_url = data.get("url")
-    else:
-        raise RuntimeError(f"Failed to create app ({resp.status_code}): {resp.text[:500]}")
+# Create fresh app
+print(f"\nCreating app '{APP_NAME}'...")
+resp = api_post("/api/2.0/apps", {"name": APP_NAME, "description": "Inspire AI v4.7 — Data Strategy Copilot"})
+if resp.status_code in (200, 201):
+    app_url = resp.json().get("url", "")
+    print(f"  App created: {app_url}")
+elif "already exists" in resp.text.lower():
+    app_url = api_get(f"/api/2.0/apps/{APP_NAME}").get("url", "")
+    print(f"  App already exists: {app_url}")
+else:
+    raise RuntimeError(f"Create failed ({resp.status_code}): {resp.text[:500]}")
 
 # Wait for compute
-print("Waiting for app compute...")
+print("Waiting for compute...")
 for _ in range(30):
     data = api_get(f"/api/2.0/apps/{APP_NAME}")
     state = data.get("compute_status", {}).get("state", "UNKNOWN")
     if state == "ACTIVE":
         app_url = data.get("url", app_url)
-        print(f"Compute ACTIVE.")
+        print(f"  Compute: ACTIVE ✅")
         break
     print(f"  Compute: {state}")
     time.sleep(10)
 else:
-    raise TimeoutError("App compute did not become ACTIVE within 5 minutes.")
+    raise TimeoutError("Compute not ready in 5 minutes")
 
-# Deploy from workspace folder
-print(f"Deploying from {SOURCE_FOLDER} ...")
+# Deploy
+print(f"Deploying...")
 resp = api_post(f"/api/2.0/apps/{APP_NAME}/deployments", {"source_code_path": SOURCE_FOLDER})
 if resp.status_code not in (200, 201):
     raise RuntimeError(f"Deploy failed ({resp.status_code}): {resp.text[:500]}")
 
 deploy_id = resp.json().get("deployment_id", "")
-print(f"Deployment started (ID: {deploy_id}). Waiting...")
-
 for _ in range(30):
     data = api_get(f"/api/2.0/apps/{APP_NAME}")
     pending = data.get("pending_deployment", {})
@@ -302,136 +296,93 @@ for _ in range(30):
     print(f"  Deploy: {dep_state}")
     if dep_state == "SUCCEEDED":
         app_url = data.get("url", app_url)
-        print("Deployment succeeded!")
+        print("  ✅ Deployment succeeded!")
         break
     elif dep_state in ("FAILED", "CANCELLED"):
         raise RuntimeError(f"Deployment {dep_state}: {dep.get('status', {}).get('message', '')}")
     time.sleep(10)
 else:
-    raise TimeoutError("Deployment did not complete within 5 minutes.")
+    raise TimeoutError("Deployment not done in 5 minutes")
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Step 4: Grant permissions to the runtime's SP
+# MAGIC ## Step 4: Grant permissions to the runtime's NEW SP
 # MAGIC
-# MAGIC The runtime creates the SP and injects its credentials. We now look up
-# MAGIC that SP and grant it access to catalogs, schema, and warehouse.
+# MAGIC The runtime created a fresh SP. We find it and grant all needed access.
 
 # COMMAND ----------
 
-# Look up the actual SP the runtime assigned to the app.
-# The runtime creates its OWN SP (different from any we created via SCIM).
-# We find it by reading the app's effective_service_principal from the Apps API.
-print("Looking up the app's service principal...")
-RUNTIME_SP_APP_ID = None
+# The runtime just created a new SP. Find it.
+print("Finding the runtime's service principal...")
 
-# Method 1: Get the SP from the app's resource info
+# Get the app info — the resources should now reference the actual SP
+app_info = api_get(f"/api/2.0/apps/{APP_NAME}")
+print(f"  App keys: {list(app_info.keys())}")
+
+# Dump the service_principal and resources fields for inspection
+for key in ["service_principal", "effective_service_principal", "resources", "service_principal_id", "service_principal_client_id"]:
+    if key in app_info:
+        print(f"  app.{key} = {json.dumps(app_info[key], default=str)[:300]}")
+
+# Find ALL SPs that could be the runtime's SP
+# (search by name since the runtime creates an SP matching the resource name)
+GRANT_APP_IDS = set()
 try:
-    app_info = api_get(f"/api/2.0/apps/{APP_NAME}")
-    # Print all SP-related fields for debugging
-    print(f"  App info keys: {list(app_info.keys())}")
-
-    # Check resources in the app response
-    app_resources = app_info.get("resources", [])
-    for r in app_resources:
-        print(f"  App resource: {r}")
-        if r.get("type") == "service-principal" or "service_principal" in str(r):
-            sp_info = r.get("service_principal", r)
-            RUNTIME_SP_APP_ID = sp_info.get("client_id") or sp_info.get("application_id") or sp_info.get("id", "")
-            if RUNTIME_SP_APP_ID:
-                print(f"  Found runtime SP from app resources: {RUNTIME_SP_APP_ID}")
-
-    # Also check effective_service_principal, service_principal_id, etc.
-    for key in ["effective_service_principal", "service_principal_id", "service_principal_client_id", "service_principal"]:
-        val = app_info.get(key)
-        if val and not RUNTIME_SP_APP_ID:
-            RUNTIME_SP_APP_ID = val if isinstance(val, str) else val.get("client_id", val.get("application_id", ""))
-            if RUNTIME_SP_APP_ID:
-                print(f"  Found runtime SP from app.{key}: {RUNTIME_SP_APP_ID}")
-except Exception as e:
-    print(f"  Warning: Could not read app info: {e}")
-
-# Method 2: If not found from app API, search ALL SPs and list them
-if not RUNTIME_SP_APP_ID:
-    print("  Could not find SP from Apps API. Listing all SPs to find matches...")
-    try:
-        all_sps = api_get("/api/2.0/preview/scim/v2/ServicePrincipals?count=100")
-        for sp in all_sps.get("Resources", []):
-            sp_name = sp.get("displayName", "")
-            sp_app_id = sp.get("applicationId", "")
-            # Match by name patterns related to the app
-            if APP_NAME in sp_name.lower() or SP_NAME in sp_name.lower():
-                print(f"  Candidate SP: {sp_name} (AppID: {sp_app_id}, ID: {sp.get('id')})")
-                if not RUNTIME_SP_APP_ID:
-                    RUNTIME_SP_APP_ID = sp_app_id
-    except Exception as e:
-        print(f"  Warning: Could not list SPs: {e}")
-
-# Method 3: Just grant to ALL SPs that might be the app's SP
-ALL_SP_APP_IDS = set()
-if RUNTIME_SP_APP_ID:
-    ALL_SP_APP_IDS.add(RUNTIME_SP_APP_ID)
-# Also add any SP matching the app name
-try:
-    all_sps = api_get(f"/api/2.0/preview/scim/v2/ServicePrincipals?filter=displayName co \"{APP_NAME}\"")
+    all_sps = api_get("/api/2.0/preview/scim/v2/ServicePrincipals?count=200")
     for sp in all_sps.get("Resources", []):
-        sp_app_id = sp.get("applicationId", "")
-        if sp_app_id:
-            ALL_SP_APP_IDS.add(sp_app_id)
-            print(f"  Will also grant to: {sp.get('displayName')} ({sp_app_id})")
-except Exception:
-    pass
+        name = sp.get("displayName", "")
+        app_id = sp.get("applicationId", "")
+        # Match any SP with inspire-ai in the name
+        if APP_NAME in name.lower() or "inspire" in name.lower():
+            print(f"  Found SP: {name} | applicationId={app_id} | id={sp.get('id')}")
+            if app_id:
+                GRANT_APP_IDS.add(app_id)
+except Exception as e:
+    print(f"  ⚠️ Could not list SPs: {e}")
 
-if not ALL_SP_APP_IDS:
-    print("  ⚠️ Could not find any SP. Grant permissions manually.")
+if not GRANT_APP_IDS:
+    print("  ⚠️ No matching SPs found! You'll need to grant permissions manually.")
+else:
+    print(f"\n  Will grant permissions to {len(GRANT_APP_IDS)} SP(s): {GRANT_APP_IDS}")
 
-# Grant permissions to ALL candidate SPs (covers both installer-created and runtime-created)
-if ALL_SP_APP_IDS and WAREHOUSE_ID:
-    for sp_app_id in ALL_SP_APP_IDS:
-        print(f"\nGranting permissions to SP {sp_app_id}...")
-
+# Run grants
+if GRANT_APP_IDS and WAREHOUSE_ID:
+    for sp_id in GRANT_APP_IDS:
+        print(f"\n  Granting to {sp_id}...")
         grants = [
-            f"GRANT USE_CATALOG ON CATALOG `{CATALOG}` TO `{sp_app_id}`",
-            f"GRANT BROWSE ON CATALOG `{CATALOG}` TO `{sp_app_id}`",
-            f"GRANT USE_SCHEMA ON SCHEMA `{CATALOG}`.`{SCHEMA}` TO `{sp_app_id}`",
-            f"GRANT CREATE_TABLE ON SCHEMA `{CATALOG}`.`{SCHEMA}` TO `{sp_app_id}`",
-            f"GRANT SELECT ON SCHEMA `{CATALOG}`.`{SCHEMA}` TO `{sp_app_id}`",
-            f"GRANT MODIFY ON SCHEMA `{CATALOG}`.`{SCHEMA}` TO `{sp_app_id}`",
+            f"GRANT USE_CATALOG ON CATALOG `{CATALOG}` TO `{sp_id}`",
+            f"GRANT BROWSE ON CATALOG `{CATALOG}` TO `{sp_id}`",
+            f"GRANT USE_SCHEMA ON SCHEMA `{CATALOG}`.`{SCHEMA}` TO `{sp_id}`",
+            f"GRANT CREATE_TABLE ON SCHEMA `{CATALOG}`.`{SCHEMA}` TO `{sp_id}`",
+            f"GRANT SELECT ON SCHEMA `{CATALOG}`.`{SCHEMA}` TO `{sp_id}`",
+            f"GRANT MODIFY ON SCHEMA `{CATALOG}`.`{SCHEMA}` TO `{sp_id}`",
         ]
         for cat in available_catalogs:
-            if cat != CATALOG:
-                grants.append(f"GRANT BROWSE ON CATALOG `{cat}` TO `{sp_app_id}`")
+            if cat != CATALOG and cat != "samples":
+                grants.append(f"GRANT BROWSE ON CATALOG `{cat}` TO `{sp_id}`")
 
         for sql in grants:
             try:
-                stmt = w.statement_execution.execute_statement(
-                    warehouse_id=WAREHOUSE_ID, statement=sql, wait_timeout="15s"
-                )
-                status = stmt.status.state.value if stmt.status else "UNKNOWN"
+                stmt = w.statement_execution.execute_statement(warehouse_id=WAREHOUSE_ID, statement=sql, wait_timeout="15s")
+                status = stmt.status.state.value if stmt.status else "?"
                 label = sql.split(" ON ")[0].replace("GRANT ", "") + " ON " + sql.split(" ON ")[1].split(" TO ")[0]
                 if status == "SUCCEEDED":
-                    print(f"  {label}: ✅")
+                    print(f"    {label}: ✅")
                 else:
-                    err_msg = ""
-                    if stmt.status and stmt.status.error:
-                        err_msg = stmt.status.error.message or ""
-                    print(f"  {label}: ⚠️ {status} {err_msg[:100]}")
+                    err = stmt.status.error.message[:80] if stmt.status and stmt.status.error else status
+                    print(f"    {label}: ⚠️ {err}")
             except Exception as e:
-                print(f"  {sql[:70]}...: ⚠️ {str(e)[:150]}")
+                print(f"    ⚠️ {str(e)[:120]}")
 
-        # Warehouse CAN_USE
+        # Warehouse
         try:
             resp = api_patch(f"/api/2.0/permissions/sql/warehouses/{WAREHOUSE_ID}", {
-                "access_control_list": [
-                    {"service_principal_name": sp_app_id, "permission_level": "CAN_USE"}
-                ]
+                "access_control_list": [{"service_principal_name": sp_id, "permission_level": "CAN_USE"}]
             })
-            print(f"  CAN_USE on warehouse: {resp.status_code}" + (f" ⚠️ {resp.text[:150]}" if resp.status_code != 200 else " ✅"))
+            print(f"    CAN_USE on warehouse: {'✅' if resp.status_code == 200 else '⚠️ ' + resp.text[:100]}")
         except Exception as e:
-            print(f"  Warehouse permission: ⚠️ {e}")
-elif not WAREHOUSE_ID:
-    print("  ⚠️ No warehouse — grant permissions manually.")
+            print(f"    Warehouse: ⚠️ {e}")
 
 # COMMAND ----------
 
@@ -441,16 +392,16 @@ elif not WAREHOUSE_ID:
 # COMMAND ----------
 
 app_data = api_get(f"/api/2.0/apps/{APP_NAME}")
-app_url = app_data.get("url", app_url)
+app_url = app_data.get("url", "")
 
 print("=" * 60)
 print("  Inspire AI v4.7 — Ready!")
 print("=" * 60)
-print(f"  App URL:           {app_url}")
-print(f"  Database:          {INSPIRE_DB}")
-print(f"  Warehouse:         {WAREHOUSE_NAME or 'N/A'}")
-print(f"  Notebook:          {NOTEBOOK_PATH or 'auto-publish'}")
-print(f"  Service Principal: {RUNTIME_SP_NAME or 'N/A'}")
+print(f"  App URL:       {app_url}")
+print(f"  Database:      {INSPIRE_DB}")
+print(f"  Warehouse:     {WAREHOUSE_NAME or 'N/A'}")
+print(f"  Notebook:      {NOTEBOOK_PATH or 'auto-publish'}")
+print(f"  SPs granted:   {GRANT_APP_IDS or 'none'}")
 print()
 print("  Open the URL — no setup needed!")
 print("=" * 60)
@@ -459,7 +410,7 @@ displayHTML(f"""
 <div style="padding: 24px; background: linear-gradient(135deg, #1a1a2e, #16213e); border-radius: 12px; text-align: center; margin: 20px 0;">
   <h2 style="color: #e0e0e0; margin-bottom: 8px;">Inspire AI v4.7 is ready!</h2>
   <p style="color: #aaa; font-size: 13px; margin-bottom: 20px;">
-    Everything is configured. Just open the app.
+    Clean install complete. Just open the app.
   </p>
   <a href="{app_url}" target="_blank"
      style="display: inline-block; padding: 14px 36px; background: linear-gradient(135deg, #ff6b35, #f7931e);
