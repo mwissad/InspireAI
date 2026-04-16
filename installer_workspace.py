@@ -320,69 +320,88 @@ else:
 
 # COMMAND ----------
 
-# Look up the actual SP the runtime assigned to the app
+# Look up the actual SP the runtime assigned to the app.
+# The runtime creates its OWN SP (different from any we created via SCIM).
+# We find it by reading the app's effective_service_principal from the Apps API.
 print("Looking up the app's service principal...")
-RUNTIME_SP_NAME = None
-RUNTIME_SP_ID = None
-
-# The runtime SP has the same name we declared in app.yaml resources
-try:
-    sps = api_get(f"/api/2.0/preview/scim/v2/ServicePrincipals?filter=displayName eq \"{SP_NAME}\"")
-    resources = sps.get("Resources", [])
-    if resources:
-        RUNTIME_SP_ID = resources[0]["id"]
-        RUNTIME_SP_NAME = resources[0].get("displayName", SP_NAME)
-        app_id = resources[0].get("applicationId", "")
-        print(f"  Found SP: {RUNTIME_SP_NAME} (ID: {RUNTIME_SP_ID}, AppID: {app_id})")
-except Exception as e:
-    print(f"  Warning: Could not find SP by name '{SP_NAME}': {e}")
-
-# If not found by declared name, try app-specific name patterns
-if not RUNTIME_SP_ID:
-    for pattern in [APP_NAME, f"{APP_NAME}-sp", f"apps/{APP_NAME}"]:
-        try:
-            sps = api_get(f"/api/2.0/preview/scim/v2/ServicePrincipals?filter=displayName co \"{pattern}\"")
-            resources = sps.get("Resources", [])
-            if resources:
-                RUNTIME_SP_ID = resources[0]["id"]
-                RUNTIME_SP_NAME = resources[0].get("displayName", pattern)
-                app_id = resources[0].get("applicationId", "")
-                print(f"  Found SP by pattern '{pattern}': {RUNTIME_SP_NAME} (ID: {RUNTIME_SP_ID}, AppID: {app_id})")
-                break
-        except Exception:
-            pass
-
-if not RUNTIME_SP_NAME:
-    print("  Warning: Could not find the runtime SP. Permissions must be granted manually.")
-
-# Grant permissions to the RUNTIME SP
-# SQL GRANT uses the SP's applicationId (UUID), not display name.
 RUNTIME_SP_APP_ID = None
-if RUNTIME_SP_ID:
+
+# Method 1: Get the SP from the app's resource info
+try:
+    app_info = api_get(f"/api/2.0/apps/{APP_NAME}")
+    # Print all SP-related fields for debugging
+    print(f"  App info keys: {list(app_info.keys())}")
+
+    # Check resources in the app response
+    app_resources = app_info.get("resources", [])
+    for r in app_resources:
+        print(f"  App resource: {r}")
+        if r.get("type") == "service-principal" or "service_principal" in str(r):
+            sp_info = r.get("service_principal", r)
+            RUNTIME_SP_APP_ID = sp_info.get("client_id") or sp_info.get("application_id") or sp_info.get("id", "")
+            if RUNTIME_SP_APP_ID:
+                print(f"  Found runtime SP from app resources: {RUNTIME_SP_APP_ID}")
+
+    # Also check effective_service_principal, service_principal_id, etc.
+    for key in ["effective_service_principal", "service_principal_id", "service_principal_client_id", "service_principal"]:
+        val = app_info.get(key)
+        if val and not RUNTIME_SP_APP_ID:
+            RUNTIME_SP_APP_ID = val if isinstance(val, str) else val.get("client_id", val.get("application_id", ""))
+            if RUNTIME_SP_APP_ID:
+                print(f"  Found runtime SP from app.{key}: {RUNTIME_SP_APP_ID}")
+except Exception as e:
+    print(f"  Warning: Could not read app info: {e}")
+
+# Method 2: If not found from app API, search ALL SPs and list them
+if not RUNTIME_SP_APP_ID:
+    print("  Could not find SP from Apps API. Listing all SPs to find matches...")
     try:
-        sp_data = api_get(f"/api/2.0/preview/scim/v2/ServicePrincipals/{RUNTIME_SP_ID}")
-        RUNTIME_SP_APP_ID = sp_data.get("applicationId", sp_data.get("externalId", ""))
-    except Exception:
-        pass
+        all_sps = api_get("/api/2.0/preview/scim/v2/ServicePrincipals?count=100")
+        for sp in all_sps.get("Resources", []):
+            sp_name = sp.get("displayName", "")
+            sp_app_id = sp.get("applicationId", "")
+            # Match by name patterns related to the app
+            if APP_NAME in sp_name.lower() or SP_NAME in sp_name.lower():
+                print(f"  Candidate SP: {sp_name} (AppID: {sp_app_id}, ID: {sp.get('id')})")
+                if not RUNTIME_SP_APP_ID:
+                    RUNTIME_SP_APP_ID = sp_app_id
+    except Exception as e:
+        print(f"  Warning: Could not list SPs: {e}")
 
-principal_for_sql = RUNTIME_SP_APP_ID or RUNTIME_SP_NAME
-principal_for_api = RUNTIME_SP_APP_ID or RUNTIME_SP_NAME
+# Method 3: Just grant to ALL SPs that might be the app's SP
+ALL_SP_APP_IDS = set()
+if RUNTIME_SP_APP_ID:
+    ALL_SP_APP_IDS.add(RUNTIME_SP_APP_ID)
+# Also add any SP matching the app name
+try:
+    all_sps = api_get(f"/api/2.0/preview/scim/v2/ServicePrincipals?filter=displayName co \"{APP_NAME}\"")
+    for sp in all_sps.get("Resources", []):
+        sp_app_id = sp.get("applicationId", "")
+        if sp_app_id:
+            ALL_SP_APP_IDS.add(sp_app_id)
+            print(f"  Will also grant to: {sp.get('displayName')} ({sp_app_id})")
+except Exception:
+    pass
 
-if principal_for_sql:
-    print(f"\nGranting permissions to SP (sql: `{principal_for_sql}`, api: {principal_for_api})...")
+if not ALL_SP_APP_IDS:
+    print("  ⚠️ Could not find any SP. Grant permissions manually.")
 
-    if WAREHOUSE_ID:
+# Grant permissions to ALL candidate SPs (covers both installer-created and runtime-created)
+if ALL_SP_APP_IDS and WAREHOUSE_ID:
+    for sp_app_id in ALL_SP_APP_IDS:
+        print(f"\nGranting permissions to SP {sp_app_id}...")
+
         grants = [
-            f"GRANT USE_CATALOG ON CATALOG `{CATALOG}` TO `{principal_for_sql}`",
-            f"GRANT BROWSE ON CATALOG `{CATALOG}` TO `{principal_for_sql}`",
-            f"GRANT USE_SCHEMA ON SCHEMA `{CATALOG}`.`{SCHEMA}` TO `{principal_for_sql}`",
-            f"GRANT CREATE_TABLE ON SCHEMA `{CATALOG}`.`{SCHEMA}` TO `{principal_for_sql}`",
-            f"GRANT SELECT ON SCHEMA `{CATALOG}`.`{SCHEMA}` TO `{principal_for_sql}`",
-            f"GRANT MODIFY ON SCHEMA `{CATALOG}`.`{SCHEMA}` TO `{principal_for_sql}`",
+            f"GRANT USE_CATALOG ON CATALOG `{CATALOG}` TO `{sp_app_id}`",
+            f"GRANT BROWSE ON CATALOG `{CATALOG}` TO `{sp_app_id}`",
+            f"GRANT USE_SCHEMA ON SCHEMA `{CATALOG}`.`{SCHEMA}` TO `{sp_app_id}`",
+            f"GRANT CREATE_TABLE ON SCHEMA `{CATALOG}`.`{SCHEMA}` TO `{sp_app_id}`",
+            f"GRANT SELECT ON SCHEMA `{CATALOG}`.`{SCHEMA}` TO `{sp_app_id}`",
+            f"GRANT MODIFY ON SCHEMA `{CATALOG}`.`{SCHEMA}` TO `{sp_app_id}`",
         ]
         for cat in available_catalogs:
             if cat != CATALOG:
-                grants.append(f"GRANT BROWSE ON CATALOG `{cat}` TO `{principal_for_sql}`")
+                grants.append(f"GRANT BROWSE ON CATALOG `{cat}` TO `{sp_app_id}`")
 
         for sql in grants:
             try:
@@ -401,20 +420,18 @@ if principal_for_sql:
             except Exception as e:
                 print(f"  {sql[:70]}...: ⚠️ {str(e)[:150]}")
 
-        # Warehouse CAN_USE via permissions API
+        # Warehouse CAN_USE
         try:
             resp = api_patch(f"/api/2.0/permissions/sql/warehouses/{WAREHOUSE_ID}", {
                 "access_control_list": [
-                    {"service_principal_name": principal_for_api, "permission_level": "CAN_USE"}
+                    {"service_principal_name": sp_app_id, "permission_level": "CAN_USE"}
                 ]
             })
             print(f"  CAN_USE on warehouse: {resp.status_code}" + (f" ⚠️ {resp.text[:150]}" if resp.status_code != 200 else " ✅"))
         except Exception as e:
             print(f"  Warehouse permission: ⚠️ {e}")
-    else:
-        print("  ⚠️ No warehouse — grant permissions manually.")
-else:
-    print("  ⚠️ Could not determine SP identity. Grant permissions manually.")
+elif not WAREHOUSE_ID:
+    print("  ⚠️ No warehouse — grant permissions manually.")
 
 # COMMAND ----------
 
