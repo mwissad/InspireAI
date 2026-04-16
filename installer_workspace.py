@@ -355,52 +355,52 @@ if not RUNTIME_SP_ID:
 if not RUNTIME_SP_NAME:
     print("  Warning: Could not find the runtime SP. Permissions must be granted manually.")
 
-# Grant permissions to the RUNTIME SP (not the one we created earlier)
+# Grant permissions to the RUNTIME SP using the Databricks SDK (more reliable than REST)
 if RUNTIME_SP_NAME:
     principal = RUNTIME_SP_NAME
     print(f"\nGranting permissions to '{principal}'...")
 
-    # 1. USE_CATALOG + BROWSE on the selected catalog
-    try:
-        resp = api_post(f"/api/2.1/unity-catalog/permissions/catalog/{CATALOG}", {
-            "changes": [{"principal": principal, "add": ["USE_CATALOG", "BROWSE"]}]
-        })
-        print(f"  USE_CATALOG + BROWSE on '{CATALOG}': {resp.status_code}" + (f" ⚠️ {resp.text[:150]}" if resp.status_code != 200 else " ✅"))
-    except Exception as e:
-        print(f"  USE_CATALOG on '{CATALOG}': FAILED ({e})")
-
-    # 2. BROWSE on all other catalogs
-    for cat in available_catalogs:
-        if cat != CATALOG:
-            try:
-                resp = api_post(f"/api/2.1/unity-catalog/permissions/catalog/{cat}", {
-                    "changes": [{"principal": principal, "add": ["BROWSE"]}]
-                })
-                if resp.status_code == 200:
-                    print(f"  BROWSE on '{cat}': ✅")
-            except Exception:
-                pass
-
-    # 3. Schema permissions
-    try:
-        resp = api_post(f"/api/2.1/unity-catalog/permissions/schema/{CATALOG}.{SCHEMA}", {
-            "changes": [{"principal": principal, "add": ["USE_SCHEMA", "CREATE_TABLE", "SELECT", "MODIFY"]}]
-        })
-        print(f"  Schema permissions on '{INSPIRE_DB}': {resp.status_code}" + (f" ⚠️ {resp.text[:150]}" if resp.status_code != 200 else " ✅"))
-    except Exception as e:
-        print(f"  Schema permissions: FAILED ({e})")
-
-    # 4. Warehouse access
+    # Use SDK for Unity Catalog grants (correct method: SQL GRANT statements)
     if WAREHOUSE_ID:
+        grants = [
+            f"GRANT USE_CATALOG ON CATALOG `{CATALOG}` TO `{principal}`",
+            f"GRANT BROWSE ON CATALOG `{CATALOG}` TO `{principal}`",
+            f"GRANT USE_SCHEMA ON SCHEMA `{CATALOG}`.`{SCHEMA}` TO `{principal}`",
+            f"GRANT CREATE_TABLE ON SCHEMA `{CATALOG}`.`{SCHEMA}` TO `{principal}`",
+            f"GRANT SELECT ON SCHEMA `{CATALOG}`.`{SCHEMA}` TO `{principal}`",
+            f"GRANT MODIFY ON SCHEMA `{CATALOG}`.`{SCHEMA}` TO `{principal}`",
+        ]
+        # Also grant BROWSE on other catalogs
+        for cat in available_catalogs:
+            if cat != CATALOG:
+                grants.append(f"GRANT BROWSE ON CATALOG `{cat}` TO `{principal}`")
+
+        for sql in grants:
+            try:
+                stmt = w.statement_execution.execute_statement(
+                    warehouse_id=WAREHOUSE_ID, statement=sql, wait_timeout="15s"
+                )
+                status = stmt.status.state.value if stmt.status else "UNKNOWN"
+                label = sql.split(" ON ")[0].replace("GRANT ", "") + " ON " + sql.split(" ON ")[1].split(" TO ")[0]
+                if status == "SUCCEEDED":
+                    print(f"  {label}: ✅")
+                else:
+                    print(f"  {label}: ⚠️ {status}")
+            except Exception as e:
+                print(f"  {sql[:60]}...: ⚠️ {e}")
+
+        # Warehouse CAN_USE via permissions API (PATCH, not PUT)
         try:
-            resp = api_put(f"/api/2.0/permissions/sql/warehouses/{WAREHOUSE_ID}", {
+            resp = api_patch(f"/api/2.0/permissions/sql/warehouses/{WAREHOUSE_ID}", {
                 "access_control_list": [
                     {"service_principal_name": principal, "all_permissions": [{"permission_level": "CAN_USE"}]}
                 ]
             })
             print(f"  CAN_USE on warehouse: {resp.status_code}" + (f" ⚠️ {resp.text[:150]}" if resp.status_code != 200 else " ✅"))
         except Exception as e:
-            print(f"  Warehouse permission: FAILED ({e})")
+            print(f"  Warehouse permission: ⚠️ {e}")
+    else:
+        print("  ⚠️ No warehouse — cannot grant permissions via SQL. Grant manually.")
 
 # COMMAND ----------
 
