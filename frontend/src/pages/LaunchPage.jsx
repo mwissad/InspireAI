@@ -154,14 +154,24 @@ export default function LaunchPage({ settings, update, onLaunched }) {
     }
   }, [selectedCatalogs, selectedSchemas, selectedTables]);
 
-  // Load catalogs on mount — proxy handles auth in Databricks App mode
+  // Load catalogs once on mount — backend handles auth (SP token pre-warmed on startup)
+  const [catalogsLoaded, setCatalogsLoaded] = useState(false);
   useEffect(() => {
+    if (catalogsLoaded) return;
     setLoadingCatalogs(true);
-    apiFetch('/api/catalogs')
-      .then((data) => setCatalogs(data.catalogs || []))
+    fetch('/api/catalogs', {
+      headers: token ? { 'Authorization': `Bearer ${token}`, 'X-DB-PAT-Token': token } : {},
+    })
+      .then(r => { if (!r.ok) throw new Error(`${r.status}`); return r.json(); })
+      .then((data) => {
+        const cats = data.catalogs || [];
+        console.log('[LaunchPage] catalogs loaded:', cats.length, cats.map(c => c.name));
+        setCatalogs(cats);
+        setCatalogsLoaded(true);
+      })
       .catch((err) => console.warn('[LaunchPage] catalog load failed:', err.message))
       .finally(() => setLoadingCatalogs(false));
-  }, [apiFetch]);
+  }, [catalogsLoaded, token]);
 
   // Load schemas when catalogs change
   useEffect(() => {
