@@ -140,17 +140,27 @@ export default function LaunchPage({ settings, update, onLaunched }) {
     setParams((p) => ({ ...p, '07_business_priorities': sel.join(',') }));
   }, [priorityChecks]);
 
-  // Build UC metadata from selections — combined into 01_uc_metadata for the notebook
+  // Build UC metadata — uses the most specific level selected (tables > schemas > catalogs)
+  // All values use the Databricks 3-level namespace: catalog.schema.table
   useEffect(() => {
+    let metadata = '';
     if (selectedTables.length > 0) {
-      const metadata = selectedTables.join(',');
+      // Tables are the most specific — use full 3-level names (catalog.schema.table)
+      metadata = selectedTables.join(',');
       setParams((p) => p['04_table_election'] !== 'Selected Tables'
         ? { ...p, '01_uc_metadata': metadata, '04_table_election': 'Selected Tables' }
         : { ...p, '01_uc_metadata': metadata }
       );
+    } else if (selectedSchemas.length > 0) {
+      // Schemas selected — use 2-level names (catalog.schema)
+      metadata = selectedSchemas.join(',');
+      setParams((p) => ({ ...p, '01_uc_metadata': metadata }));
+    } else if (selectedCatalogs.length > 0) {
+      // Only catalogs — use catalog names
+      metadata = selectedCatalogs.join(',');
+      setParams((p) => ({ ...p, '01_uc_metadata': metadata }));
     } else {
-      const parts = [...selectedCatalogs, ...selectedSchemas];
-      setParams((p) => ({ ...p, '01_uc_metadata': parts.join(',') }));
+      setParams((p) => ({ ...p, '01_uc_metadata': '' }));
     }
   }, [selectedCatalogs, selectedSchemas, selectedTables]);
 
@@ -484,7 +494,7 @@ export default function LaunchPage({ settings, update, onLaunched }) {
                           }
                         }}
                         getKey={(s) => s.full_name}
-                        getLabel={(s) => s.full_name}
+                        getLabel={(s) => selectedCatalogs.length > 1 ? s.full_name : s.name}
                         searchValue={schemaSearch}
                         onSearch={setSchemaSearch}
                         searchPlaceholder="Search schemas..."
@@ -516,7 +526,7 @@ export default function LaunchPage({ settings, update, onLaunched }) {
                           else setSelectedTables((p) => [...p, name]);
                         }}
                         getKey={(t) => t.full_name}
-                        getLabel={(t) => t.full_name.split('.').pop()}
+                        getLabel={(t) => selectedSchemas.length > 1 ? `${t.schema_name}.${t.name}` : t.name}
                         searchValue={tableSearch}
                         onSearch={setTableSearch}
                         searchPlaceholder="Search tables..."
