@@ -355,25 +355,34 @@ if not RUNTIME_SP_ID:
 if not RUNTIME_SP_NAME:
     print("  Warning: Could not find the runtime SP. Permissions must be granted manually.")
 
-# Grant permissions to the RUNTIME SP using the Databricks SDK (more reliable than REST)
-if RUNTIME_SP_NAME:
-    principal = RUNTIME_SP_NAME
-    print(f"\nGranting permissions to '{principal}'...")
+# Grant permissions to the RUNTIME SP
+# SQL GRANT uses the SP's applicationId (UUID), not display name.
+RUNTIME_SP_APP_ID = None
+if RUNTIME_SP_ID:
+    try:
+        sp_data = api_get(f"/api/2.0/preview/scim/v2/ServicePrincipals/{RUNTIME_SP_ID}")
+        RUNTIME_SP_APP_ID = sp_data.get("applicationId", sp_data.get("externalId", ""))
+    except Exception:
+        pass
 
-    # Use SDK for Unity Catalog grants (correct method: SQL GRANT statements)
+principal_for_sql = RUNTIME_SP_APP_ID or RUNTIME_SP_NAME
+principal_for_api = RUNTIME_SP_APP_ID or RUNTIME_SP_NAME
+
+if principal_for_sql:
+    print(f"\nGranting permissions to SP (sql: `{principal_for_sql}`, api: {principal_for_api})...")
+
     if WAREHOUSE_ID:
         grants = [
-            f"GRANT USE_CATALOG ON CATALOG `{CATALOG}` TO `{principal}`",
-            f"GRANT BROWSE ON CATALOG `{CATALOG}` TO `{principal}`",
-            f"GRANT USE_SCHEMA ON SCHEMA `{CATALOG}`.`{SCHEMA}` TO `{principal}`",
-            f"GRANT CREATE_TABLE ON SCHEMA `{CATALOG}`.`{SCHEMA}` TO `{principal}`",
-            f"GRANT SELECT ON SCHEMA `{CATALOG}`.`{SCHEMA}` TO `{principal}`",
-            f"GRANT MODIFY ON SCHEMA `{CATALOG}`.`{SCHEMA}` TO `{principal}`",
+            f"GRANT USE_CATALOG ON CATALOG `{CATALOG}` TO `{principal_for_sql}`",
+            f"GRANT BROWSE ON CATALOG `{CATALOG}` TO `{principal_for_sql}`",
+            f"GRANT USE_SCHEMA ON SCHEMA `{CATALOG}`.`{SCHEMA}` TO `{principal_for_sql}`",
+            f"GRANT CREATE_TABLE ON SCHEMA `{CATALOG}`.`{SCHEMA}` TO `{principal_for_sql}`",
+            f"GRANT SELECT ON SCHEMA `{CATALOG}`.`{SCHEMA}` TO `{principal_for_sql}`",
+            f"GRANT MODIFY ON SCHEMA `{CATALOG}`.`{SCHEMA}` TO `{principal_for_sql}`",
         ]
-        # Also grant BROWSE on other catalogs
         for cat in available_catalogs:
             if cat != CATALOG:
-                grants.append(f"GRANT BROWSE ON CATALOG `{cat}` TO `{principal}`")
+                grants.append(f"GRANT BROWSE ON CATALOG `{cat}` TO `{principal_for_sql}`")
 
         for sql in grants:
             try:
@@ -385,22 +394,27 @@ if RUNTIME_SP_NAME:
                 if status == "SUCCEEDED":
                     print(f"  {label}: ✅")
                 else:
-                    print(f"  {label}: ⚠️ {status}")
+                    err_msg = ""
+                    if stmt.status and stmt.status.error:
+                        err_msg = stmt.status.error.message or ""
+                    print(f"  {label}: ⚠️ {status} {err_msg[:100]}")
             except Exception as e:
-                print(f"  {sql[:60]}...: ⚠️ {e}")
+                print(f"  {sql[:70]}...: ⚠️ {str(e)[:150]}")
 
-        # Warehouse CAN_USE via permissions API (PATCH, not PUT)
+        # Warehouse CAN_USE via permissions API
         try:
             resp = api_patch(f"/api/2.0/permissions/sql/warehouses/{WAREHOUSE_ID}", {
                 "access_control_list": [
-                    {"service_principal_name": principal, "all_permissions": [{"permission_level": "CAN_USE"}]}
+                    {"service_principal_name": principal_for_api, "permission_level": "CAN_USE"}
                 ]
             })
             print(f"  CAN_USE on warehouse: {resp.status_code}" + (f" ⚠️ {resp.text[:150]}" if resp.status_code != 200 else " ✅"))
         except Exception as e:
             print(f"  Warehouse permission: ⚠️ {e}")
     else:
-        print("  ⚠️ No warehouse — cannot grant permissions via SQL. Grant manually.")
+        print("  ⚠️ No warehouse — grant permissions manually.")
+else:
+    print("  ⚠️ Could not determine SP identity. Grant permissions manually.")
 
 # COMMAND ----------
 
