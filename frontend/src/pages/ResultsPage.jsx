@@ -14,6 +14,7 @@ import {
   Database,
   Server,
   RefreshCw,
+  Star,
   Calendar,
   Building2,
   Layers,
@@ -80,9 +81,11 @@ const PIPELINE_STAGES = [
 export default function ResultsPage({ settings, update, sessionId: propSessionId, embedded = false }) {
   const { databricksHost, token, warehouseId: settingsWarehouseId, inspireDatabase: settingsInspireDb } = settings;
 
-  // Local editable copies for the source-picker
+  // Track settings — update when they arrive from bootstrap
   const [inspireDb, setInspireDb] = useState(settingsInspireDb || '');
   const [warehouseId, setWarehouseId] = useState(settingsWarehouseId || '');
+  useEffect(() => { if (settingsInspireDb && !inspireDb) setInspireDb(settingsInspireDb); }, [settingsInspireDb]);
+  useEffect(() => { if (settingsWarehouseId && !warehouseId) setWarehouseId(settingsWarehouseId); }, [settingsWarehouseId]);
 
   const [sessions, setSessions] = useState([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
@@ -106,6 +109,20 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
   const [filterGoalsAlignment, setFilterGoalsAlignment] = useState('all');
   const [filterQuality, setFilterQuality] = useState('all');
   const [sortBy, setSortBy] = useState('priority');
+  const [showFavoritesOnly, setShowFavoritesOnly] = useState(false);
+
+  // Favorites — persisted in localStorage per session
+  const [favorites, setFavorites] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('inspire_favorites') || '{}'); } catch { return {}; }
+  });
+  const toggleFavorite = (ucId) => {
+    setFavorites(prev => {
+      const next = { ...prev, [ucId]: !prev[ucId] };
+      if (!next[ucId]) delete next[ucId];
+      localStorage.setItem('inspire_favorites', JSON.stringify(next));
+      return next;
+    });
+  };
 
   // Subdomain expansion state
   const [expandedDomains, setExpandedDomains] = useState({});
@@ -139,11 +156,13 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
     [token, databricksHost]
   );
 
-  // ── Auto-load sessions on mount if settings exist ──
+  // ── Auto-load sessions when settings are available ──
+  const [autoLoaded, setAutoLoaded] = useState(false);
   useEffect(() => {
-    if (!inspireDb || !warehouseId) return;
+    if (autoLoaded || !inspireDb || !warehouseId) return;
+    setAutoLoaded(true);
     handleLoadSessions(true);
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [inspireDb, warehouseId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleLoadSessions = async (autoLoad = false) => {
     if (!inspireDb || !warehouseId) return;
@@ -309,6 +328,11 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
   } catch (err) {
     console.error('Error filtering/sorting use cases:', err);
     filteredUseCases = allUseCases;
+  }
+
+  // Apply favorites filter
+  if (showFavoritesOnly) {
+    filteredUseCases = filteredUseCases.filter(uc => favorites[uc.No || uc.id]);
   }
 
   const domains = [
@@ -680,106 +704,42 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
         </div>
       )}
 
-      {/* ═══ Source Picker — shown when no results loaded (hidden when embedded) ═══ */}
+      {/* ═══ Loading / Empty state — sessions auto-load from settings ═══ */}
       {!embedded && !results && !loading && (
-        <div className="bg-surface border border-border rounded-lg overflow-hidden mb-6">
-          <div className="flex items-center gap-3 px-5 py-3 border-b border-border bg-panel">
-            <div className="w-7 h-7 rounded-full bg-db-red flex items-center justify-center">
-              <Database size={14} className="text-white" />
+        <div className="mb-6">
+          {/* Loading sessions */}
+          {sessionsLoading && (
+            <div className="bg-surface border border-border rounded-lg p-8 text-center">
+              <Loader2 size={24} className="animate-spin text-db-red mx-auto mb-3" />
+              <p className="text-sm font-medium text-text-primary">Loading your Inspire sessions...</p>
+              <p className="text-xs text-text-tertiary mt-1">Connecting to workspace and fetching results</p>
             </div>
-            <div>
-              <h2 className="text-sm font-semibold text-text-primary">
-                Data Source
-              </h2>
-              <p className="text-xs text-text-secondary">
-                Select your Inspire session to view results
+          )}
+
+          {/* Error */}
+          {!sessionsLoading && sessionsError && (
+            <div className="bg-surface border border-error/20 rounded-lg p-5">
+              <div className="flex items-center gap-2 mb-3">
+                <AlertCircle size={16} className="text-error" />
+                <span className="text-sm font-medium text-error">Could not load sessions</span>
+              </div>
+              <p className="text-xs text-text-secondary mb-3">{sessionsError}</p>
+              <button onClick={() => handleLoadSessions(false)} className="text-xs text-db-red hover:underline flex items-center gap-1">
+                <RefreshCw size={12} /> Try again
+              </button>
+            </div>
+          )}
+
+          {/* No sessions found */}
+          {!sessionsLoading && sessionsLoaded && sessions.length === 0 && !sessionsError && (
+            <div className="bg-surface border border-border rounded-lg p-8 text-center">
+              <FileText size={24} className="text-text-tertiary mx-auto mb-3" />
+              <p className="text-sm font-medium text-text-primary">No sessions found</p>
+              <p className="text-xs text-text-tertiary mt-1">
+                Run the Inspire AI pipeline first to generate results.
               </p>
             </div>
-          </div>
-
-          <div className="px-5 py-5 space-y-4">
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              {/* Inspire Database */}
-              <div>
-                <label className="text-xs font-semibold text-text-primary block mb-1.5">
-                  Inspire Database
-                </label>
-                <div className="relative">
-                  <Database
-                    size={14}
-                    className="absolute left-3 top-1/2 -translate-y-1/2 text-text-tertiary"
-                  />
-                  <input
-                    type="text"
-                    className="w-full pl-9 pr-3 py-2 text-sm border border-border rounded-md bg-surface text-text-primary placeholder:text-text-tertiary glow-focus transition-smooth"
-                    placeholder="catalog._inspire"
-                    value={inspireDb}
-                    onChange={(e) => {
-                      setInspireDb(e.target.value);
-                      update?.('inspireDatabase', e.target.value);
-                    }}
-                  />
-                </div>
-              </div>
-
-              {/* Warehouse ID */}
-              <div>
-                <label className="text-xs font-semibold text-text-primary block mb-1.5">
-                  Warehouse ID
-                </label>
-                <div className="relative">
-                  <Server
-                    size={14}
-                    className="absolute left-3 top-1/2 -translate-y-1/2 text-text-tertiary"
-                  />
-                  <input
-                    type="text"
-                    className="w-full pl-9 pr-3 py-2 text-sm border border-border rounded-md bg-surface text-text-primary placeholder:text-text-tertiary glow-focus transition-smooth"
-                    placeholder="SQL Warehouse ID"
-                    value={warehouseId}
-                    onChange={(e) => {
-                      setWarehouseId(e.target.value);
-                      update?.('warehouseId', e.target.value);
-                    }}
-                  />
-                </div>
-              </div>
-
-              {/* Load button */}
-              <div className="flex items-end">
-                <button
-                  onClick={() => handleLoadSessions(false)}
-                  disabled={!inspireDb || !warehouseId || sessionsLoading}
-                  className="w-full py-2 bg-db-red text-white text-sm font-semibold rounded-md hover:bg-db-red-hover disabled:opacity-50 disabled:cursor-not-allowed transition-smooth flex items-center justify-center gap-2"
-                >
-                  {sessionsLoading ? (
-                    <Loader2 size={14} className="animate-spin" />
-                  ) : (
-                    <RefreshCw size={14} />
-                  )}
-                  {sessionsLoading ? 'Loading...' : 'Load Sessions'}
-                </button>
-              </div>
-            </div>
-
-            {/* Sessions error */}
-            {sessionsError && (
-              <div className="flex items-center gap-2 p-3 bg-error-bg border border-error/20 rounded-lg">
-                <AlertCircle size={14} className="text-error shrink-0" />
-                <span className="text-sm text-error">{sessionsError}</span>
-              </div>
-            )}
-
-            {/* No sessions found */}
-            {sessionsLoaded && sessions.length === 0 && !sessionsError && (
-              <div className="p-4 bg-bg rounded-lg border border-border text-center">
-                <FileText size={18} className="text-text-tertiary mx-auto mb-2" />
-                <p className="text-sm text-text-secondary">No sessions found.</p>
-                <p className="text-xs text-text-tertiary mt-1">
-                  Run the pipeline first to generate results.
-                </p>
-              </div>
-            )}
+          )}
 
             {/* Session list (button-style) */}
             {sessions.length > 0 && (
@@ -836,7 +796,6 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
                 })}
               </div>
             )}
-          </div>
         </div>
       )}
 
@@ -1461,6 +1420,23 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
                     />
                   </div>
 
+                  {/* Favorites toggle */}
+                  <button
+                    type="button"
+                    onClick={() => setShowFavoritesOnly(p => !p)}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-smooth ${
+                      showFavoritesOnly
+                        ? 'bg-amber-50 text-amber-600 border-amber-200'
+                        : 'bg-bg text-text-secondary border-border hover:border-border-strong'
+                    }`}
+                    title={showFavoritesOnly ? 'Show all use cases' : 'Show favorites only'}
+                  >
+                    <Star size={13} className={showFavoritesOnly ? 'fill-amber-400 text-amber-500' : ''} />
+                    {Object.keys(favorites).length > 0 && (
+                      <span className="text-[10px]">{Object.keys(favorites).length}</span>
+                    )}
+                  </button>
+
                   {/* Priority pills */}
                   {priorities.length > 0 && (
                     <div className="flex items-center gap-1">
@@ -1654,6 +1630,8 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
                       onToggle={() =>
                         setExpandedUseCase(expandedUseCase === (uc.No || idx) ? null : uc.No || idx)
                       }
+                      isFavorite={!!favorites[uc.No || uc.id]}
+                      onToggleFavorite={() => toggleFavorite(uc.No || uc.id)}
                       resolveTable={resolveTable}
                       token={token}
                       databricksHost={databricksHost}
@@ -1766,7 +1744,7 @@ function CopyButton({ text }) {
 }
 
 /* ── Use Case Card ── */
-function UseCaseCard({ uc, index, expanded, onToggle, resolveTable, token, databricksHost, generationPath, allNotebookFiles }) {
+function UseCaseCard({ uc, index, expanded, onToggle, isFavorite, onToggleFavorite, resolveTable, token, databricksHost, generationPath, allNotebookFiles }) {
   const [notebookContent, setNotebookContent] = useState(null);
   const [notebookLoading, setNotebookLoading] = useState(false);
   const [notebookError, setNotebookError] = useState('');
@@ -1871,9 +1849,18 @@ function UseCaseCard({ uc, index, expanded, onToggle, resolveTable, token, datab
   return (
     <div className="bg-surface border border-border rounded-lg overflow-hidden hover:border-border-strong transition-smooth">
       {/* Header */}
+      <div className="flex items-center gap-0">
+        {/* Favorite star */}
+        <button
+          onClick={(e) => { e.stopPropagation(); onToggleFavorite(); }}
+          className={`pl-3 pr-1 py-4 shrink-0 transition-smooth ${isFavorite ? 'text-amber-400' : 'text-border hover:text-amber-300'}`}
+          title={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
+        >
+          <Star size={16} className={isFavorite ? 'fill-amber-400' : ''} />
+        </button>
       <button
         onClick={onToggle}
-        className="w-full flex items-center gap-3 px-5 py-4 text-left hover:bg-bg-subtle transition-smooth"
+        className="flex-1 flex items-center gap-3 px-3 py-4 text-left hover:bg-bg-subtle transition-smooth"
       >
         <span className="text-lg shrink-0">{typeIcon}</span>
         <div className="flex-1 min-w-0">
@@ -1926,6 +1913,7 @@ function UseCaseCard({ uc, index, expanded, onToggle, resolveTable, token, datab
           }`}
         />
       </button>
+      </div>
 
       {/* Expanded */}
       {expanded && (

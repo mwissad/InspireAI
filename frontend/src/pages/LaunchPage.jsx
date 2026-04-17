@@ -552,6 +552,20 @@ export default function LaunchPage({ settings, update, onLaunched }) {
                 )}
               </Field>
 
+            {/* Generation Instructions — optional */}
+            <FieldSection label="Generation Instructions" hint="Optional — guide use case generation with specific instructions">
+              <div className="relative">
+                <Target size={14} className="absolute left-3 top-3 text-text-tertiary" />
+                <textarea
+                  rows={3}
+                  placeholder="Focus on fraud detection, join orders with customers on customer_id, exclude staging tables..."
+                  value={params['08_generation_instructions']}
+                  onChange={(e) => updateParam('08_generation_instructions', e.target.value)}
+                  className="w-full pl-9 pr-4 py-2.5 text-sm border border-border rounded-lg bg-surface text-text-primary placeholder:text-text-tertiary glow-focus transition-smooth resize-none"
+                />
+              </div>
+            </FieldSection>
+
           </div>
         </section>
 
@@ -616,20 +630,6 @@ export default function LaunchPage({ settings, update, onLaunched }) {
                       </button>
                     );
                   })}
-                </div>
-              </FieldSection>
-
-              {/* Generation Instructions */}
-              <FieldSection label="Generation Instructions" hint="Free-text instructions to guide use case generation (e.g. focus areas, join hints, exclusions)">
-                <div className="relative">
-                  <Target size={14} className="absolute left-3 top-3 text-text-tertiary" />
-                  <textarea
-                    rows={3}
-                    placeholder="Focus on fraud detection, join orders with customers on customer_id, exclude staging tables..."
-                    value={params['08_generation_instructions']}
-                    onChange={(e) => updateParam('08_generation_instructions', e.target.value)}
-                    className="w-full pl-9 pr-4 py-2.5 text-sm border border-border rounded-lg bg-surface text-text-primary placeholder:text-text-tertiary glow-focus transition-smooth resize-none"
-                  />
                 </div>
               </FieldSection>
 
