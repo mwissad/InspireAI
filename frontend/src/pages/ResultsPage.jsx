@@ -707,36 +707,63 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
       {/* ═══ Loading / Empty state — sessions auto-load from settings ═══ */}
       {!embedded && !results && !loading && (
         <div className="mb-6">
-          {/* Loading sessions */}
+          {/* Loading sessions — animated pipeline illustration */}
           {sessionsLoading && (
-            <div className="bg-surface border border-border rounded-lg p-8 text-center">
-              <Loader2 size={24} className="animate-spin text-db-red mx-auto mb-3" />
-              <p className="text-sm font-medium text-text-primary">Loading your Inspire sessions...</p>
-              <p className="text-xs text-text-tertiary mt-1">Connecting to workspace and fetching results</p>
+            <div className="bg-surface border border-border rounded-xl p-10 text-center">
+              <div className="flex items-center justify-center gap-3 mb-6">
+                {['Connecting', 'Scanning', 'Loading'].map((step, i) => (
+                  <div key={step} className="flex items-center gap-3">
+                    <div className="flex flex-col items-center gap-2">
+                      <div
+                        className="w-10 h-10 rounded-xl flex items-center justify-center animate-pulse"
+                        style={{ backgroundColor: 'rgba(255,54,33,0.1)', animationDelay: `${i * 400}ms` }}
+                      >
+                        {i === 0 && <Database size={18} className="text-db-red" />}
+                        {i === 1 && <Search size={18} className="text-db-red" />}
+                        {i === 2 && <Sparkles size={18} className="text-db-red" />}
+                      </div>
+                      <span className="text-[10px] font-medium text-text-tertiary">{step}</span>
+                    </div>
+                    {i < 2 && (
+                      <div className="w-8 h-px bg-border relative overflow-hidden mb-5">
+                        <div className="absolute inset-y-0 left-0 w-1/2 bg-db-red/40 animate-[shimmer_1.5s_ease-in-out_infinite]" style={{ animationDelay: `${i * 500}ms` }} />
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+              <p className="text-sm font-medium text-text-primary">Fetching your Inspire sessions</p>
+              <p className="text-xs text-text-tertiary mt-1.5">Connecting to your workspace...</p>
             </div>
           )}
 
           {/* Error */}
           {!sessionsLoading && sessionsError && (
-            <div className="bg-surface border border-error/20 rounded-lg p-5">
-              <div className="flex items-center gap-2 mb-3">
-                <AlertCircle size={16} className="text-error" />
-                <span className="text-sm font-medium text-error">Could not load sessions</span>
+            <div className="bg-surface border border-error/20 rounded-xl p-6">
+              <div className="flex items-start gap-3">
+                <div className="w-10 h-10 rounded-xl bg-error/10 flex items-center justify-center shrink-0">
+                  <AlertCircle size={20} className="text-error" />
+                </div>
+                <div className="flex-1">
+                  <p className="text-sm font-semibold text-text-primary mb-1">Could not load sessions</p>
+                  <p className="text-xs text-text-secondary mb-3">{sessionsError}</p>
+                  <button onClick={() => handleLoadSessions(false)} className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-db-red bg-db-red-50 border border-db-red/20 rounded-lg hover:bg-db-red/10 transition-smooth">
+                    <RefreshCw size={12} /> Retry
+                  </button>
+                </div>
               </div>
-              <p className="text-xs text-text-secondary mb-3">{sessionsError}</p>
-              <button onClick={() => handleLoadSessions(false)} className="text-xs text-db-red hover:underline flex items-center gap-1">
-                <RefreshCw size={12} /> Try again
-              </button>
             </div>
           )}
 
           {/* No sessions found */}
           {!sessionsLoading && sessionsLoaded && sessions.length === 0 && !sessionsError && (
-            <div className="bg-surface border border-border rounded-lg p-8 text-center">
-              <FileText size={24} className="text-text-tertiary mx-auto mb-3" />
-              <p className="text-sm font-medium text-text-primary">No sessions found</p>
-              <p className="text-xs text-text-tertiary mt-1">
-                Run the Inspire AI pipeline first to generate results.
+            <div className="bg-surface border border-border rounded-xl p-10 text-center">
+              <div className="w-14 h-14 rounded-2xl bg-bg-subtle flex items-center justify-center mx-auto mb-4">
+                <FileText size={24} className="text-text-tertiary" />
+              </div>
+              <p className="text-sm font-semibold text-text-primary">No sessions yet</p>
+              <p className="text-xs text-text-tertiary mt-1.5 max-w-xs mx-auto">
+                Launch the Inspire AI pipeline from the Launch page to discover use cases from your data.
               </p>
             </div>
           )}
@@ -799,16 +826,38 @@ export default function ResultsPage({ settings, update, sessionId: propSessionId
         </div>
       )}
 
-      {/* Loading */}
+      {/* Loading results — skeleton with progress message */}
       {loading && (
         <div className="space-y-6">
-          <SkeletonStats count={4} />
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <div className="skeleton rounded-xl h-[280px]" />
-            <div className="skeleton rounded-xl h-[280px]" />
+          {/* Loading header */}
+          <div className="flex items-center gap-3 px-1">
+            <div className="w-8 h-8 rounded-lg bg-db-red/10 flex items-center justify-center">
+              <Loader2 size={16} className="animate-spin text-db-red" />
+            </div>
+            <div>
+              <p className="text-sm font-semibold text-text-primary">Analyzing results...</p>
+              <p className="text-xs text-text-tertiary">Hydrating use cases, domains, and scores</p>
+            </div>
           </div>
+
+          {/* Skeleton KPI cards */}
+          <SkeletonStats count={4} />
+
+          {/* Skeleton charts */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div className="rounded-xl border border-border p-5 space-y-3">
+              <div className="skeleton h-3 w-32 rounded" />
+              <div className="skeleton rounded-lg h-[220px]" />
+            </div>
+            <div className="rounded-xl border border-border p-5 space-y-3">
+              <div className="skeleton h-3 w-40 rounded" />
+              <div className="skeleton rounded-lg h-[220px]" />
+            </div>
+          </div>
+
+          {/* Skeleton use case cards */}
           <div className="space-y-3">
-            {[1, 2, 3].map(i => <SkeletonCard key={i} />)}
+            {[1, 2, 3, 4].map(i => <SkeletonCard key={i} />)}
           </div>
         </div>
       )}

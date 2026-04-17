@@ -359,6 +359,10 @@ textarea::placeholder {
   0% { background-position: -200% 0; }
   100% { background-position: 200% 0; }
 }
+@keyframes shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(300%); }
+}
 .skeleton {
   background: linear-gradient(90deg, var(--t-bg-subtle) 25%, var(--t-surface) 50%, var(--t-bg-subtle) 75%);
   background-size: 200% 100%;
