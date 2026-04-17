@@ -1576,6 +1576,30 @@ app.get('/api/inspire/usecases', requireToken, async (req, res) => {
     const sql = `SELECT * FROM ${table} WHERE session_id = ${session_id} ORDER BY id`;
     const result = await executeSql(req.dbHost, req.dbToken, warehouse_id, sql);
     const rows = sqlResultToObjects(result);
+    // Normalize tracking table snake_case → frontend Title Case
+    for (const row of rows) {
+      row.No = row.id || '';
+      row.Name = row.use_case || row.Name || '';
+      row.short_name = row.short_name || row.use_case || '';
+      row['Business Domain'] = row.business_domain || '';
+      row.Subdomain = row.subdomain || '';
+      row.Statement = row.statement || row.description || '';
+      row.Solution = row.solution || '';
+      row['Business Value'] = row.business_value || '';
+      row.Beneficiary = row.beneficiary || '';
+      row.Sponsor = row.sponsor || '';
+      row.Priority = row.priority_score ? (row.priority_score >= 4 ? 'Very High' : row.priority_score >= 3 ? 'High' : row.priority_score >= 2 ? 'Medium' : 'Low') : '';
+      row.Quality = row.quality_score ? (row.quality_score >= 4 ? 'Very High' : row.quality_score >= 3 ? 'High' : row.quality_score >= 2 ? 'Medium' : 'Low') : '';
+      row.type = row.type || '';
+      row['Analytics Technique'] = row.analytics_technique || '';
+      row['Business Priority Alignment'] = row.business_priority_alignment || '';
+      row['Tables Involved'] = row.tables_involved || '';
+      row['Primary Table'] = row.primary_table || '';
+      row.notebook_path = row.notebook_path || '';
+      row.genie_instruction = row.genie_instruction || '';
+      row['Technical Design'] = row.high_level_design || '';
+      row._domain = row.business_domain || '';
+    }
     console.log(`   📋 usecases: ${rows.length} rows for session ${session_id}`);
     res.json({ usecases: rows, count: rows.length });
   } catch (err) {
