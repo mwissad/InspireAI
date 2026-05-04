@@ -1,0 +1,17 @@
+{
+  "name": "inspire-ai",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Inspire AI — Data Strategy Copilot powered by Databricks",
+  "scripts": {
+    "postinstall": "cd backend && npm install --omit=dev --no-audit --no-fund",
+    "install:all": "cd frontend && npm install && cd ../backend && npm install",
+    "dev:backend": "cd backend && node --watch-path=./server.js server.js",
+    "dev:frontend": "cd frontend && npm run dev",
+    "dev": "npx --yes concurrently -n backend,frontend -c blue,green \"npm run dev:backend\" \"npm run dev:frontend\"",
+    "start": "NODE_ENV=production node backend/server.js",
+    "package:workspace": "bash scripts/package-for-workspace.sh",
+    "deploy:inspire": "bash scripts/deploy-inspire-full.sh",
+    "deploy": "npm run deploy:inspire"
+  }
+}

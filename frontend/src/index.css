@@ -1,0 +1,519 @@
+@import "tailwindcss";
+
+@theme {
+  /* Databricks brand */
+  --color-db-red: #FF3621;
+  --color-db-red-hover: #FF4A36;
+  --color-db-red-50: rgba(255, 54, 33, 0.08);
+  --color-db-red-100: rgba(255, 54, 33, 0.15);
+
+  /* Surfaces — resolved via CSS vars below */
+  --color-surface: var(--t-surface);
+  --color-bg: var(--t-bg);
+  --color-bg-subtle: var(--t-bg-subtle);
+  --color-panel: var(--t-panel);
+
+  /* Borders */
+  --color-border: var(--t-border);
+  --color-border-subtle: var(--t-border-subtle);
+  --color-border-strong: var(--t-border-strong);
+
+  /* Text */
+  --color-text-primary: var(--t-text-primary);
+  --color-text-secondary: var(--t-text-secondary);
+  --color-text-tertiary: var(--t-text-tertiary);
+  --color-text-disabled: var(--t-text-disabled);
+
+  /* Status */
+  --color-success: #22C55E;
+  --color-success-bg: var(--t-success-bg);
+  --color-warning: #EAB308;
+  --color-warning-bg: var(--t-warning-bg);
+  --color-error: #EF4444;
+  --color-error-bg: var(--t-error-bg);
+  --color-info: #3B82F6;
+  --color-info-bg: var(--t-info-bg);
+}
+
+/* ═══ Light theme (default) ═══ */
+:root {
+  --t-surface: #FFFFFF;
+  --t-bg: #F7F7F8;
+  --t-bg-subtle: #EEEFF1;
+  --t-panel: #FAFAFA;
+
+  --t-border: rgba(0, 0, 0, 0.10);
+  --t-border-subtle: rgba(0, 0, 0, 0.05);
+  --t-border-strong: rgba(0, 0, 0, 0.18);
+
+  --t-text-primary: #1A1A1F;
+  --t-text-secondary: #5C5C66;
+  --t-text-tertiary: #8C8C96;
+  --t-text-disabled: #B8B8C0;
+
+  --t-success-bg: rgba(34, 197, 94, 0.10);
+  --t-warning-bg: rgba(234, 179, 8, 0.10);
+  --t-error-bg: rgba(239, 68, 68, 0.10);
+  --t-info-bg: rgba(59, 130, 246, 0.10);
+
+  --t-scrollbar-thumb: rgba(0, 0, 0, 0.12);
+  --t-scrollbar-hover: rgba(0, 0, 0, 0.22);
+  --t-input-bg: #FFFFFF;
+  --t-input-color: #1A1A1F;
+  --t-placeholder: #8C8C96;
+}
+
+/* ═══ Dark theme ═══ */
+.dark {
+  --t-surface: #111113;
+  --t-bg: #09090B;
+  --t-bg-subtle: #1A1A1F;
+  --t-panel: #0F0F12;
+
+  --t-border: rgba(255, 255, 255, 0.08);
+  --t-border-subtle: rgba(255, 255, 255, 0.04);
+  --t-border-strong: rgba(255, 255, 255, 0.15);
+
+  --t-text-primary: #F0F0F3;
+  --t-text-secondary: #A0A0AB;
+  --t-text-tertiary: #63636E;
+  --t-text-disabled: #3F3F46;
+
+  --t-success-bg: rgba(34, 197, 94, 0.1);
+  --t-warning-bg: rgba(234, 179, 8, 0.1);
+  --t-error-bg: rgba(239, 68, 68, 0.1);
+  --t-info-bg: rgba(59, 130, 246, 0.1);
+
+  --t-scrollbar-thumb: rgba(255, 255, 255, 0.1);
+  --t-scrollbar-hover: rgba(255, 255, 255, 0.2);
+  --t-input-bg: #111113;
+  --t-input-color: #F0F0F3;
+  --t-placeholder: #63636E;
+}
+
+/* Base */
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background-color: var(--t-bg);
+  color: var(--t-text-primary);
+  transition: background-color 0.25s ease, color 0.25s ease;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--t-scrollbar-thumb); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--t-scrollbar-hover); }
+
+/* Glow focus ring */
+.glow-focus:focus-within {
+  box-shadow: 0 0 0 2px rgba(255, 54, 33, 0.15), 0 0 0 4px rgba(255, 54, 33, 0.08);
+}
+
+/* Red glow for active/selected elements */
+.glow-active {
+  box-shadow: 0 0 0 1px #FF3621, 0 0 0 3px rgba(255, 54, 33, 0.15), 0 0 12px rgba(255, 54, 33, 0.1);
+}
+
+/* Subtle red glow for hover */
+.glow-hover:hover {
+  box-shadow: 0 0 0 1px rgba(255, 54, 33, 0.2), 0 0 8px rgba(255, 54, 33, 0.08);
+}
+
+/* Smooth transitions */
+.transition-smooth {
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Layered card elevation — premium "Linear/Vercel" shadow scale */
+.shadow-elevated {
+  box-shadow:
+    0 1px 2px rgba(15, 15, 20, 0.04),
+    0 8px 24px -12px rgba(15, 15, 20, 0.10);
+}
+.dark .shadow-elevated {
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.40),
+    0 12px 32px -16px rgba(0, 0, 0, 0.55);
+}
+
+.shadow-elevated-lg {
+  box-shadow:
+    0 1px 3px rgba(15, 15, 20, 0.05),
+    0 12px 36px -16px rgba(15, 15, 20, 0.14);
+}
+.dark .shadow-elevated-lg {
+  box-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.45),
+    0 18px 44px -18px rgba(0, 0, 0, 0.60);
+}
+
+/* Brand-tinted lift used on hover for primary cards */
+.lift-on-hover {
+  transition:
+    transform 0.25s cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 0.25s cubic-bezier(0.22, 1, 0.36, 1),
+    border-color 0.25s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.lift-on-hover:hover {
+  transform: translateY(-2px);
+  box-shadow:
+    0 1px 2px rgba(15, 15, 20, 0.05),
+    0 14px 32px -14px rgba(255, 54, 33, 0.18);
+}
+.dark .lift-on-hover:hover {
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.50),
+    0 18px 40px -16px rgba(255, 54, 33, 0.28);
+}
+@media (prefers-reduced-motion: reduce) {
+  .lift-on-hover { transition: none; }
+  .lift-on-hover:hover { transform: none; }
+}
+
+/* Progress bar glow */
+.progress-glow {
+  box-shadow: 0 0 8px rgba(255, 54, 33, 0.4), 0 0 20px rgba(255, 54, 33, 0.15);
+}
+
+/* Input field styling */
+input[type="text"],
+input[type="password"],
+select {
+  background-color: var(--t-input-bg);
+  color: var(--t-input-color);
+  transition: background-color 0.25s ease, color 0.25s ease;
+}
+
+input[type="text"]:focus,
+input[type="password"]:focus,
+select:focus {
+  border-color: #FF3621;
+  box-shadow: 0 0 0 3px rgba(255, 54, 33, 0.12);
+  outline: none;
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--t-placeholder);
+}
+
+/* Infinite scrolling marquee */
+@keyframes marquee {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
+.animate-marquee {
+  animation: marquee 40s linear infinite;
+}
+
+/* Hide scrollbar */
+.scrollbar-hide::-webkit-scrollbar { display: none; }
+.scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
+
+/* ═══ Landing Page Animations ═══ */
+
+/* Fade in + slide up entrance */
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.animate-fade-in-up {
+  animation: fadeInUp 0.7s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+/* Ambient floating blobs */
+@keyframes ambientFloat {
+  0%, 100% {
+    transform: translate(0, 0) scale(1);
+    opacity: 0.6;
+  }
+  33% {
+    transform: translate(30px, -20px) scale(1.05);
+    opacity: 0.8;
+  }
+  66% {
+    transform: translate(-20px, 15px) scale(0.95);
+    opacity: 0.5;
+  }
+}
+.animate-ambient-float {
+  animation: ambientFloat 12s ease-in-out infinite;
+}
+.animate-ambient-float-delayed {
+  animation: ambientFloat 16s ease-in-out infinite;
+  animation-delay: -6s;
+}
+
+@keyframes ambientPulse {
+  0%, 100% {
+    opacity: 0.4;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.7;
+    transform: scale(1.1);
+  }
+}
+.animate-ambient-pulse {
+  animation: ambientPulse 10s ease-in-out infinite;
+}
+
+/* Terminal line entrance */
+@keyframes terminalLine {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.animate-terminal-line {
+  animation: terminalLine 0.15s ease-out forwards;
+}
+
+/* Cursor blink */
+@keyframes cursorBlink {
+  0%, 50% { opacity: 1; }
+  51%, 100% { opacity: 0; }
+}
+.animate-cursor-blink {
+  animation: cursorBlink 1s step-end infinite;
+}
+
+/* Shimmer border for industry cards */
+@keyframes shimmerBorder {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+.animate-shimmer-border {
+  background-size: 200% 100%;
+  animation: shimmerBorder 4s linear infinite;
+}
+
+/* Gradient border glow on hover */
+@keyframes gradientBorder {
+  0%, 100% {
+    opacity: 0.3;
+  }
+  50% {
+    opacity: 0.7;
+  }
+}
+.animate-gradient-border {
+  animation: gradientBorder 2s ease-in-out infinite;
+}
+
+/* Respect reduced motion preference */
+@media (prefers-reduced-motion: reduce) {
+  .animate-marquee,
+  .animate-ambient-float,
+  .animate-ambient-float-delayed,
+  .animate-ambient-pulse,
+  .animate-shimmer-border,
+  .animate-gradient-border,
+  .animate-cursor-blink,
+  .animate-fade-in-up {
+    animation: none !important;
+  }
+  .animate-fade-in-up {
+    opacity: 1 !important;
+    transform: none !important;
+  }
+  .animate-ping,
+  .animate-schema-float {
+    animation: none !important;
+  }
+}
+
+/* Floating schema names — drift right to left */
+@keyframes schemaFloat {
+  from { transform: translateX(0); }
+  to { transform: translateX(-120vw); }
+}
+.animate-schema-float {
+  animation: schemaFloat 30s linear infinite;
+}
+
+/* Inspire Orb — radiating ring pulse */
+@keyframes orbRing {
+  0%, 100% {
+    transform: translate(-50%, -50%) scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: translate(-50%, -50%) scale(1.15);
+    opacity: 0.5;
+  }
+}
+
+/* Snap scroll — hide scrollbar completely */
+.scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+
+/* ═══ UI Glow — Premium Effects ═══ */
+
+/* Glassmorphism card */
+.glass {
+  background: var(--t-glass-bg, rgba(255,255,255,0.06));
+  backdrop-filter: blur(16px) saturate(1.4);
+  -webkit-backdrop-filter: blur(16px) saturate(1.4);
+  border: 1px solid var(--t-glass-border, rgba(255,255,255,0.08));
+}
+:root {
+  --t-glass-bg: rgba(255,255,255,0.55);
+  --t-glass-border: rgba(0,0,0,0.06);
+}
+.dark {
+  --t-glass-bg: rgba(255,255,255,0.04);
+  --t-glass-border: rgba(255,255,255,0.06);
+}
+
+/* 3D Tilt card — perspective container */
+.tilt-card {
+  transform-style: preserve-3d;
+  transition: transform 0.3s cubic-bezier(0.03, 0.98, 0.52, 0.99);
+}
+.tilt-card:hover {
+  transform: perspective(800px) rotateX(var(--rx, 0deg)) rotateY(var(--ry, 0deg));
+}
+.tilt-card-inner {
+  transform: translateZ(20px);
+}
+
+/* Skeleton shimmer loading */
+@keyframes skeletonShimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+@keyframes shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(300%); }
+}
+.skeleton {
+  background: linear-gradient(90deg, var(--t-bg-subtle) 25%, var(--t-surface) 50%, var(--t-bg-subtle) 75%);
+  background-size: 200% 100%;
+  animation: skeletonShimmer 1.5s ease-in-out infinite;
+  border-radius: 6px;
+}
+
+/* Magnetic button — subtle pull toward cursor */
+.magnetic-btn {
+  transition: transform 0.25s cubic-bezier(0.03, 0.98, 0.52, 0.99);
+  will-change: transform;
+}
+
+/* Page transition — fade + slide */
+@keyframes pageEnter {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes pageExit {
+  from { opacity: 1; transform: translateY(0); }
+  to { opacity: 0; transform: translateY(-8px); }
+}
+.page-enter {
+  animation: pageEnter 0.35s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.page-exit {
+  animation: pageExit 0.2s ease-in both;
+}
+
+/* Scroll progress ring */
+.scroll-progress-ring {
+  transform: rotate(-90deg);
+  transition: stroke-dashoffset 0.15s;
+}
+
+/* Animated counter — slot machine */
+@keyframes counterSlide {
+  from { transform: translateY(100%); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+.counter-enter {
+  animation: counterSlide 0.6s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* Gauge arc animation */
+@keyframes gaugeArc {
+  from { stroke-dashoffset: var(--gauge-circumference); }
+  to { stroke-dashoffset: var(--gauge-offset); }
+}
+.gauge-arc {
+  animation: gaugeArc 1.2s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* Score gauge glow */
+.gauge-glow {
+  filter: drop-shadow(0 0 4px var(--gauge-color));
+}
+
+/* Heatmap cell pulse on hover */
+.heatmap-cell {
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+.heatmap-cell:hover {
+  transform: scale(1.08);
+  box-shadow: 0 0 12px var(--cell-color);
+  z-index: 10;
+}
+
+/* Celebration burst */
+@keyframes celebrationBurst {
+  0% { transform: scale(0); opacity: 1; }
+  50% { transform: scale(1.2); opacity: 0.8; }
+  100% { transform: scale(1.5); opacity: 0; }
+}
+
+/* Timeline connector */
+.timeline-line {
+  background: linear-gradient(to bottom, var(--color-db-red), transparent);
+}
+
+/* Sparkline mini chart */
+.sparkline-path {
+  stroke-dasharray: 1000;
+  stroke-dashoffset: 1000;
+  animation: sparklineDraw 1s ease-out forwards;
+}
+@keyframes sparklineDraw {
+  to { stroke-dashoffset: 0; }
+}
+
+/* Sunburst sector hover */
+.sunburst-sector {
+  transition: transform 0.2s, opacity 0.2s;
+  transform-origin: center;
+}
+.sunburst-sector:hover {
+  transform: scale(1.03);
+  opacity: 1 !important;
+}
+
+/* Particle canvas — fixed behind content */
+.particle-canvas {
+  position: fixed;
+  top: 0; left: 0;
+  width: 100%; height: 100%;
+  pointer-events: none;
+  z-index: 0;
+}
