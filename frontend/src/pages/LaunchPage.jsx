@@ -613,9 +613,17 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
   const effectiveDb = params['02_inspire_database'] || inspireDatabase;
   const canLaunch = params['00_business_name'] && effectiveDb && params['01_uc_metadata'];
 
-  /** Warn on many explicit tables, or when an entire schema/catalog is in scope. */
+  /** Warn only when more than TABLE_SELECTION_WARN_THRESHOLD tables are in scope. */
   const tableSelectionWarning = useMemo(() => {
-    if (selectedTables.length > TABLE_SELECTION_WARN_THRESHOLD) {
+    const threshold = TABLE_SELECTION_WARN_THRESHOLD;
+    const inScopeTableCount =
+      selectedTables.length > 0 ? selectedTables.length : tables.length;
+
+    if (inScopeTableCount <= threshold) {
+      return { show: false };
+    }
+
+    if (selectedTables.length > threshold) {
       return {
         show: true,
         summary: `${selectedTables.length} tables selected`,
@@ -630,9 +638,9 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
         show: true,
         summary:
           n === 1
-            ? `entire schema ${names} (all tables in that schema)`
-            : `${n} entire schemas (${names}) — all tables in each schema`,
-        tableCount: null,
+            ? `Schema ${names} includes ${inScopeTableCount} tables (whole schema in scope)`
+            : `${n} schemas include ${inScopeTableCount} tables total (whole schemas in scope)`,
+        tableCount: inScopeTableCount,
         scope: 'schemas',
       };
     }
@@ -643,14 +651,14 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
         show: true,
         summary:
           n === 1
-            ? `entire catalog ${names} (all schemas and tables)`
-            : `${n} entire catalogs (${names}) — all schemas and tables`,
-        tableCount: null,
+            ? `Catalog ${names} includes ${inScopeTableCount} tables (whole catalog in scope)`
+            : `${n} catalogs include ${inScopeTableCount} tables total (whole catalogs in scope)`,
+        tableCount: inScopeTableCount,
         scope: 'catalogs',
       };
     }
     return { show: false };
-  }, [selectedTables, selectedSchemas, selectedCatalogs]);
+  }, [selectedTables, selectedSchemas, selectedCatalogs, tables]);
 
   /** Shown in the page `<h1>` — updates after a short typing pause or immediately on blur (“finished writing”). */
   const [headlineBusiness, setHeadlineBusiness] = useState('');
@@ -1549,45 +1557,45 @@ function TableSelectionGuidanceWarning({
 
   return (
     <div
-      className={`rounded-lg border border-amber-500/35 bg-amber-500/5 ${compact ? 'p-3' : 'p-4 mb-3'}`}
+      className={`rounded-lg border border-db-red/25 bg-db-red-50/50 dark:bg-db-red-950/20 ${compact ? 'p-3' : 'p-4 mb-3'}`}
       role="status"
     >
       <div className="flex gap-2.5">
-        <AlertCircle size={compact ? 16 : 18} className="text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+        <AlertCircle size={compact ? 16 : 18} className="text-db-red shrink-0 mt-0.5" />
         <div className="min-w-0 space-y-2 text-sm text-text-secondary leading-relaxed">
-          <p className="font-semibold text-amber-800 dark:text-amber-200">
-            {selectionSummary} — this run will likely take longer
+          <p className="font-semibold text-db-red">
+            {selectionSummary} — this run may take longer
           </p>
           {isBroadScope && (
-            <p className="text-xs text-amber-800/90 dark:text-amber-200/90">
+            <p className="text-xs text-text-secondary">
               You selected a {scope === 'catalogs' ? 'whole catalog' : 'whole schema'} without naming individual
-              tables. Inspire will scan everything in scope. For faster, higher-quality discovery, open the table
-              list and pick a focused set instead.
+              tables. Inspire will scan every table in scope ({tableCount} tables). Open the table list and pick a
+              focused subset for faster, sharper use cases.
             </p>
           )}
           <p>
-            For the best outcomes, select a <strong className="text-text-primary">small set of tables</strong>{' '}
-            (ideally fewer than {idealMax}) in <strong className="text-text-primary">one business domain</strong>{' '}
-            (for example, all sales-related tables).
+            For best results, keep <strong className="text-text-primary">10 or fewer tables</strong> when you can, and
+            stay within <strong className="text-text-primary">one business domain</strong> (for example, sales orders,
+            line items, and customers — not sales plus HR plus finance).
           </p>
           <ul className="list-disc pl-4 space-y-1 text-xs sm:text-sm">
             <li>
-              Prefer <strong className="text-text-primary">transactional</strong> tables that change often with new
-              data (for example <span className="font-mono text-[11px]">sales_transactions</span>).
+              Prefer <strong className="text-text-primary">transactional</strong> tables that receive new rows often
+              (for example <span className="font-mono text-[11px]">sales_transactions</span>).
             </li>
             <li>
-              Static reference tables add little value (for example{' '}
+              Skip or minimize static reference tables (for example{' '}
               <span className="font-mono text-[11px]">store_location</span>).
             </li>
             <li>
-              If relationships are not visible in metadata (no primary/foreign keys), describe joins in{' '}
+              If Unity Catalog metadata does not show keys between tables, describe joins in{' '}
               <strong className="text-text-primary">Generation Instructions</strong> below.
             </li>
           </ul>
           {overIdeal && (
-            <p className="text-xs font-medium text-amber-700 dark:text-amber-300">
-              You are at or above {idealMax} tables — consider narrowing to transactional tables in a single domain
-              before launching.
+            <p className="text-xs font-medium text-db-red">
+              You have {tableCount} tables in scope (at or above {idealMax}) — narrow to transactional tables in one
+              domain before launching.
             </p>
           )}
         </div>
