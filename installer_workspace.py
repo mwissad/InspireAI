@@ -345,6 +345,75 @@ def _yaml_quote(value):
     s = str(value).replace("\\", "\\\\").replace('"', '\\"')
     return f'"{s}"'
 
+
+_SKIP_UC_CATALOGS = {"samples", "system", "__databricks_internal", "information_schema"}
+
+
+def build_app_sp_grant_sql(catalog, schema, sp_app_id, extra_catalog_names=None):
+    """Unity Catalog GRANT statements for the inspire-ai App service principal."""
+    sp = str(sp_app_id or "").strip()
+    cat = str(catalog or "").strip()
+    sch = str(schema or "_inspire").strip()
+    if not sp or not cat:
+        return []
+
+    grants = [
+        f"GRANT USE_CATALOG ON CATALOG `{cat}` TO `{sp}`",
+        f"GRANT BROWSE ON CATALOG `{cat}` TO `{sp}`",
+        f"GRANT CREATE SCHEMA ON CATALOG `{cat}` TO `{sp}`",
+        f"GRANT USE_SCHEMA ON SCHEMA `{cat}`.`{sch}` TO `{sp}`",
+        f"GRANT CREATE_TABLE ON SCHEMA `{cat}`.`{sch}` TO `{sp}`",
+        f"GRANT SELECT ON SCHEMA `{cat}`.`{sch}` TO `{sp}`",
+        f"GRANT MODIFY ON SCHEMA `{cat}`.`{sch}` TO `{sp}`",
+    ]
+    all_catalogs = set(extra_catalog_names or [])
+    try:
+        for c in w.catalogs.list():
+            all_catalogs.add(c.name)
+    except Exception:
+        pass
+    for other in sorted(all_catalogs):
+        if other in _SKIP_UC_CATALOGS or other == cat:
+            continue
+        grants.append(f"GRANT USE_CATALOG ON CATALOG `{other}` TO `{sp}`")
+        grants.append(f"GRANT BROWSE ON CATALOG `{other}` TO `{sp}`")
+    return grants
+
+
+def print_copy_paste_grant_sql(catalog, schema, sp_app_id, grant_sql_list, warehouse_id=None, warehouse_name=None):
+    """Print SQL the admin can copy into the SQL Editor (same grants the installer runs)."""
+    sp = str(sp_app_id or "").strip()
+    cat = str(catalog or "").strip()
+    sch = str(schema or "_inspire").strip()
+    wh_id = str(warehouse_id or "").strip()
+    wh_name = str(warehouse_name or "").strip()
+
+    print("\n" + "=" * 72)
+    print("COPY-PASTE SQL — App service principal permissions")
+    print("=" * 72)
+    print(f"-- Service principal applicationId: {sp}")
+    print(f"-- Inspire tracking: `{cat}`.`{sch}`")
+    if wh_name or wh_id:
+        print(f"-- SQL warehouse: {wh_name or '(name unknown)'}  (id: {wh_id or 'n/a'})")
+    print("-- Run in SQL Editor (pick the same warehouse as the installer widget):")
+    print()
+    if not grant_sql_list:
+        print("-- (no grants built — set applicationId and catalog first)")
+    else:
+        for sql in grant_sql_list:
+            print(f"{sql};")
+    print()
+    print("-- SQL warehouse CAN_USE (run in SQL Editor if USAGE ON WAREHOUSE is supported):")
+    if wh_name:
+        print(f"GRANT USAGE ON WAREHOUSE `{wh_name}` TO `{sp}`;")
+    elif wh_id:
+        print(f"-- Grant CAN_USE on warehouse id {wh_id} via SQL Warehouses → Permissions")
+        print(f"--   service principal applicationId: {sp}")
+    print()
+    print("-- If the installer already ran grants above, re-running is usually idempotent.")
+    print("=" * 72 + "\n")
+
+
 def write_app_yaml_deploy(path, inspire_db, warehouse_id, notebook_path, sp_resource_name):
     """Emit app.yaml without PyYAML (no extra pip on the cluster)."""
     lines = [
@@ -609,33 +678,15 @@ else:
 
 # COMMAND ----------
 
+_sp_for_grants = NEW_SP_APP_ID or "<applicationId>"
+_grants_sql = build_app_sp_grant_sql(CATALOG, SCHEMA, _sp_for_grants, available_catalogs)
+print_copy_paste_grant_sql(CATALOG, SCHEMA, _sp_for_grants, _grants_sql, WAREHOUSE_ID, WAREHOUSE_NAME)
+
 if NEW_SP_APP_ID and WAREHOUSE_ID:
     sp = NEW_SP_APP_ID
-    print(f"Granting permissions to {sp}...")
+    print(f"Granting permissions to {sp} (installer executing SQL)...")
 
-    # Full permissions on the selected catalog + schema
-    grants = [
-        f"GRANT USE_CATALOG ON CATALOG `{CATALOG}` TO `{sp}`",
-        f"GRANT BROWSE ON CATALOG `{CATALOG}` TO `{sp}`",
-        f"GRANT CREATE SCHEMA ON CATALOG `{CATALOG}` TO `{sp}`",
-        f"GRANT USE_SCHEMA ON SCHEMA `{CATALOG}`.`{SCHEMA}` TO `{sp}`",
-        f"GRANT CREATE_TABLE ON SCHEMA `{CATALOG}`.`{SCHEMA}` TO `{sp}`",
-        f"GRANT SELECT ON SCHEMA `{CATALOG}`.`{SCHEMA}` TO `{sp}`",
-        f"GRANT MODIFY ON SCHEMA `{CATALOG}`.`{SCHEMA}` TO `{sp}`",
-    ]
-    # USE_CATALOG + BROWSE on other catalogs so the SP can read Unity Catalog metadata in the app.
-    all_catalogs = set(available_catalogs)
-    try:
-        for cat in w.catalogs.list():
-            all_catalogs.add(cat.name)
-    except Exception:
-        pass
-    _skip_catalogs = {"samples", "system", "__databricks_internal", "information_schema"}
-    for cat in all_catalogs:
-        if cat in _skip_catalogs or cat == CATALOG:
-            continue
-        grants.append(f"GRANT USE_CATALOG ON CATALOG `{cat}` TO `{sp}`")
-        grants.append(f"GRANT BROWSE ON CATALOG `{cat}` TO `{sp}`")
+    grants = build_app_sp_grant_sql(CATALOG, SCHEMA, sp, available_catalogs)
 
     for sql in grants:
         try:
@@ -646,15 +697,17 @@ if NEW_SP_APP_ID and WAREHOUSE_ID:
         except Exception as e:
             print(f"  ⚠️ {str(e)[:120]}")
 
-    # Warehouse
+    # Warehouse (REST — also printed above as GRANT USAGE ON WAREHOUSE when name is known)
     resp = api("PATCH", f"/api/2.0/permissions/sql/warehouses/{WAREHOUSE_ID}", {
         "access_control_list": [{"service_principal_name": sp, "permission_level": "CAN_USE"}]
     })
     print(f"  CAN_USE on warehouse: {'✅' if resp.status_code == 200 else '⚠️ ' + resp.text[:100]}")
 elif not NEW_SP_APP_ID:
-    print("⚠️ Skipped — SP not found. Grant manually after checking /api/health.")
+    print("⚠️ Skipped automatic grants — SP not found.")
+    print("   Replace <applicationId> in the COPY-PASTE SQL block above, then run in SQL Editor.")
+    print("   Or open the App → browser console: fetch('/api/health').then(r=>r.json()).then(console.log)")
 elif not WAREHOUSE_ID:
-    print("⚠️ Skipped — no warehouse.")
+    print("⚠️ Skipped automatic grants — no warehouse selected.")
 
 # COMMAND ----------
 
