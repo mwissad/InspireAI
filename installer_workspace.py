@@ -391,6 +391,10 @@ def print_copy_paste_grant_sql(catalog, schema, sp_app_id, grant_sql_list, wareh
     print("\n" + "=" * 72)
     print("COPY-PASTE SQL — App service principal permissions")
     print("=" * 72)
+    print("-- If you do not have Unity Catalog / warehouse admin rights in this workspace,")
+    print("-- copy everything below and send it to your Databricks workspace administrator.")
+    print("-- Ask them to run it in the SQL Editor (same SQL warehouse as this installer).")
+    print()
     print(f"-- Service principal applicationId: {sp}")
     print(f"-- Inspire tracking: `{cat}`.`{sch}`")
     if wh_name or wh_id:
@@ -704,7 +708,8 @@ if NEW_SP_APP_ID and WAREHOUSE_ID:
     print(f"  CAN_USE on warehouse: {'✅' if resp.status_code == 200 else '⚠️ ' + resp.text[:100]}")
 elif not NEW_SP_APP_ID:
     print("⚠️ Skipped automatic grants — SP not found.")
-    print("   Replace <applicationId> in the COPY-PASTE SQL block above, then run in SQL Editor.")
+    print("   Replace <applicationId> in the COPY-PASTE SQL block above.")
+    print("   Send that block to your Databricks workspace admin if you cannot run GRANT yourself.")
     print("   Or open the App → browser console: fetch('/api/health').then(r=>r.json()).then(console.log)")
 elif not WAREHOUSE_ID:
     print("⚠️ Skipped automatic grants — no warehouse selected.")
