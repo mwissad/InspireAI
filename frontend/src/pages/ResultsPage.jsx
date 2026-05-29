@@ -3298,16 +3298,18 @@ function UseCaseCard({
   const s = (v) => (v == null ? '' : String(v));      // safe-string helper
   const stripHtml = (v) => (v == null ? '' : String(v).replace(/<[^>]*>/g, ' ').replace(/\s{2,}/g, ' ').trim());
 
-  const title =
-    s(u.Name) || s(u.use_case_name) || s(u.name) || s(u.title) || `Use Case ${index + 1}`;
-  const titlePlain = displayCleanText(stripHtml(title));
-  const descCandidate = displayCleanText(
-    stripHtml(s(u.description || u.Description || u.usecase || u.use_case || ''))
+  const nameLong = displayCleanText(
+    stripHtml(s(u.Name) || s(u.use_case_name) || s(u.name) || s(u.title) || ''),
   );
-  const shortCandidate = displayCleanText(stripHtml(s(u.short_name || u.shortName || '')));
+  const shortName = displayCleanText(stripHtml(s(u.short_name || u.shortName || '')));
+  const descCandidate = displayCleanText(
+    stripHtml(s(u.description || u.Description || u.usecase || u.use_case || '')),
+  );
+  // Card headline: punchy short name; subtitle: full use case name / description.
+  const titlePlain = shortName || nameLong || `Use Case ${index + 1}`;
   let subtitleText = '';
-  if (descCandidate && descCandidate !== titlePlain) subtitleText = descCandidate;
-  else if (shortCandidate && shortCandidate !== titlePlain) subtitleText = shortCandidate;
+  if (nameLong && nameLong !== titlePlain) subtitleText = nameLong;
+  else if (descCandidate && descCandidate !== titlePlain) subtitleText = descCandidate;
 
   const statement = stripHtml(u.Statement || u.description || u.problem_statement);
   const domain = s(u._domain || u['Business Domain'] || u.domain);
