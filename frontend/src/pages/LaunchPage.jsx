@@ -613,14 +613,47 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
   const effectiveDb = params['02_inspire_database'] || inspireDatabase;
   const canLaunch = params['00_business_name'] && effectiveDb && params['01_uc_metadata'];
 
-  /** Warn only when more than TABLE_SELECTION_WARN_THRESHOLD tables are in scope. */
+  /**
+   * Show guidance when:
+   * - a whole catalog or schema is in the basket (broad UC scope), or
+   * - more than TABLE_SELECTION_WARN_THRESHOLD individual tables are selected.
+   */
   const tableSelectionWarning = useMemo(() => {
     const threshold = TABLE_SELECTION_WARN_THRESHOLD;
+    const loadedTableCount = tables.length;
     const inScopeTableCount =
-      selectedTables.length > 0 ? selectedTables.length : tables.length;
+      selectedTables.length > 0 ? selectedTables.length : loadedTableCount;
 
-    if (inScopeTableCount <= threshold) {
-      return { show: false };
+    if (selectedCatalogs.length > 0 && selectedSchemas.length === 0 && selectedTables.length === 0) {
+      const names = selectedCatalogs.join(', ');
+      const n = selectedCatalogs.length;
+      const countNote =
+        loadedTableCount > 0 ? ` (${loadedTableCount} tables loaded in browser)` : ' (all schemas and tables)';
+      return {
+        show: true,
+        summary:
+          n === 1
+            ? `Whole catalog ${names}${countNote}`
+            : `${n} whole catalogs (${names})${countNote}`,
+        tableCount: loadedTableCount > 0 ? loadedTableCount : null,
+        scope: 'catalogs',
+      };
+    }
+
+    if (selectedSchemas.length > 0 && selectedTables.length === 0) {
+      const names = selectedSchemas.join(', ');
+      const n = selectedSchemas.length;
+      const countNote =
+        loadedTableCount > 0 ? ` (${loadedTableCount} tables in scope)` : ' (all tables in each schema)';
+      return {
+        show: true,
+        summary:
+          n === 1
+            ? `Whole schema ${names}${countNote}`
+            : `${n} whole schemas (${names})${countNote}`,
+        tableCount: loadedTableCount > 0 ? loadedTableCount : null,
+        scope: 'schemas',
+      };
     }
 
     if (selectedTables.length > threshold) {
@@ -631,32 +664,7 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
         scope: 'tables',
       };
     }
-    if (selectedSchemas.length > 0 && selectedTables.length === 0) {
-      const names = selectedSchemas.join(', ');
-      const n = selectedSchemas.length;
-      return {
-        show: true,
-        summary:
-          n === 1
-            ? `Schema ${names} includes ${inScopeTableCount} tables (whole schema in scope)`
-            : `${n} schemas include ${inScopeTableCount} tables total (whole schemas in scope)`,
-        tableCount: inScopeTableCount,
-        scope: 'schemas',
-      };
-    }
-    if (selectedCatalogs.length > 0 && selectedSchemas.length === 0 && selectedTables.length === 0) {
-      const names = selectedCatalogs.join(', ');
-      const n = selectedCatalogs.length;
-      return {
-        show: true,
-        summary:
-          n === 1
-            ? `Catalog ${names} includes ${inScopeTableCount} tables (whole catalog in scope)`
-            : `${n} catalogs include ${inScopeTableCount} tables total (whole catalogs in scope)`,
-        tableCount: inScopeTableCount,
-        scope: 'catalogs',
-      };
-    }
+
     return { show: false };
   }, [selectedTables, selectedSchemas, selectedCatalogs, tables]);
 
@@ -1569,8 +1577,9 @@ function TableSelectionGuidanceWarning({
           {isBroadScope && (
             <p className="text-xs text-text-secondary">
               You selected a {scope === 'catalogs' ? 'whole catalog' : 'whole schema'} without naming individual
-              tables. Inspire will scan every table in scope ({tableCount} tables). Open the table list and pick a
-              focused subset for faster, sharper use cases.
+              tables. Inspire will scan every table in that scope
+              {tableCount != null && tableCount > 0 ? ` (${tableCount} tables)` : ''}. Open the table list and pick a
+              focused subset (ideally 10 or fewer) for faster, sharper use cases.
             </p>
           )}
           <p>
