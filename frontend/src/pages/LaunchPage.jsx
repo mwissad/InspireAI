@@ -1369,19 +1369,6 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
 
       {/* Launch Footer */}
       <div className="mt-8 pt-6 border-t border-border">
-        {/* Summary chips */}
-        {tableSelectionWarning.show && (
-          <div className="mb-5">
-            <TableSelectionGuidanceWarning
-              selectionSummary={tableSelectionWarning.summary}
-              tableCount={tableSelectionWarning.tableCount}
-              scope={tableSelectionWarning.scope}
-              idealMax={TABLE_SELECTION_IDEAL_MAX}
-              compact
-            />
-          </div>
-        )}
-
         {canLaunch && (
           <div className="flex flex-wrap items-center gap-2 mb-5">
             <Chip icon={<Building2 size={10} />}>{params['00_business_name']}</Chip>
