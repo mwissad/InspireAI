@@ -18,14 +18,14 @@
 
 # MAGIC %md
 # MAGIC ### SQL warehouse and Unity Catalog
-# MAGIC The next cell shows **two** dropdown widgets immediately (also under **View → Notebook parameters**). The following cell loads workspace choices into those widgets and **stops with an error** until both are set.
+# MAGIC The next cell shows **two** dropdown widgets (also under **View → Notebook parameters**). The following cell loads workspace choices into those widgets.
 # MAGIC
 # MAGIC 1. **`00_sql_warehouse`** — SQL warehouse used for `CREATE SCHEMA`, SQL grants, and the deployed app’s **`INSPIRE_WAREHOUSE_ID`** default.
 # MAGIC 2. **`01_inspire_catalog`** — catalog where Inspire creates the **`_inspire`** schema (session / tracking tables).
 # MAGIC
-# MAGIC **First run:** widgets appear with **— Please select —** → the setup cell fails → pick both values → **re-run the setup cell** (or Run All).
+# MAGIC **First Run All:** dropdowns are created and filled with choices → the notebook **stops cleanly** (no error) → pick both values above → **Run All again** to install.
 # MAGIC
-# MAGIC **Jobs** (`npm run deploy`): set **`WAREHOUSE_OVERRIDE`** (warehouse id) and/or **`CATALOG_OVERRIDE`** in code to skip the matching widget. Values must exist in this workspace.
+# MAGIC **Jobs** (`npm run deploy`): set **`WAREHOUSE_OVERRIDE`** (warehouse id) and/or **`CATALOG_OVERRIDE`** in code to skip the matching widget.
 
 # COMMAND ----------
 
@@ -75,7 +75,7 @@ else:
     )
 
     print("Notebook parameters are ready above (empty until you choose values).")
-    print("Run the next cell to load choices. If it fails, select both dropdowns and re-run that cell.")
+    print("Run All: the next cell loads choices and stops here until both dropdowns are set.")
 
 # COMMAND ----------
 
@@ -89,19 +89,35 @@ USER_EMAIL = current_user.user_name
 WORKSPACE_HOST = w.config.host
 
 
-def _require_widget_selection(widget_name, picked, valid_values, label_human):
-    """Fail fast when the customer left a parameter widget empty."""
+def _widget_value_ready(value):
+    v = (value or "").strip()
+    return bool(v) and v != _WIDGET_PLACEHOLDER
+
+
+def _exit_until_widgets_selected():
+    """First pass: widgets exist but user has not chosen both — stop without an error."""
+    print("\n" + "=" * 72)
+    print("PAUSED — Select notebook parameters, then Run All again")
+    print("=" * 72)
+    print("1. **00_sql_warehouse** — pick a SQL warehouse (grants + app default).")
+    print("2. **01_inspire_catalog** — pick the Unity Catalog for Inspire tracking (`_inspire`).")
+    print("")
+    print("Use the dropdowns at the top of this notebook, or **View → Notebook parameters**.")
+    print("When both are set, Run All continues with install (app deploy, grants, notebooks).")
+    print("=" * 72)
+    dbutils.notebook.exit("Waiting for SQL warehouse and Unity Catalog selection.")
+
+
+def _read_widget_selection(widget_name, picked, valid_values, label_human):
+    """Return selected value, or None if still on placeholder."""
     value = (picked or "").strip()
-    if not value or value == _WIDGET_PLACEHOLDER:
-        raise ValueError(
-            f"Missing {label_human}: use the **{widget_name}** dropdown above, choose a value, "
-            "then re-run this cell (or Run All from here)."
-        )
+    if not _widget_value_ready(value):
+        return None
     if value not in valid_values:
-        raise ValueError(
-            f"Invalid {label_human} ({value!r}). Pick a value from the **{widget_name}** dropdown "
-            "and re-run this cell."
+        print(
+            f"Invalid {label_human} ({value!r}). Choose a value from **{widget_name}**, then Run All again."
         )
+        _exit_until_widgets_selected()
     return value
 
 
@@ -130,16 +146,7 @@ for wh in all_warehouses:
 if not warehouse_ids_list:
     raise RuntimeError("No SQL warehouses found. Create a SQL warehouse in this workspace, then re-run.")
 
-if WAREHOUSE_OVERRIDE:
-    if WAREHOUSE_OVERRIDE not in warehouse_ids_list:
-        raise ValueError(f"WAREHOUSE_OVERRIDE={WAREHOUSE_OVERRIDE!r} not in warehouse ids (showing first 5): {warehouse_ids_list[:5]}")
-    WAREHOUSE_ID = WAREHOUSE_OVERRIDE
-    WAREHOUSE_NAME = WAREHOUSE_ID
-    for wh in all_warehouses:
-        if wh.id == WAREHOUSE_ID:
-            WAREHOUSE_NAME = wh.name or WAREHOUSE_ID
-            break
-else:
+if not WAREHOUSE_OVERRIDE:
     _prev_wh = (dbutils.widgets.get(W_WH) or "").strip()
     try:
         dbutils.widgets.remove(W_WH)
@@ -153,15 +160,6 @@ else:
         _wh_choices,
         "1) SQL warehouse for grants & app default",
     )
-    _picked_wh = _require_widget_selection(
-        W_WH,
-        dbutils.widgets.get(W_WH),
-        warehouse_labels,
-        "SQL warehouse",
-    )
-    _wh_idx = warehouse_labels.index(_picked_wh)
-    WAREHOUSE_ID = warehouse_ids_list[_wh_idx]
-    WAREHOUSE_NAME = all_warehouses[_wh_idx].name or WAREHOUSE_ID
 
 # --- 2) Unity Catalog for Inspire (widget: pick catalog) ---
 available_catalogs = []
@@ -177,11 +175,7 @@ available_catalogs = sorted(set(available_catalogs))
 
 CATALOG_OVERRIDE = None  # Set to a catalog name for Jobs/CI to skip the catalog dropdown
 
-if CATALOG_OVERRIDE:
-    if CATALOG_OVERRIDE not in available_catalogs:
-        raise ValueError(f"CATALOG_OVERRIDE={CATALOG_OVERRIDE!r} not in catalogs: {available_catalogs}")
-    CATALOG = CATALOG_OVERRIDE
-else:
+if not CATALOG_OVERRIDE:
     _prev_cat = (dbutils.widgets.get(W_CAT) or "").strip()
     try:
         dbutils.widgets.remove(W_CAT)
@@ -195,7 +189,45 @@ else:
         _cat_choices,
         "2) Unity Catalog for Inspire tracking tables (_inspire)",
     )
-    CATALOG = _require_widget_selection(
+
+# --- Resolve selections (exit cleanly on first run if widgets still empty) ---
+_need_wh = not WAREHOUSE_OVERRIDE
+_need_cat = not CATALOG_OVERRIDE
+_wh_ready = not _need_wh or _widget_value_ready(dbutils.widgets.get(W_WH))
+_cat_ready = not _need_cat or _widget_value_ready(dbutils.widgets.get(W_CAT))
+
+if (_need_wh and not _wh_ready) or (_need_cat and not _cat_ready):
+    print(f"Loaded {len(warehouse_labels)} SQL warehouse(s) and {len(available_catalogs)} catalog(s) into the dropdowns above.")
+    _exit_until_widgets_selected()
+
+if WAREHOUSE_OVERRIDE:
+    if WAREHOUSE_OVERRIDE not in warehouse_ids_list:
+        raise ValueError(
+            f"WAREHOUSE_OVERRIDE={WAREHOUSE_OVERRIDE!r} not in warehouse ids (showing first 5): {warehouse_ids_list[:5]}"
+        )
+    WAREHOUSE_ID = WAREHOUSE_OVERRIDE
+    WAREHOUSE_NAME = WAREHOUSE_ID
+    for wh in all_warehouses:
+        if wh.id == WAREHOUSE_ID:
+            WAREHOUSE_NAME = wh.name or WAREHOUSE_ID
+            break
+else:
+    _picked_wh = _read_widget_selection(
+        W_WH,
+        dbutils.widgets.get(W_WH),
+        warehouse_labels,
+        "SQL warehouse",
+    )
+    _wh_idx = warehouse_labels.index(_picked_wh)
+    WAREHOUSE_ID = warehouse_ids_list[_wh_idx]
+    WAREHOUSE_NAME = all_warehouses[_wh_idx].name or WAREHOUSE_ID
+
+if CATALOG_OVERRIDE:
+    if CATALOG_OVERRIDE not in available_catalogs:
+        raise ValueError(f"CATALOG_OVERRIDE={CATALOG_OVERRIDE!r} not in catalogs: {available_catalogs}")
+    CATALOG = CATALOG_OVERRIDE
+else:
+    CATALOG = _read_widget_selection(
         W_CAT,
         dbutils.widgets.get(W_CAT),
         available_catalogs,
