@@ -15,6 +15,11 @@ const { stripAiDemoDisclaimerHtml, stripDisclaimerDeep } = require('./stripAiDis
 const { TEMPLATE_META } = require('./lib/demoDataService');
 const { triggerDemoDataPipeline } = require('./lib/demoDataPipeline');
 const { resolveInspireAppServicePrincipalId } = require('./lib/inspireSpGrants');
+const { chatDiscoverUseCases } = require('./lib/inspireDiscoverChat');
+const {
+  ensureEmbedNotebookPublished,
+  triggerDiscoverEmbedJob,
+} = require('./lib/inspireDiscoverEmbed');
 
 const app = express();
 app.use(express.json({ limit: '50mb' }));
@@ -2050,6 +2055,92 @@ app.get('/api/dbc/info', (req, res) => {
       });
     }
   } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════
+//  Discover chat — RAG over __inspire_usecase_search
+// ═══════════════════════════════════════════════════
+
+app.get('/api/discover/status', requireToken, async (req, res) => {
+  try {
+    const inspireDb = String(req.query.inspire_database || DEFAULT_INSPIRE_DB || '').trim();
+    const warehouseId = String(req.query.warehouse_id || DEFAULT_WAREHOUSE_ID || '').trim();
+    if (!inspireDb?.includes('.') || !warehouseId) {
+      return res.status(400).json({ error: 'inspire_database and warehouse_id required' });
+    }
+    const [catalog, schema] = inspireDb.split('.', 2);
+    const table = `\`${catalog}\`.\`${schema}\`.\`__inspire_usecase_search\``;
+    const sql = `SELECT COUNT(*) AS cnt FROM ${table}`;
+    const result = await executeSql(req.dbHost, req.dbToken, warehouseId, sql);
+    const rows = sqlResultToObjects(result);
+    const count = Number(rows[0]?.cnt || 0);
+    res.json({ ready: count > 0, indexed_usecases: count, table });
+  } catch (err) {
+    if (err.message?.includes('TABLE_OR_VIEW_NOT_FOUND') || err.message?.includes('does not exist')) {
+      return res.json({
+        ready: false,
+        indexed_usecases: 0,
+        message: 'Run dbx_inspire_embed_usecases in Databricks to create __inspire_usecase_search.',
+      });
+    }
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/discover/chat', requireToken, async (req, res) => {
+  try {
+    const {
+      message,
+      session_id,
+      inspire_database: bodyDb,
+      warehouse_id: bodyWh,
+      top_k,
+    } = req.body || {};
+    const out = await chatDiscoverUseCases(dbFetch, executeSql, sqlResultToObjects, req.dbHost, req.dbToken, {
+      message,
+      inspire_database: String(bodyDb || DEFAULT_INSPIRE_DB || '').trim(),
+      warehouse_id: String(bodyWh || DEFAULT_WAREHOUSE_ID || '').trim(),
+      session_id,
+      top_k: top_k ? Number(top_k) : undefined,
+    });
+    res.json({ ok: true, ...out });
+  } catch (err) {
+    console.error('discover/chat failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/** Publish embed notebook (if needed) and run one-off job to build __inspire_usecase_search. */
+app.post('/api/discover/sync', requireToken, async (req, res) => {
+  try {
+    const inspireDb = String(req.body?.inspire_database || DEFAULT_INSPIRE_DB || '').trim();
+    const warehouseId = String(req.body?.warehouse_id || DEFAULT_WAREHOUSE_ID || '').trim();
+    const embeddingModel = String(req.body?.embedding_model || 'databricks-gte-large-en').trim();
+    if (!inspireDb?.includes('.') || !warehouseId) {
+      return res.status(400).json({ error: 'inspire_database and warehouse_id required' });
+    }
+    await ensureEmbedNotebookPublished(
+      dbFetch,
+      req.dbHost,
+      req.dbToken,
+      resolveWorkspaceNotebookObjectPath,
+      { force: true },
+    );
+    const run = await triggerDiscoverEmbedJob(dbFetch, req.dbHost, req.dbToken, {
+      inspire_database: inspireDb,
+      warehouse_id: warehouseId,
+      embedding_model: embeddingModel,
+    });
+    res.json({
+      ok: true,
+      message: 'Embed job started. Poll GET /api/discover/status until ready: true.',
+      ...run,
+      job_url: databricksJobRunUrl(req.dbHost, run.job_id, run.run_id),
+    });
+  } catch (err) {
+    console.error('discover/sync failed:', err.message);
     res.status(500).json({ error: err.message });
   }
 });

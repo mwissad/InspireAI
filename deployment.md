@@ -139,6 +139,21 @@ If you have no UC tables yet, use **I don’t have data — generate demo tables
 
 **Permissions:** Run **`installer_workspace.py` once** before using this flow. The installer deploys the **inspire-ai** App and grants its **service principal** access to `{catalog}._inspire`, the SQL warehouse, and UC browse on other catalogs. The demo pipeline’s **first task** (`dbx_generate_demo_data`) then grants the same service principal on the new **`inspire_demo_*`** schema so the App and step 2 (Inspire discovery) work end-to-end without manual SQL grants.
 
+### Discover chat (search over `_inspire` use cases)
+
+After you have rows in **`{catalog}._inspire.__inspire_usecases`** (from at least one Inspire discovery run), index them for the in-app **Discover chat**:
+
+1. **Re-run the installer** (or ensure the notebook exists at **`/Shared/inspire-ai/dbx_inspire_embed_usecases`**).
+2. **Create a Databricks Job** (or run once manually) on that notebook with widgets:
+   - **`inspire_database`** — e.g. `mehdi_wissad._inspire`
+   - **`warehouse_id`** — same SQL warehouse as the app
+   - **`embedding_model`** — default `databricks-gte-large-en` (workspace must allow the App SP and the job identity to call that serving endpoint)
+3. **Schedule** the job (e.g. daily, or after discovery jobs complete).
+4. The job overwrites **`{catalog}._inspire.__inspire_usecase_search`** with one row per use case (`chunk_text` + `embedding` array).
+5. In the app, open **Get started → Discover chat**. **`GET /api/discover/status`** should report `ready: true` when the search table has rows.
+
+The app embeds your question, loads candidates from the search table, ranks by cosine similarity in the backend, then answers with a chat model and cited use-case sources. You can optionally scope to a **`session_id`** in the chat UI.
+
 ---
 
 ## 7. Optional: deploy from your laptop (npm run deploy)

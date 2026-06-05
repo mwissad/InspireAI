@@ -8,6 +8,7 @@ import GenerateDataPage from './pages/GenerateDataPage';
 import MonitorPage from './pages/MonitorPage';
 import ResultsPage from './pages/ResultsPage';
 import ChoosePage from './pages/ChoosePage';
+import DiscoverChatPage from './pages/DiscoverChatPage';
 import ScrollProgressRing from './components/ScrollProgressRing';
 import ParticleField from './components/ParticleField';
 
@@ -296,6 +297,19 @@ export default function App() {
             settings={settings}
             onNewExperiment={() => nav('launch')}
             onNoData={() => nav('generate-data')}
+            onDiscoverChat={() => nav('discover-chat')}
+            onViewResults={(sid) => {
+              if (sid) setSessionId(sid);
+              nav('results');
+            }}
+          />
+        )}
+
+        {page === 'discover-chat' && (
+          <DiscoverChatPage
+            settings={settings}
+            sessionId={sessionId}
+            onBack={() => nav('choose')}
             onViewResults={(sid) => {
               if (sid) setSessionId(sid);
               nav('results');

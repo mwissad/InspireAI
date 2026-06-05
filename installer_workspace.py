@@ -608,6 +608,45 @@ if generate_source:
 else:
     print("⚠️ dbx_generate_demo_data not found in source — skip demo pipeline notebook publish")
 
+# Discover chat — embed use cases for vector-style search
+EMBED_DEST = f"/Shared/{APP_NAME}/dbx_inspire_embed_usecases"
+embed_source = None
+for candidate in [
+    f"{SOURCE_FOLDER}/dbx_inspire_embed_usecases.py",
+    f"{SOURCE_FOLDER}/dbx_inspire_embed_usecases",
+]:
+    if os.path.exists(candidate):
+        embed_source = candidate
+        break
+
+if embed_source:
+    print(f"Embed usecases source: {embed_source}")
+    embed_b64 = export_workspace_b64(embed_source, export_formats=("SOURCE", "JUPYTER"))
+    if embed_b64:
+        try:
+            api("POST", "/api/2.0/workspace/mkdirs", {"path": f"/Shared/{APP_NAME}"})
+        except Exception:
+            pass
+        embed_resp = api(
+            "POST",
+            "/api/2.0/workspace/import",
+            {
+                "path": EMBED_DEST,
+                "format": "SOURCE",
+                "content": embed_b64,
+                "language": "PYTHON",
+                "overwrite": True,
+            },
+        )
+        if embed_resp.status_code in (200, 201):
+            print(f"Published embed notebook: ✅ {EMBED_DEST}")
+        else:
+            print(f"Embed notebook publish: ⚠️ {embed_resp.status_code} {embed_resp.text[:200]}")
+    else:
+        print(f"⚠️ Could not read embed notebook from {embed_source}")
+else:
+    print("⚠️ dbx_inspire_embed_usecases not found in source — skip embed notebook publish")
+
 # COMMAND ----------
 
 # MAGIC %md

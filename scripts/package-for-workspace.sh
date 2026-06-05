@@ -14,6 +14,7 @@ fi
 echo "==> Bundling demo pipeline notebook for Databricks App runtime"
 node "$ROOT/scripts/bundle-demo-notebook.mjs"
 cp -f "$ROOT/dbx_generate_demo_data.py" "$ROOT/backend/dbx_generate_demo_data.py"
+cp -f "$ROOT/dbx_inspire_embed_usecases.py" "$ROOT/backend/dbx_inspire_embed_usecases.py"
 
 mkdir -p "$ROOT/dist"
 OUT="${ARTIFACT_ZIP:-$ROOT/dist/InspireAI-workspace.zip}"

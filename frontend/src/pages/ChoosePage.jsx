@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Rocket, BarChart3, Loader2, AlertCircle, Clock, CheckCircle2, ArrowRight, ChevronRight, ChevronDown, ChevronUp, Trash2, Eye, EyeOff, Target, FileText, Sparkles } from 'lucide-react';
+import { Rocket, BarChart3, Loader2, AlertCircle, Clock, CheckCircle2, ArrowRight, ChevronRight, ChevronDown, ChevronUp, Trash2, Eye, EyeOff, Target, FileText, Sparkles, MessageCircle } from 'lucide-react';
 import SessionSparkline from '../components/SessionSparkline';
 import MagneticButton from '../components/MagneticButton';
 import { SkeletonCard } from '../components/SkeletonLoader';
@@ -125,7 +125,7 @@ function getListRowOverview(session) {
   return null;
 }
 
-export default function ChoosePage({ settings, onNewExperiment, onNoData, onViewResults }) {
+export default function ChoosePage({ settings, onNewExperiment, onNoData, onDiscoverChat, onViewResults }) {
   const { token, databricksHost, warehouseId, inspireDatabase } = settings;
   const [loading, setLoading] = useState(true);
   const [sessions, setSessions] = useState([]);
@@ -270,6 +270,22 @@ export default function ChoosePage({ settings, onNewExperiment, onNoData, onView
             </div>
             <ArrowRight size={18} className="text-text-tertiary" />
           </button>
+          {onDiscoverChat && (
+            <button
+              type="button"
+              onClick={onDiscoverChat}
+              className="group w-full flex items-center gap-4 px-6 py-5 rounded-2xl border border-db-red/20 bg-db-red-50/30 hover:border-db-red/40 text-left transition-all"
+            >
+              <div className="w-12 h-12 rounded-xl bg-db-red/10 flex items-center justify-center">
+                <MessageCircle size={22} className="text-db-red" />
+              </div>
+              <div className="flex-1">
+                <p className="text-sm font-semibold text-text-primary">Discover chat</p>
+                <p className="text-xs text-text-secondary mt-0.5">Ask questions over indexed use cases</p>
+              </div>
+              <ArrowRight size={18} className="text-text-tertiary group-hover:text-db-red" />
+            </button>
+          )}
         </div>
       </div>
     );
@@ -331,7 +347,7 @@ export default function ChoosePage({ settings, onNewExperiment, onNoData, onView
         </div>
 
         {/* ── New experiment CTAs ── */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <button
             type="button"
             onClick={onNewExperiment}
@@ -358,6 +374,21 @@ export default function ChoosePage({ settings, onNewExperiment, onNoData, onView
               <p className="text-[11px] text-text-secondary mt-0.5 truncate">Generate demo tables</p>
             </div>
           </button>
+          {onDiscoverChat && (
+            <button
+              type="button"
+              onClick={onDiscoverChat}
+              className="group flex items-center gap-4 px-5 py-4 rounded-2xl border border-db-red/20 bg-db-red-50/40 hover:border-db-red/40 text-left transition-all"
+            >
+              <div className="w-10 h-10 rounded-xl bg-db-red/10 flex items-center justify-center shrink-0">
+                <MessageCircle size={20} className="text-db-red" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-semibold text-text-primary">Discover chat</p>
+                <p className="text-[11px] text-text-secondary mt-0.5 truncate">Search use cases</p>
+              </div>
+            </button>
+          )}
         </div>
 
         {/* ── Previous Experiments ── */}
