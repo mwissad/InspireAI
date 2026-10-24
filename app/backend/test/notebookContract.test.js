@@ -14,7 +14,7 @@ const notebookBytes = fs.readFileSync(notebookPath);
 const notebook = JSON.parse(notebookBytes.toString('utf8'));
 const source = notebook.cells.map((cell) => (cell.source || []).join('')).join('\n');
 
-test('bundled notebook is a valid v1.2.0 Jupyter notebook', () => {
+test('bundled notebook is a valid v1.3.0 Jupyter notebook', () => {
   assert.equal(notebook.nbformat, 4);
   assert.match(source, new RegExp(`__AGENT_VERSION__\\s*=\\s*["']${INSPIRE_AGENT_VERSION}["']`));
   assert.match(source, /\[AGENT_VERSION FIRED\]/);
@@ -23,6 +23,9 @@ test('bundled notebook is a valid v1.2.0 Jupyter notebook', () => {
   assert.doesNotMatch(source, /discover_auto_genie_top_n/);
   assert.match(source, /dbx_inspire_ai_child_run/);
   assert.match(source, /funnel_ledger/);
+  assert.match(source, /DISCOVERY_TYPE_VALID\s*=\s*\(\s*"Deep",\s*"Standard"\s*\)/);
+  assert.match(source, /DISCOVERY_TYPE_DEFAULT\s*=\s*"Deep"/);
+  assert.match(source, /FEEDBACK_STATUSES\s*=\s*\(\s*"accepted",\s*"rejected",\s*"planned",\s*"implemented"\s*\)/);
   assert.equal(notebook.cells.length, 3);
 });
 
@@ -57,15 +60,19 @@ test('launch UI exposes v1.2.0 quality modes and Auto-Genie widget 13', () => {
   );
   assert.match(launchPage, /'05_use_cases_quality':\s*'Good'/);
   assert.match(launchPage, /'13_generate_genie_code_for':\s*'5'/);
+  assert.match(launchPage, /'03_discovery_type':\s*'Deep'/);
+  assert.match(launchPage, /'10_strategic_context':\s*''/);
+  assert.match(launchPage, /Discovery Type/);
+  assert.match(launchPage, /StrategyEditor/);
 });
 
-test('deployment and API surfaces advertise v1.2.0 consistently', () => {
+test('deployment and API surfaces advertise v1.3.0 consistently', () => {
   const server = fs.readFileSync(path.join(appRoot, 'backend', 'server.js'), 'utf8');
   const bundleConfig = fs.readFileSync(path.join(appRoot, 'databricks.yml'), 'utf8');
 
   assert.match(server, /agentVersion:\s*INSPIRE_AGENT_VERSION/);
   assert.match(server, /inspire_version:\s*INSPIRE_AGENT_VERSION/);
-  assert.match(bundleConfig, /inspire_version:\s*"v1\.2\.0"/);
+  assert.match(bundleConfig, /inspire_version:\s*"v1\.3\.0"/);
 });
 
 test('all app launch defaults use the installer notebook destination', () => {
@@ -95,4 +102,8 @@ test('OpenAPI documents v1.2.0 operation and artifact values', () => {
   assert.match(openapi, /enum: \[Good, High, Ultra High\]/);
   assert.doesNotMatch(openapi, /operation_mode:\s*full/);
   assert.doesNotMatch(openapi, /generate_choices:\s*genie,pdf/);
+  assert.match(openapi, /03_discovery_type:[\s\S]{0,800}enum: \[Deep, Standard\]/);
+  assert.match(openapi, /10_strategic_context:/);
+  assert.match(openapi, /\/api\/inspire\/feedback:\n    post:[\s\S]*?\n    get:/);
+  assert.match(openapi, /enum: \[accepted, rejected, planned, implemented\]/);
 });

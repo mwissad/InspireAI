@@ -141,7 +141,7 @@ export default function GenerateDataPage({ settings, onBack, onLaunched }) {
             required
           />
           <p className="text-[11px] text-text-tertiary mt-1.5">
-            Genie-style: prompt → JSON (code + 5 tables + column descriptions) → execute on Spark. Tables land in{' '}
+            Genie-style: your prompt becomes the code, 5 tables and their column descriptions, which then run on Spark. Tables land in{' '}
             <code className="font-mono">{inspireDatabase?.split('.')[0] || 'catalog'}.inspire_demo_*</code>;
             tracking in <code className="font-mono">{inspireDatabase || 'catalog._inspire'}</code>.
           </p>

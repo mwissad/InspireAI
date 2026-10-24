@@ -147,7 +147,7 @@ else:
 # COMMAND ----------
 
 # DBTITLE 1,Installer helpers
-import base64, glob, os, requests, shutil, time, zipfile
+import base64, glob, os, re, requests, shutil, time, zipfile
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.sql import StatementState
 
@@ -255,6 +255,50 @@ def _normalize_bundle_root(extracted_dir):
 
 
 
+def _unpack_bundle(source_zip, bundle_root, stage="/tmp/inspire_ws_zip_stage"):
+    if os.path.exists(stage):
+        shutil.rmtree(stage)
+    os.makedirs(stage, exist_ok=True)
+    with zipfile.ZipFile(source_zip, "r") as zf:
+        zf.extractall(stage)
+    entries = os.listdir(stage)
+    root_dir = os.path.join(stage, entries[0]) if len(entries) == 1 and os.path.isdir(os.path.join(stage, entries[0])) else stage
+    root_dir = _normalize_bundle_root(root_dir)
+    if not _folder_has_app_yaml(root_dir):
+        raise FileNotFoundError(f"No app.yaml after unzip under {root_dir}. Bundle must contain the Inspire app (app.yaml at root or under app/).")
+    stamp = time.strftime("%Y%m%d_%H%M%S", time.gmtime())
+    dest = os.path.join(bundle_root, f"bundle_{stamp}")
+    suffix = 1
+    while os.path.exists(dest):
+        dest = os.path.join(bundle_root, f"bundle_{stamp}_{suffix}")
+        suffix += 1
+    shutil.copytree(root_dir, dest)
+    return dest
+
+
+def _remove_old_bundles(w, bundle_root, keep):
+    keep_name = os.path.basename(keep.rstrip("/"))
+    api_root = bundle_root[len("/Workspace"):] if bundle_root.startswith("/Workspace/") else bundle_root
+    try:
+        entries = list(w.workspace.list(api_root))
+    except Exception as exc:
+        print(f"  (older bundles not removed: {exc})")
+        return []
+    removed = []
+    for entry in entries:
+        path = str(getattr(entry, "path", "") or "")
+        if not path or os.path.basename(path.rstrip("/")) == keep_name:
+            continue
+        try:
+            w.workspace.delete(path, recursive=True)
+            removed.append(path)
+        except Exception as exc:
+            print(f"  (could not remove {path}: {exc})")
+    if removed:
+        print(f"  Removed {len(removed)} older bundle item(s) under {bundle_root}")
+    return removed
+
+
 def _resolve_source_folder(nb_dir, user_email):
     """Find the Databricks App bundle root (directory containing app.yaml)."""
     user_root = f"/Workspace/Users/{user_email}"
@@ -294,6 +338,31 @@ def _resolve_source_folder(nb_dir, user_email):
 
 
 
+def _is_own_service_principal(display_name, app_name, sp_name):
+    name = (display_name or "").strip()
+    return name in (app_name, sp_name, app_name.replace("-", "_")) or name.endswith(f" {app_name}")
+
+
+def _app_service_principal_ids(api_get):
+    in_use, token = set(), ""
+    while True:
+        page = api_get("/api/2.0/apps" + (f"?page_token={token}" if token else ""))
+        for app in page.get("apps", []):
+            if app.get("service_principal_client_id"):
+                in_use.add(app["service_principal_client_id"])
+        token = page.get("next_page_token") or ""
+        if not token:
+            return in_use
+
+
+def _deletable_service_principals(service_principals, app_name, sp_name, in_use):
+    if in_use is None:
+        return []
+    return [sp for sp in service_principals
+            if _is_own_service_principal(sp.get("displayName", ""), app_name, sp_name)
+            and sp.get("applicationId") not in in_use]
+
+
 def build_runtime_context():
     w = WorkspaceClient()
     current_user = w.current_user.me()
@@ -302,6 +371,7 @@ def build_runtime_context():
 
     warehouse_override = None  # Set to a warehouse UUID string for Jobs/CI to skip the dropdown
     catalog_override = None  # Set to a catalog name for Jobs/CI to skip the catalog dropdown
+    app_name_override = None  # Set to another app name to install next to an existing inspire-ai app
 
     all_warehouses = [wh for wh in w.warehouses.list() if getattr(wh, "id", None)]
     all_warehouses.sort(key=_wh_sort_key)
@@ -382,7 +452,9 @@ def build_runtime_context():
 
     schema = "_inspire"
     inspire_db = f"{catalog}.{schema}"
-    app_name = "inspire-ai"
+    app_name = app_name_override or "inspire-ai"
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,28}[a-z0-9]", app_name):
+        raise ValueError(f"App name {app_name!r} must be 2-30 lowercase letters, digits or hyphens")
     sp_name = f"{app_name}-sp"
 
     print(f"Selected warehouse: {warehouse_name} ({warehouse_id})")
@@ -394,31 +466,13 @@ def build_runtime_context():
         print(f"Using bundle zip: {source_zip}")
 
     source_folder = None
+    bundle_root = None
     if source_zip:
         if not os.path.exists(source_zip):
             raise FileNotFoundError(f"source_zip not found: {source_zip}")
-        stage = "/tmp/inspire_ws_zip_stage"
-        dest = f"/Workspace/Users/{user_email}/InspireAI"
-        print(f"Removing prior workspace bundle folder (clean run): {dest}")
-        try:
-            w.workspace.delete(dest, recursive=True)
-        except Exception as exc:
-            print(f"  (API delete skipped or failed) {exc}")
-        if os.path.exists(dest):
-            shutil.rmtree(dest, ignore_errors=True)
-        print(f"Unpacking zip -> {dest} ...")
-        if os.path.exists(stage):
-            shutil.rmtree(stage)
-        os.makedirs(stage, exist_ok=True)
-        with zipfile.ZipFile(source_zip, "r") as zf:
-            zf.extractall(stage)
-        entries = os.listdir(stage)
-        root_dir = os.path.join(stage, entries[0]) if len(entries) == 1 and os.path.isdir(os.path.join(stage, entries[0])) else stage
-        root_dir = _normalize_bundle_root(root_dir)
-        if not _folder_has_app_yaml(root_dir):
-            raise FileNotFoundError(f"No app.yaml after unzip under {root_dir}. Bundle must contain the Inspire app (app.yaml at root or under app/).")
-        shutil.copytree(root_dir, dest)
-        source_folder = dest
+        bundle_root = f"/Workspace/Users/{user_email}/InspireAI"
+        print(f"Unpacking zip into a new folder under {bundle_root} ...")
+        source_folder = _unpack_bundle(source_zip, bundle_root)
         print(f"  Source from zip: {source_folder}")
     else:
         try:
@@ -477,6 +531,7 @@ def build_runtime_context():
         "AUTO_ZIP": auto_zip,
         "SOURCE_ZIP": source_zip,
         "SOURCE_FOLDER": source_folder,
+        "BUNDLE_ROOT": bundle_root,
         "available_catalogs": available_catalogs,
         "api": api,
         "api_get": api_get,
@@ -514,23 +569,40 @@ def step_cleanup(ctx):
 
     print("Cleaning up...")
     try:
-        api("DELETE", f"/api/2.0/apps/{app_name}")
-        print(f"  Deleted app '{app_name}' — waiting for deletion to complete...")
-        for _ in range(24):  # up to 2 minutes
-            resp = api("GET", f"/api/2.0/apps/{app_name}")
-            if resp.status_code == 404:
-                print("  App gone ✅")
-                break
-            state = resp.json().get("compute_status", {}).get("state", "?")
-            print(f"  Still {state}, waiting...")
-            time.sleep(5)
-    except Exception:
-        print("  No existing app")
+        resp = api("DELETE", f"/api/2.0/apps/{app_name}")
+        if resp.status_code == 404:
+            print("  No existing app")
+        elif resp.status_code >= 400:
+            print(f"  ⚠️ Deleting app '{app_name}' returned {resp.status_code}: {resp.text[:200]}")
+        else:
+            print(f"  Deleted app '{app_name}' — waiting for deletion to complete...")
+            for _ in range(60):  # up to 5 minutes
+                resp = api("GET", f"/api/2.0/apps/{app_name}")
+                if resp.status_code == 404:
+                    print("  App gone ✅")
+                    break
+                state = resp.json().get("compute_status", {}).get("state", "?")
+                print(f"  Still {state}, waiting...")
+                time.sleep(5)
+            else:
+                print(f"  ⚠️ App '{app_name}' still exists; it is redeployed and its service principal is kept")
+    except Exception as exc:
+        print(f"  ⚠️ Could not delete app '{app_name}': {exc}")
 
-    for search in [app_name, sp_name, "inspire-ai", "inspire_ai"]:
+    try:
+        in_use = _app_service_principal_ids(api_get)
+    except Exception as exc:
+        print(f"  ⚠️ Could not list apps ({exc}); no service principal is deleted")
+        in_use = None
+    for search in dict.fromkeys([app_name, sp_name, app_name.replace("-", "_")]):
         try:
             sps = api_get(f"/api/2.0/preview/scim/v2/ServicePrincipals?filter=displayName co \"{search}\"")
-            for sp in sps.get("Resources", []):
+            resources = sps.get("Resources", [])
+            for sp in resources:
+                if _is_own_service_principal(sp.get("displayName", ""), app_name, sp_name) and \
+                        in_use is not None and sp.get("applicationId") in in_use:
+                    print(f"  Keeping SP: {sp.get('displayName')} (AppID: {sp.get('applicationId')}): an app still uses it")
+            for sp in _deletable_service_principals(resources, app_name, sp_name, in_use):
                 sp_id = sp.get("id")
                 print(f"  Deleting SP: {sp.get('displayName')} (ID: {sp_id}, AppID: {sp.get('applicationId')})")
                 api("DELETE", f"/api/2.0/preview/scim/v2/ServicePrincipals/{sp_id}")
@@ -730,19 +802,37 @@ def step_deploy_and_find_sp(ctx):
         time.sleep(10)
 
     print("Deployed ✅")
+    if ctx.get("BUNDLE_ROOT"):
+        _remove_old_bundles(ctx["w"], ctx["BUNDLE_ROOT"], source_folder)
     print("\nFinding new service principal...")
     time.sleep(5)
 
     new_sp_app_id = None
     try:
-        data = api_get("/api/2.0/preview/scim/v2/ServicePrincipals?count=500")
-        for sp in data.get("Resources", []):
-            app_id = sp.get("applicationId", "")
-            if app_id and app_id not in sp_before:
-                new_sp_app_id = app_id
-                print(f"  NEW SP: {sp.get('displayName')} | applicationId={app_id} | id={sp.get('id')}")
+        app_info = api_get(f"/api/2.0/apps/{app_name}")
+        new_sp_app_id = app_info.get("service_principal_client_id") or None
+        if new_sp_app_id:
+            print(f"  App SP: {app_info.get('service_principal_name')} | applicationId={new_sp_app_id}")
     except Exception as exc:
-        print(f"  ⚠️ Could not list SPs: {exc}")
+        print(f"  ⚠️ Could not read the app's service principal: {exc}")
+    if new_sp_app_id:
+        found = api_get(f"/api/2.0/preview/scim/v2/ServicePrincipals?filter=applicationId eq \"{new_sp_app_id}\"")
+        if not found.get("Resources"):
+            raise RuntimeError(
+                f"The service principal of app '{app_name}' ({new_sp_app_id}) no longer exists. "
+                f"Delete the app in Compute → Apps → {app_name}, wait until it is gone, then run this installer again."
+            )
+
+    if not new_sp_app_id:
+        try:
+            data = api_get("/api/2.0/preview/scim/v2/ServicePrincipals?count=500")
+            for sp in data.get("Resources", []):
+                app_id = sp.get("applicationId", "")
+                if app_id and app_id not in sp_before:
+                    new_sp_app_id = app_id
+                    print(f"  NEW SP: {sp.get('displayName')} | applicationId={app_id} | id={sp.get('id')}")
+        except Exception as exc:
+            print(f"  ⚠️ Could not list SPs: {exc}")
 
     if not new_sp_app_id:
         print("  ⚠️ Could not find new SP by diff. Trying name search...")
@@ -750,7 +840,7 @@ def step_deploy_and_find_sp(ctx):
             sps = api_get(f"/api/2.0/preview/scim/v2/ServicePrincipals?filter=displayName co \"{app_name}\"")
             for sp in sps.get("Resources", []):
                 app_id = sp.get("applicationId", "")
-                if app_id:
+                if app_id and _is_own_service_principal(sp.get("displayName", ""), app_name, sp_name):
                     new_sp_app_id = app_id
                     print(f"  Found: {sp.get('displayName')} | applicationId={app_id}")
                     break
@@ -796,6 +886,9 @@ def step_grant_permissions(ctx):
             f"GRANT CREATE_TABLE ON SCHEMA `{catalog}`.`{schema}` TO `{sp}`",
             f"GRANT SELECT ON SCHEMA `{catalog}`.`{schema}` TO `{sp}`",
             f"GRANT MODIFY ON SCHEMA `{catalog}`.`{schema}` TO `{sp}`",
+            f"GRANT CREATE VOLUME ON SCHEMA `{catalog}`.`{schema}` TO `{sp}`",
+            f"GRANT READ VOLUME ON SCHEMA `{catalog}`.`{schema}` TO `{sp}`",
+            f"GRANT WRITE VOLUME ON SCHEMA `{catalog}`.`{schema}` TO `{sp}`",
         ]
 
         all_catalogs = set(available_catalogs)
@@ -883,3 +976,4 @@ try:
     main()
 except (FileNotFoundError, RuntimeError, requests.exceptions.HTTPError) as exc:
     show_warning_banner("Setup incomplete", str(exc))
+    raise

@@ -2,11 +2,14 @@
 
 This repository is structured for **customer deployment**: only the installer notebook lives at the root; the full Databricks App lives in **`app/`**.
 
-## Agent v1.2.0 (current)
+## Agent v1.3.0 (current)
 
 | | |
 |--|--|
-| **Ship** | Agent notebook + App aligned to **v1.2.0** |
+| **Ship** | Agent notebook + App aligned to **v1.3.0** |
+| **Discovery** | `03_discovery_type`: **Deep** (default; aggregates only, never a data row to the AI, no personal-column values) or **Standard** (never reads data). |
+| **Strategy** | `10_strategic_context`: optional strategy tree (inline JSON or a `/` path), applied only after selection. |
+| **Feedback** | Accept, reject, plan or mark implemented from Results; the agent reads `__inspire_feedback` on the next run. |
 | **Path** | `/Shared/inspire-ai/dbx_inspire_ai_agent` |
 | **Artifacts** | `09_generation_options` → **PDF Catalog** / **Presentation** only |
 | **Genie** | `13_generate_genie_code_for` (integer or `all`, default `5`). Persistent jobs `dbx_inspire_ai_<slug>_<hash8>`. |

@@ -37,7 +37,7 @@ info:
     | **Results** | `GET /api/inspire/usecases` | Retrieve scored, prioritized use cases |
     | **Results** | `GET /api/inspire/results` | Get the full analysis output |
 
-  version: 1.0.0
+  version: 1.3.0
   contact:
     name: Inspire AI Team
 
@@ -230,6 +230,30 @@ components:
               description: Quality mode (`05_use_cases_quality`). Canonical v1.2.0 values. Legacy labels still map.
               enum: [Good, High, Ultra High]
               default: Good
+            03_discovery_type:
+              type: string
+              description: |
+                v1.3.0 Discovery Type. `Deep` (default) may read aggregates over the scanned tables (row counts, null
+                share, distinct counts, date coverage, short value lists of non-personal columns, join match rates, KPI
+                baselines) and never sends a data row to the AI. `Standard` never reads data. Matching ignores case;
+                empty means `Deep`; any other value is refused with 400.
+              enum: [Deep, Standard]
+              default: Deep
+            10_strategic_context:
+              type: string
+              description: |
+                v1.3.0 Strategic Context: inline JSON or a Workspace or Volumes path starting with `/`; empty for none.
+                One strategy tree (1 to 4 levels, entries with KPIs and key results, priorities, sponsors, labels),
+                applied only after selection. At most 900000 bytes, otherwise 400.
+              default: ''
+            16_best_of_best_count:
+              type: string
+              description: |
+                v1.3.0 Best of Best Count: how many use cases are starred (0 to 100). Empty lets the generation
+                instructions or the default of 20 decide. Starring never adds, removes or reorders a use case. Any
+                other value is refused with 400.
+              pattern: '^(\d{1,3})?$'
+              default: ''
             strategic_goals:
               type: string
               description: Business strategic goals to guide analysis
@@ -454,6 +478,45 @@ components:
           type: string
           nullable: true
           description: Generated Genie SQL instruction
+        Strategy Path:
+          type: string
+          nullable: true
+          description: v1.3.0. Aligned strategy paths joined with `; `, or `Not aligned`
+        Strategy Alignment:
+          type: array
+          nullable: true
+          description: v1.3.0. Up to 2 `{id, path, evidence}` alignments
+          items: {type: object}
+        KPIs:
+          type: array
+          nullable: true
+          description: v1.3.0. KPI specs with the read-only query and, in Deep, the measured baseline
+          items: {type: object}
+        Expected Key Results:
+          type: array
+          nullable: true
+          items: {type: object}
+        Measures of Success:
+          type: array
+          nullable: true
+          items: {type: string}
+        Financial Benefits:
+          type: array
+          nullable: true
+          items: {type: string}
+        Non-Financial Benefits:
+          type: array
+          nullable: true
+          items: {type: string}
+        Foundations:
+          type: array
+          nullable: true
+          description: v1.3.0. Shared data foundation ids (`F1`, ...)
+          items: {type: string}
+        use_case_key:
+          type: string
+          nullable: true
+          description: v1.3.0. Stable identity across runs; the key feedback uses
       additionalProperties:
         type: string
 
@@ -1110,6 +1173,70 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
 
+  /api/inspire/feedback:
+    post:
+      tags: [Results]
+      summary: Record feedback on a use case (v1.3.0)
+      description: |
+        Appends one decision to `<inspire_database>.__inspire_feedback`. Every value is bound as a statement parameter.
+        The business name is read from the session. The next run for the same business excludes `rejected` use cases
+        and carries the others as history; `implemented` ones get value tracking. Returns 409 with
+        `available: false` while the table does not exist (the agent creates it on its first v1.3.0 run).
+      parameters:
+        - $ref: '#/components/parameters/DatabricksHost'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [inspire_database, warehouse_id, session_id, use_case_key, status]
+              properties:
+                inspire_database: {type: string, example: workspace._inspire}
+                warehouse_id: {type: string}
+                session_id: {type: string, description: Numeric session id, example: '4038328984923949099'}
+                use_case_id: {type: string, example: N01-U03}
+                use_case_key: {type: string, description: Copied from the use case row, maxLength: 300}
+                use_case_title: {type: string}
+                status: {type: string, enum: [accepted, rejected, planned, implemented]}
+                reason: {type: string, maxLength: 2000}
+      responses:
+        '200':
+          description: Feedback recorded
+        '400':
+          description: Invalid input
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '404':
+          description: Session not found
+        '409':
+          description: Feedback table not available yet
+    get:
+      tags: [Results]
+      summary: Feedback history for a business (v1.3.0)
+      description: |
+        Every feedback row for the business, newest first (`history`), and the latest row per `use_case_key`
+        (`latest`). Answers `available: false` with empty lists while the table does not exist.
+      parameters:
+        - $ref: '#/components/parameters/DatabricksHost'
+        - $ref: '#/components/parameters/InspireDatabase'
+        - $ref: '#/components/parameters/WarehouseId'
+        - name: business_name
+          in: query
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: Feedback history
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  available: {type: boolean}
+                  history: {type: array, items: {type: object}}
+                  latest: {type: array, items: {type: object}}
   /api/inspire/ack:
     post:
       tags: [Results]

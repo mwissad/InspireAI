@@ -29,6 +29,9 @@ import {
   LayoutGrid,
   Sparkles,
   XCircle,
+  Compass,
+  Flag,
+  Star,
 } from 'lucide-react';
 import AnimatedCounter from '../components/AnimatedCounter';
 import GenieMarkdownPreview from '../components/GenieMarkdownPreview';
@@ -38,6 +41,22 @@ import PriorityHeatmap from '../components/PriorityHeatmap';
 import Celebration from '../components/Celebration';
 import DatabricksLogo from '../components/DatabricksLogo';
 import { SkeletonCard, SkeletonStats } from '../components/SkeletonLoader';
+import { DataAccessBadge, FeedbackPanel, FoundationsPanel, SidebarFilterPanel, StrategyCoveragePanel } from '../components/ResultsInsights';
+import { BestOfBestDetail, FeedbackChip, FeedbackControls, StrategyChip, UseCaseStrategyDetail } from '../components/UseCaseStrategyDetail';
+import {
+  NOT_ALIGNED_FILTER,
+  bestOfBestLabel,
+  compareBestOfBestFirst,
+  copyV130TrackingFields,
+  genieCardActions,
+  knownPriorities,
+  latestFeedbackMap,
+  matchesStrategyFilter,
+  priorityMatches,
+  strategyFilterOptions,
+  v130View,
+} from '../lib/v130UseCase';
+import { visibleArtifactFiles } from '../lib/artifactFiles';
 
 /* ── Priority sort order ── */
 const PRIORITY_ORDER = [
@@ -561,8 +580,11 @@ export default function ResultsPage({
   const [filterSponsor, setFilterSponsor] = useState('all');
   /** `all` | `yes` | `no` — filter by presence of Genie instruction on the use case. */
   const [filterHasGenie, setFilterHasGenie] = useState('all');
+  const [filterStrategy, setFilterStrategy] = useState('all');
+  const [filterBizPriority, setFilterBizPriority] = useState('all');
   const [sortBy, setSortBy] = useState('inspire');
   const [showFavoritesOnly, setShowFavoritesOnly] = useState(false);
+  const [showBestOfBestOnly, setShowBestOfBestOnly] = useState(false);
 
   // Favorites — browser localStorage, keyed by content fingerprint (works across sessions)
   const [favorites, setFavorites] = useState(loadFavoritesMap);
@@ -584,6 +606,12 @@ export default function ResultsPage({
   const [domainPanelOpen, setDomainPanelOpen] = useState(false);
   const [beneficiaryPanelOpen, setBeneficiaryPanelOpen] = useState(false);
   const [sponsorPanelOpen, setSponsorPanelOpen] = useState(false);
+  const [strategyPanelOpen, setStrategyPanelOpen] = useState(false);
+  const [bizPriorityPanelOpen, setBizPriorityPanelOpen] = useState(false);
+  const [feedbackState, setFeedbackState] = useState({ available: null, latest: [], message: '' });
+  const [feedbackRefresh, setFeedbackRefresh] = useState(0);
+  const [feedbackBusyKey, setFeedbackBusyKey] = useState('');
+  const [feedbackError, setFeedbackError] = useState({ key: '', message: '' });
 
   // Artifacts state — tree-based with expandable folders
   const [artifactTree, setArtifactTree] = useState({}); // { [path]: { files: [], loading, error } }
@@ -668,6 +696,59 @@ export default function ResultsPage({
     [token, databricksHost]
   );
 
+  const resultsDiscoveryType = results?.discovery_type || '';
+  const feedbackBusiness = useMemo(() => {
+    const session = sessions.find((s) => String(s.session_id) === String(selectedSessionId));
+    return session?.widget_values?.business || session?.widget_values?.['00_business_name'] || session?.business_name || '';
+  }, [sessions, selectedSessionId]);
+  useEffect(() => {
+    const business = feedbackBusiness;
+    if (!resultsDiscoveryType || !inspireDb || !warehouseId || !business) {
+      setFeedbackState({ available: null, latest: [], message: '' });
+      return undefined;
+    }
+    let cancelled = false;
+    const q = new URLSearchParams({ inspire_database: inspireDb, warehouse_id: warehouseId, business_name: business });
+    apiFetch(`/api/inspire/feedback?${q}`)
+      .then((data) => {
+        if (!cancelled) setFeedbackState({ available: !!data.available, latest: data.latest || [], message: data.message || '' });
+      })
+      .catch(() => {
+        if (!cancelled) setFeedbackState({ available: null, latest: [], message: '' });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [resultsDiscoveryType, feedbackBusiness, inspireDb, warehouseId, apiFetch, feedbackRefresh]);
+
+  const submitFeedback = useCallback(
+    async (uc, info, status, reason) => {
+      if (!selectedSessionId || !inspireDb || !warehouseId || !info?.useCaseKey) return;
+      setFeedbackBusyKey(info.useCaseKey);
+      setFeedbackError({ key: '', message: '' });
+      try {
+        await apiPostJson('/api/inspire/feedback', {
+          inspire_database: inspireDb,
+          warehouse_id: warehouseId,
+          session_id: String(selectedSessionId),
+          use_case_key: info.useCaseKey,
+          use_case_id: String(uc?.catalog_no || uc?.No || ''),
+          use_case_title: String(uc?.Name || ''),
+          status,
+          reason,
+        });
+        setFeedbackRefresh((n) => n + 1);
+      } catch (err) {
+        const message = String(err?.message || err);
+        if (message.startsWith('409')) setFeedbackState((prev) => ({ ...prev, available: false }));
+        setFeedbackError({ key: info.useCaseKey, message: message.replace(/^\d{3}:\s*/, '') });
+      } finally {
+        setFeedbackBusyKey('');
+      }
+    },
+    [selectedSessionId, inspireDb, warehouseId, apiPostJson]
+  );
+
   useEffect(() => {
     genieSelectionDirtyRef.current = false;
     setGenieRegenSelectedIds([]);
@@ -739,7 +820,7 @@ export default function ResultsPage({
       const cur = sortUniqueGenieIds(Array.isArray(prev) ? prev : []);
       if (checked) {
         if (cur.length >= 50 && !cur.includes(sid)) {
-          setGenieFlagSyncError('At most 50 use cases can be flagged for Genie generation per run.');
+          setGenieFlagSyncError('At most 50 use cases can be marked for Genie Code generation per run.');
           return prev;
         }
         setGenieFlagSyncError('');
@@ -791,7 +872,7 @@ export default function ResultsPage({
       });
       setGenieJobLastRun(out);
     } catch (e) {
-      setGenieJobError(e.message || 'Generate Genie job failed.');
+      setGenieJobError(e.message || 'Generating the Genie instructions failed.');
     } finally {
       setGenieJobRunning(false);
     }
@@ -974,6 +1055,8 @@ export default function ResultsPage({
     setPreviewFile(null);
     setPreviewData(null);
     setArtifactsExpanded(false);
+    setFilterStrategy('all');
+    setFilterBizPriority('all');
     lastArtifactsLoadKeyRef.current = '';
     try {
       const q = new URLSearchParams({
@@ -1088,6 +1171,7 @@ export default function ResultsPage({
         for (const field of ['quality', 'quality_mode', 'elite_status', 'elite_score', 'elite_assessment', 'selection_flags', 'selection_drop_reason']) {
           if (row[field] != null && row[field] !== '' && (uc[field] == null || uc[field] === '')) uc[field] = row[field];
         }
+        copyV130TrackingFields(uc, row);
       }
       // When domain JSON `No`/`id` ≠ tracking table `id`, attach scores by Name + Business Domain.
       const normKey = (name, domain) =>
@@ -1118,6 +1202,7 @@ export default function ResultsPage({
         copyScore2('feasibility_score');
         if (!uc.Priority && row.Priority) uc.Priority = row.Priority;
         if (!uc.Quality && row.Quality) uc.Quality = row.Quality;
+        copyV130TrackingFields(uc, row);
         const trackId = row.id ?? row.No ?? row['No'];
         applyInspireTrackingId(uc, trackId);
         const ggi2 = row.generate_genie_code_instruction;
@@ -1134,6 +1219,10 @@ export default function ResultsPage({
     console.error('Error extracting use cases:', err);
     allUseCases = [];
   }
+  for (const uc of allUseCases) {
+    if (uc && typeof uc === 'object') uc._v130 = v130View(uc);
+  }
+  const bizPriorities = knownPriorities(results);
 
   // ── Resolve table from registry ──
   const resolveTable = (id) => {
@@ -1156,6 +1245,8 @@ export default function ResultsPage({
         if (filterQuality !== 'all' && String(uc.Quality || '') !== filterQuality) return false;
         if (filterBeneficiary !== 'all' && beneficiaryFromUc(uc) !== filterBeneficiary) return false;
         if (filterSponsor !== 'all' && sponsorFromUc(uc) !== filterSponsor) return false;
+        if (filterStrategy !== 'all' && !matchesStrategyFilter(uc._v130, filterStrategy)) return false;
+        if (filterBizPriority !== 'all' && !priorityMatches(uc._v130?.priorityText, bizPriorities).includes(filterBizPriority)) return false;
         if (filterHasGenie === 'yes' && !useCaseHasGenieInstruction(uc)) return false;
         if (filterHasGenie === 'no' && useCaseHasGenieInstruction(uc)) return false;
         if (searchQuery) {
@@ -1171,6 +1262,8 @@ export default function ResultsPage({
         return true;
       })
       .sort((a, b) => {
+        const starred = compareBestOfBestFirst(a._v130, b._v130);
+        if (starred !== 0) return starred;
         const sa = inspireScoreFromUc(a);
         const sb = inspireScoreFromUc(b);
         const scoreFirst = () => {
@@ -1213,6 +1306,11 @@ export default function ResultsPage({
     filteredUseCases = allUseCases;
   }
 
+  if (showBestOfBestOnly) {
+    filteredUseCases = filteredUseCases.filter((uc) => uc?._v130?.bestOfBest);
+  }
+  const starredCount = allUseCases.filter((uc) => uc?._v130?.bestOfBest).length;
+
   // Apply favorites filter
   if (showFavoritesOnly) {
     filteredUseCases = filteredUseCases.filter((uc) => {
@@ -1254,6 +1352,32 @@ export default function ResultsPage({
     const s = sponsorFromUc(uc);
     if (s) sponsorCounts[s] = (sponsorCounts[s] || 0) + 1;
   }
+
+  const v130Session = !!(results && (results.discovery_type || results.strategy_coverage));
+  const strategyFilter = strategyFilterOptions(allUseCases.map((uc) => uc?._v130), results?.strategy_coverage?.entries);
+  const strategyOptions = strategyFilter.notAligned > 0
+    ? [...strategyFilter.options, { value: NOT_ALIGNED_FILTER, label: 'Not aligned', count: strategyFilter.notAligned, depth: 0 }]
+    : strategyFilter.options;
+  const bizPriorityCounts = {};
+  let bizPriorityUseCases = 0;
+  for (const uc of allUseCases) {
+    const matched = priorityMatches(uc?._v130?.priorityText, bizPriorities);
+    if (matched.length) bizPriorityUseCases += 1;
+    for (const bp of matched) bizPriorityCounts[bp] = (bizPriorityCounts[bp] || 0) + 1;
+  }
+  const bizPriorityOptions = bizPriorities
+    .filter((bp) => bizPriorityCounts[bp])
+    .map((bp) => ({ value: bp, label: bp, count: bizPriorityCounts[bp] }));
+  const foundationsById = new Map(
+    (Array.isArray(results?.foundations) ? results.foundations : []).map((f) => [String(f.id), f])
+  );
+  const useCaseNameById = new Map();
+  for (const uc of allUseCases) {
+    for (const id of [uc?.catalog_no, uc?.No, uc?.id]) {
+      if (id != null && String(id).trim() && !useCaseNameById.has(String(id).trim())) useCaseNameById.set(String(id).trim(), String(uc.Name || id));
+    }
+  }
+  const feedbackLatest = latestFeedbackMap(feedbackState.latest);
 
   // Compute subdomain counts by domain
   const subdomainsByDomain = {};
@@ -1304,14 +1428,19 @@ export default function ResultsPage({
     filterQuality !== 'all' ||
     filterBeneficiary !== 'all' ||
     filterSponsor !== 'all' ||
-    filterHasGenie !== 'all';
+    filterStrategy !== 'all' ||
+    filterBizPriority !== 'all' ||
+    filterHasGenie !== 'all' ||
+    showBestOfBestOnly;
 
   const clearAllFilters = () => {
     setSearchQuery(''); setFilterDomain('all'); setFilterSubdomain('all');
     setFilterPriority('all'); setFilterType('all'); setFilterTechnique('all');
     setFilterQuality('all');
     setFilterBeneficiary('all'); setFilterSponsor('all');
+    setFilterStrategy('all'); setFilterBizPriority('all');
     setFilterHasGenie('all');
+    setShowBestOfBestOnly(false);
   };
 
   // Load generation artifacts — tries multiple path variations
@@ -1332,7 +1461,7 @@ export default function ResultsPage({
         const resp = await fetch(`/api/workspace/list?path=${encodeURIComponent(dir)}`, { headers });
         if (!resp.ok) return;
         const data = await resp.json();
-        const files = data.files || [];
+        const files = visibleArtifactFiles(data.files);
         setArtifactTree(prev => ({ ...prev, [dir]: { files, loading: false, error: null } }));
         for (const f of files) {
           if (f.is_directory) {
@@ -1366,7 +1495,7 @@ export default function ResultsPage({
         if (resp.ok) {
           const data = await resp.json();
           if (data.files && data.files.length > 0) {
-            setArtifactsRootFiles(data.files);
+            setArtifactsRootFiles(visibleArtifactFiles(data.files));
             setArtifactsExpanded(true);
             setArtifactsLoading(false);
             // Auto-scan ALL subfolders to discover notebook paths and previewable files
@@ -1390,7 +1519,7 @@ export default function ResultsPage({
       const resp = await fetch(`/api/workspace/list?path=${encodeURIComponent(folderPath)}`, { headers });
       if (resp.ok) {
         const data = await resp.json();
-        setArtifactTree(prev => ({ ...prev, [folderPath]: { files: data.files || [], loading: false, error: null } }));
+        setArtifactTree(prev => ({ ...prev, [folderPath]: { files: visibleArtifactFiles(data.files), loading: false, error: null } }));
       } else {
         setArtifactTree(prev => ({ ...prev, [folderPath]: { files: [], loading: false, error: 'Could not list folder' } }));
       }
@@ -2431,6 +2560,21 @@ export default function ResultsPage({
           </div>
 
 
+          {v130Session && (
+            <>
+              <DataAccessBadge results={results} />
+              <div className="grid grid-cols-1 lg:grid-cols-3 items-start gap-3 mb-4">
+                <StrategyCoveragePanel
+                  coverage={results.strategy_coverage}
+                  onSelectPath={(path) => setFilterStrategy(path)}
+                  onSelectNotAligned={() => setFilterStrategy(NOT_ALIGNED_FILTER)}
+                />
+                <FoundationsPanel foundations={results.foundations} deliveryOrder={results.delivery_order} nameById={useCaseNameById} />
+                <FeedbackPanel results={results} feedback={feedbackState} />
+              </div>
+            </>
+          )}
+
           {/* ═══ Two-Column: sticky sidebar rail; use-case list scrolls independently in the right column ═══ */}
           <div className="flex items-stretch gap-5 min-h-0">
             {/* ── Left Sidebar: stays fixed in viewport while the card list scrolls (sticky + max height) ── */}
@@ -2580,172 +2724,64 @@ export default function ResultsPage({
                 )}
               </div>
 
+              {strategyFilter.withData > 0 && (
+                <SidebarFilterPanel
+                  title="Strategy"
+                  subtitle={`${strategyFilter.withData - strategyFilter.notAligned} aligned \u00b7 ${strategyFilter.notAligned} not aligned`}
+                  icon={Compass}
+                  open={strategyPanelOpen}
+                  onToggle={() => setStrategyPanelOpen((o) => !o)}
+                  allLabel="All use cases"
+                  allCount={allUseCases.length}
+                  options={strategyOptions}
+                  value={filterStrategy}
+                  onChange={setFilterStrategy}
+                />
+              )}
+
+              {bizPriorityOptions.length > 0 && (
+                <SidebarFilterPanel
+                  title="Business priorities"
+                  subtitle={`${bizPriorityOptions.length} of ${bizPriorities.length} priorities in use`}
+                  icon={Flag}
+                  open={bizPriorityPanelOpen}
+                  onToggle={() => setBizPriorityPanelOpen((o) => !o)}
+                  allLabel="All priorities"
+                  allCount={bizPriorityUseCases}
+                  options={bizPriorityOptions}
+                  value={filterBizPriority}
+                  onChange={setFilterBizPriority}
+                />
+              )}
+
               {beneficiaries.length > 0 && (
-                <div className="flex shrink-0 flex-col overflow-hidden rounded-xl border border-border bg-surface shadow-sm">
-                  <button
-                    type="button"
-                    onClick={() => setBeneficiaryPanelOpen((o) => !o)}
-                    className="flex w-full shrink-0 items-start gap-2 border-b border-border bg-gradient-to-b from-db-red-50 to-surface px-3 py-3 text-left transition-smooth hover:from-db-red-50/80"
-                  >
-                    <ChevronRight
-                      size={14}
-                      className={`mt-0.5 shrink-0 text-text-tertiary transition-transform duration-200 ${beneficiaryPanelOpen ? 'rotate-90' : ''}`}
-                    />
-                    <Users size={14} className="mt-0.5 shrink-0 text-db-red" />
-                    <div className="min-w-0 flex-1">
-                      <span className="text-xs font-bold text-text-primary">Beneficiaries</span>
-                      <p className="text-[10px] text-text-tertiary mt-0.5">
-                        {beneficiaries.length} role{beneficiaries.length !== 1 ? 's' : ''} &middot; who benefits
-                      </p>
-                      {!beneficiaryPanelOpen && filterBeneficiary !== 'all' && (
-                        <p className="mt-1 truncate text-[10px] font-medium text-db-red" title={filterBeneficiary}>
-                          Filter: {filterBeneficiary}
-                        </p>
-                      )}
-                    </div>
-                  </button>
-                  {beneficiaryPanelOpen && (
-                  <div className="p-1.5 space-y-0.5">
-                    <button
-                      type="button"
-                      onClick={() => setFilterBeneficiary('all')}
-                      className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-left transition-smooth ${
-                        filterBeneficiary === 'all'
-                          ? 'bg-db-red-50 border border-db-red/20'
-                          : 'hover:bg-bg-subtle border border-transparent'
-                      }`}
-                    >
-                      <div className={`w-5 h-5 rounded-full flex items-center justify-center shrink-0 ${
-                        filterBeneficiary === 'all' ? 'bg-db-red/10' : 'bg-bg-subtle'
-                      }`}>
-                        <Users size={10} className={filterBeneficiary === 'all' ? 'text-db-red' : 'text-text-tertiary'} />
-                      </div>
-                      <span className={`text-[11px] font-semibold flex-1 truncate ${
-                        filterBeneficiary === 'all' ? 'text-db-red' : 'text-text-primary'
-                      }`}>
-                        All beneficiaries
-                      </span>
-                      <span className={`text-[10px] font-mono shrink-0 ${filterBeneficiary === 'all' ? 'text-db-red' : 'text-text-tertiary'}`}>
-                        {allUseCases.filter((uc) => beneficiaryFromUc(uc)).length}
-                      </span>
-                    </button>
-                    {beneficiaries.map((b) => {
-                      const count = beneficiaryCounts[b] || 0;
-                      const active = filterBeneficiary === b;
-                      return (
-                        <button
-                          key={b}
-                          type="button"
-                          onClick={() => setFilterBeneficiary(active ? 'all' : b)}
-                          className={`w-full flex items-start gap-2 px-3 py-2 rounded-lg text-left transition-smooth ${
-                            active
-                              ? 'bg-db-red-50 border border-db-red/20'
-                              : 'hover:bg-bg-subtle border border-transparent'
-                          }`}
-                        >
-                          <div className={`w-5 h-5 rounded-full flex items-center justify-center shrink-0 mt-0.5 ${
-                            active ? 'bg-db-red/10' : 'bg-bg-subtle'
-                          }`}>
-                            <Users size={10} className={active ? 'text-db-red' : 'text-text-tertiary'} />
-                          </div>
-                          <div className="flex-1 min-w-0">
-                            <span className={`text-[11px] font-semibold block truncate ${active ? 'text-db-red' : 'text-text-primary'}`}>
-                              {b}
-                            </span>
-                            <span className="text-[9px] text-text-tertiary font-mono mt-0.5 block">
-                              {count} use case{count !== 1 ? 's' : ''}
-                            </span>
-                          </div>
-                        </button>
-                      );
-                    })}
-                  </div>
-                  )}
-                </div>
+                <SidebarFilterPanel
+                  title="Beneficiaries"
+                  subtitle={`${beneficiaries.length} role${beneficiaries.length !== 1 ? 's' : ''} \u00b7 who benefits`}
+                  icon={Users}
+                  open={beneficiaryPanelOpen}
+                  onToggle={() => setBeneficiaryPanelOpen((o) => !o)}
+                  allLabel="All beneficiaries"
+                  allCount={allUseCases.filter((uc) => beneficiaryFromUc(uc)).length}
+                  options={beneficiaries.map((b) => ({ value: b, label: b, count: beneficiaryCounts[b] || 0 }))}
+                  value={filterBeneficiary}
+                  onChange={setFilterBeneficiary}
+                />
               )}
 
               {sponsors.length > 0 && (
-                <div className="flex shrink-0 flex-col overflow-hidden rounded-xl border border-border bg-surface shadow-sm">
-                  <button
-                    type="button"
-                    onClick={() => setSponsorPanelOpen((o) => !o)}
-                    className="flex w-full shrink-0 items-start gap-2 border-b border-border bg-gradient-to-b from-db-red-50 to-surface px-3 py-3 text-left transition-smooth hover:from-db-red-50/80"
-                  >
-                    <ChevronRight
-                      size={14}
-                      className={`mt-0.5 shrink-0 text-text-tertiary transition-transform duration-200 ${sponsorPanelOpen ? 'rotate-90' : ''}`}
-                    />
-                    <Crown size={14} className="mt-0.5 shrink-0 text-db-red" />
-                    <div className="min-w-0 flex-1">
-                      <span className="text-xs font-bold text-text-primary">Sponsors</span>
-                      <p className="text-[10px] text-text-tertiary mt-0.5">
-                        {sponsors.length} sponsor{sponsors.length !== 1 ? 's' : ''} &middot; executive / owner
-                      </p>
-                      {!sponsorPanelOpen && filterSponsor !== 'all' && (
-                        <p className="mt-1 truncate text-[10px] font-medium text-db-red" title={filterSponsor}>
-                          Filter: {filterSponsor}
-                        </p>
-                      )}
-                    </div>
-                  </button>
-                  {sponsorPanelOpen && (
-                  <div className="p-1.5 space-y-0.5">
-                    <button
-                      type="button"
-                      onClick={() => setFilterSponsor('all')}
-                      className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-left transition-smooth ${
-                        filterSponsor === 'all'
-                          ? 'bg-db-red-50 border border-db-red/20'
-                          : 'hover:bg-bg-subtle border border-transparent'
-                      }`}
-                    >
-                      <div className={`w-5 h-5 rounded-full flex items-center justify-center shrink-0 ${
-                        filterSponsor === 'all' ? 'bg-db-red/10' : 'bg-bg-subtle'
-                      }`}>
-                        <Crown size={10} className={filterSponsor === 'all' ? 'text-db-red' : 'text-text-tertiary'} />
-                      </div>
-                      <span className={`text-[11px] font-semibold flex-1 truncate ${
-                        filterSponsor === 'all' ? 'text-db-red' : 'text-text-primary'
-                      }`}>
-                        All sponsors
-                      </span>
-                      <span className={`text-[10px] font-mono shrink-0 ${filterSponsor === 'all' ? 'text-db-red' : 'text-text-tertiary'}`}>
-                        {allUseCases.filter((uc) => sponsorFromUc(uc)).length}
-                      </span>
-                    </button>
-                    {sponsors.map((sp) => {
-                      const count = sponsorCounts[sp] || 0;
-                      const active = filterSponsor === sp;
-                      return (
-                        <button
-                          key={sp}
-                          type="button"
-                          onClick={() => setFilterSponsor(active ? 'all' : sp)}
-                          className={`w-full flex items-start gap-2 px-3 py-2 rounded-lg text-left transition-smooth ${
-                            active
-                              ? 'bg-db-red-50 border border-db-red/20'
-                              : 'hover:bg-bg-subtle border border-transparent'
-                          }`}
-                        >
-                          <div className={`w-5 h-5 rounded-full flex items-center justify-center shrink-0 mt-0.5 ${
-                            active ? 'bg-db-red/10' : 'bg-bg-subtle'
-                          }`}>
-                            <Crown size={10} className={active ? 'text-db-red' : 'text-text-tertiary'} />
-                          </div>
-                          <div className="flex-1 min-w-0">
-                            <span className={`text-[11px] font-semibold block truncate ${active ? 'text-db-red' : 'text-text-primary'}`}>
-                              {sp}
-                            </span>
-                            <span className="text-[9px] text-text-tertiary font-mono mt-0.5 block">
-                              {count} use case{count !== 1 ? 's' : ''}
-                            </span>
-                          </div>
-                        </button>
-                      );
-                    })}
-                  </div>
-                  )}
-                </div>
+                <SidebarFilterPanel
+                  title="Sponsors"
+                  subtitle={`${sponsors.length} sponsor${sponsors.length !== 1 ? 's' : ''} \u00b7 executive / owner`}
+                  icon={Crown}
+                  open={sponsorPanelOpen}
+                  onToggle={() => setSponsorPanelOpen((o) => !o)}
+                  allLabel="All sponsors"
+                  allCount={allUseCases.filter((uc) => sponsorFromUc(uc)).length}
+                  options={sponsors.map((sp) => ({ value: sp, label: sp, count: sponsorCounts[sp] || 0 }))}
+                  value={filterSponsor}
+                  onChange={setFilterSponsor}
+                />
               )}
             </div>
 
@@ -2782,6 +2818,24 @@ export default function ResultsPage({
                       <span className="text-[10px]">{favoriteCount(favorites)}</span>
                     )}
                   </button>
+
+                  {starredCount > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setShowBestOfBestOnly(!showBestOfBestOnly)}
+                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-smooth ${
+                        showBestOfBestOnly
+                          ? 'bg-amber-50 text-amber-700 border-amber-300'
+                          : 'bg-bg text-text-secondary border-border hover:border-border-strong'
+                      }`}
+                      title={showBestOfBestOnly ? 'Show all use cases' : 'Show Best of Best use cases only'}
+                      aria-pressed={showBestOfBestOnly}
+                    >
+                      <Star size={13} className={showBestOfBestOnly ? 'fill-amber-400 text-amber-500' : ''} />
+                      Best of Best
+                      <span className="text-[10px]">{starredCount}</span>
+                    </button>
+                  )}
 
                   {/* Priority pills */}
                   {priorities.length > 0 && (
@@ -2951,14 +3005,14 @@ export default function ResultsPage({
                   if (genieJobLastRun?.run_id != null) {
                     const { key, label } = deriveGenieOverallStatus(genieJobProgress);
                     if (key === 'done') {
-                      return `Last run finished · ${n} selected — expand to change flags or run again.`;
+                      return `Last run finished · ${n} marked. Expand for details.`;
                     }
                     if (key === 'failed') {
                       return `Last run failed (${label}). Expand for details.`;
                     }
                     return `${label} — expand for status and Databricks link.`;
                   }
-                  return `${n} selected — expand to sync flags and run the Genie notebook job.`;
+                  return `${n} marked for Genie Code generation. Expand for details.`;
                 })();
                 return (
                   <div className="mb-4 shrink-0 p-4 bg-gradient-to-br from-db-red-50 to-surface dark:from-db-red/10 dark:to-surface border border-db-red/20 rounded-xl shadow-elevated">
@@ -2991,54 +3045,50 @@ export default function ResultsPage({
                               aria-hidden
                             />
                           </button>
-                          {genieInstructionsPanelExpanded && (
-                            <button
-                              type="button"
-                              disabled={
-                                genieJobRunning ||
-                                genieRegenSelectedIds.length === 0 ||
-                                genieDeltaSyncPending ||
-                                genieFlagSyncing
-                              }
-                              title={
-                                genieDeltaSyncPending || genieFlagSyncing
-                                  ? 'Wait until your checkbox selection is saved to Delta before running the job.'
+                          <button
+                            type="button"
+                            disabled={
+                              genieJobRunning ||
+                              genieRegenSelectedIds.length === 0 ||
+                              genieDeltaSyncPending ||
+                              genieFlagSyncing
+                            }
+                            title={
+                              genieDeltaSyncPending || genieFlagSyncing
+                                ? 'Wait until your marks are saved before generating.'
+                                : genieRegenSelectedIds.length === 0
+                                  ? 'Mark at least one use case with Mark Ready for Genie Code Generation first.'
                                   : undefined
-                              }
-                              onClick={() => void handleGenerateGenieJob()}
-                              className="inline-flex w-full min-[480px]:w-auto shrink-0 items-center justify-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold text-white bg-db-red hover:bg-db-red-hover shadow-sm shadow-db-red/20 disabled:opacity-50 disabled:pointer-events-none disabled:shadow-none transition-smooth min-[480px]:self-start"
-                            >
-                              {genieJobRunning ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
-                              Run Genie job
-                            </button>
-                          )}
+                            }
+                            onClick={() => void handleGenerateGenieJob()}
+                            className="inline-flex w-full min-[480px]:w-auto shrink-0 items-center justify-center gap-2 px-4 py-2.5 rounded-lg text-sm font-semibold text-white bg-db-red hover:bg-db-red-hover shadow-md shadow-db-red/25 disabled:opacity-50 disabled:cursor-not-allowed disabled:shadow-none transition-smooth min-[480px]:self-start"
+                          >
+                            {genieJobRunning ? <Loader2 size={16} className="animate-spin" /> : <Sparkles size={16} />}
+                            Generate Genie Instruction for Marked use cases
+                            <span className="inline-flex min-w-[1.5rem] justify-center rounded-full bg-white/20 px-1.5 py-0.5 text-xs tabular-nums">
+                              {genieRegenSelectedIds.length}
+                            </span>
+                          </button>
                         </div>
                         {genieInstructionsPanelExpanded && (
                           <div className="min-w-0 space-y-2 border-t border-db-red/15 pt-3 sm:pl-0">
                             <p className="text-[11px] text-text-secondary leading-snug">
-                              Check use cases to set <span className="font-mono text-[10px] px-1 py-0.5 rounded bg-bg-subtle border border-border-subtle">generate_genie_code_instruction = Yes</span> in{' '}
-                              <span className="font-mono text-[10px] px-1 py-0.5 rounded bg-bg-subtle border border-border-subtle">__inspire_usecases</span> for this session (synced shortly after you change the selection). Then run the notebook job for only those rows.
+                              Mark use cases with <span className="font-semibold text-text-primary">Mark Ready for Genie Code Generation</span> on their cards, then generate. Inspire writes the Genie instruction and its notebook for the marked use cases only.
                             </p>
                             <p className="text-[11px] text-text-tertiary flex flex-wrap items-center gap-x-2 gap-y-1">
                               <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-db-red/10 text-db-red font-semibold">
-                                {genieRegenSelectedIds.length} selected
+                                {genieRegenSelectedIds.length} marked
                               </span>
-                              {genieFlagSyncing && (
+                              {(genieFlagSyncing || genieDeltaSyncPending) && (
                                 <span className="inline-flex items-center gap-1 text-db-red">
                                   <Loader2 size={11} className="animate-spin" />
-                                  Syncing to Delta…
-                                </span>
-                              )}
-                              {genieDeltaSyncPending && !genieFlagSyncing && (
-                                <span className="inline-flex items-center gap-1 text-text-secondary">
-                                  <Loader2 size={11} className="animate-spin" />
-                                  Saving selection…
+                                  Saving marks…
                                 </span>
                               )}
                             </p>
                             {(genieFlagSyncing || genieDeltaSyncPending) && (
                               <p className="text-[11px] text-text-secondary leading-snug max-w-xl">
-                                <span className="font-semibold text-text-primary">Run Genie job</span> stays greyed out until this step finishes, so the notebook is launched with the same use-case flags you see here.
+                                <span className="font-semibold text-text-primary">Generate Genie Instruction for Marked use cases</span> stays greyed out until your marks are saved, so it runs on the same use cases you see here.
                               </p>
                             )}
                             {genieFlagSyncError && (
@@ -3188,6 +3238,14 @@ export default function ResultsPage({
                         databricksHost={databricksHost}
                         generationPath={generationPath}
                         allNotebookFiles={allNotebookFiles}
+                        v130={uc._v130}
+                        knownPriorities={bizPriorities}
+                        foundationsById={foundationsById}
+                        feedbackAvailable={feedbackState.available}
+                        feedbackCurrent={uc._v130?.useCaseKey ? feedbackLatest[uc._v130.useCaseKey] : undefined}
+                        feedbackBusy={!!uc._v130?.useCaseKey && feedbackBusyKey === uc._v130.useCaseKey}
+                        feedbackError={uc._v130?.useCaseKey && feedbackError.key === uc._v130.useCaseKey ? feedbackError.message : ''}
+                        onFeedback={(status, reason) => submitFeedback(uc, uc._v130, status, reason)}
                       />
                       );
                     })}
@@ -3313,6 +3371,14 @@ function UseCaseCard({
   databricksHost,
   generationPath,
   allNotebookFiles,
+  v130 = null,
+  knownPriorities: priorityList = [],
+  foundationsById,
+  feedbackAvailable = null,
+  feedbackCurrent,
+  feedbackBusy = false,
+  feedbackError = '',
+  onFeedback,
 }) {
   const [notebookContent, setNotebookContent] = useState(null);
   const [notebookLoading, setNotebookLoading] = useState(false);
@@ -3497,6 +3563,11 @@ function UseCaseCard({
     const pathSeg = path.startsWith('/') ? path : `/${path}`;
     return `${origin}/#workspace${pathSeg}`;
   })();
+  const genieActions = genieCardActions({
+    hasGenieInstruction: shippedGenie,
+    canMark: typeof onToggleGenieRegenSelect === 'function',
+    notebookHref: workspaceNotebookHref,
+  });
 
   if (!card) return null;
 
@@ -3513,25 +3584,6 @@ function UseCaseCard({
         >
           <Heart size={16} className={isFavorite ? 'fill-rose-500' : ''} />
         </button>
-        {typeof onToggleGenieRegenSelect === 'function' && (
-          <label
-            className={`flex items-center gap-1.5 pl-1 pr-2 py-4 shrink-0 cursor-pointer transition-smooth ${
-              genieRegenSelected ? 'text-db-red' : 'text-text-secondary hover:text-db-red'
-            }`}
-            title="Flag this use case for Genie instruction generation (writes to Inspire tracking table)"
-            onClick={(e) => e.stopPropagation()}
-            onKeyDown={(e) => e.stopPropagation()}
-          >
-            <input
-              type="checkbox"
-              className="rounded border-border text-db-red focus:ring-db-red/30 size-4 shrink-0 accent-db-red"
-              checked={genieRegenSelected}
-              onChange={(e) => onToggleGenieRegenSelect(e.target.checked)}
-              aria-label="Flag for Genie instruction job"
-            />
-            <span className="text-[10px] font-semibold uppercase tracking-[0.14em] hidden sm:inline">Genie</span>
-          </label>
-        )}
       <div
         role="button"
         tabIndex={0}
@@ -3553,6 +3605,15 @@ function UseCaseCard({
                 <h3 className="text-lg sm:text-xl font-bold text-text-primary leading-snug">
                   {titlePlain}
                 </h3>
+                {v130?.bestOfBest && (
+                  <span
+                    className="inline-flex items-center gap-1 text-[10px] sm:text-[11px] font-semibold uppercase tracking-[0.14em] px-2 py-0.5 rounded-md border shrink-0 leading-none text-amber-700 border-amber-300 bg-amber-50"
+                    title={bestOfBestLabel(v130.bestOfBest)}
+                  >
+                    <Star size={11} className="fill-amber-400 text-amber-500" />
+                    Best of Best{v130.bestOfBest.rank ? ` #${v130.bestOfBest.rank}` : ''}
+                  </span>
+                )}
                 {showGenieInstructionBadge && (
                   <span
                     className={`text-[10px] sm:text-[11px] font-semibold uppercase tracking-[0.14em] px-2 py-0.5 rounded-md border shrink-0 leading-none ${
@@ -3599,34 +3660,13 @@ function UseCaseCard({
             )}
           </div>
           <div className="flex items-center gap-2 flex-wrap mt-2">
+            <StrategyChip info={v130} />
+            <FeedbackChip status={feedbackCurrent?.status || v130?.feedbackStatus} />
             {showPriorityPill && (
               <span
                 className={`text-[10px] px-2 py-0.5 rounded-full border font-semibold ${priorityStyle}`}
               >
                 {priority}
-              </span>
-            )}
-            {hasNotebook && (
-              <span className="text-[10px] px-2 py-0.5 rounded-full font-medium text-db-red bg-db-red/10 inline-flex items-center gap-1.5">
-                Notebook
-                {workspaceNotebookHref ? (
-                  <a
-                    href={workspaceNotebookHref}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    title="Open notebook in Databricks workspace"
-                    onClick={(e) => e.stopPropagation()}
-                    className="font-semibold text-db-red hover:underline ml-0.5"
-                  >
-                    Open
-                  </a>
-                ) : notebookPath && !databricksHost ? (
-                  <span className="text-[9px] font-normal text-text-tertiary normal-case" title="Set Databricks host in setup">
-                    (host required)
-                  </span>
-                ) : !notebookPath && genieInstruction ? (
-                  <span className="text-[9px] font-normal text-text-tertiary normal-case">Preview below</span>
-                ) : null}
               </span>
             )}
           </div>
@@ -3636,6 +3676,75 @@ function UseCaseCard({
         </div>
       </div>
       </div>
+
+      {(genieActions.primary || genieActions.openCurrentNotebook) && (
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 pb-4">
+          {genieActions.primary === 'open-notebook' && (
+            workspaceNotebookHref ? (
+              <a
+                href={workspaceNotebookHref}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold text-white bg-db-red hover:bg-db-red-hover shadow-sm shadow-db-red/20 transition-smooth"
+              >
+                <ExternalLink size={13} />
+                Open Notebook to implement
+              </a>
+            ) : (
+              <button
+                type="button"
+                onClick={() => {
+                  if (!expanded) onToggle();
+                }}
+                title={notebookPath && !databricksHost ? 'Set the Databricks host in setup to open the notebook in the workspace' : 'The Genie instruction is shown in the details'}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold text-white bg-db-red hover:bg-db-red-hover shadow-sm shadow-db-red/20 transition-smooth"
+              >
+                <FileText size={13} />
+                Open Notebook to implement
+              </button>
+            )
+          )}
+          {genieActions.primary === 'mark' && (
+            <button
+              type="button"
+              aria-pressed={genieRegenSelected}
+              onClick={() => onToggleGenieRegenSelect(!genieRegenSelected)}
+              className={`inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold border transition-smooth ${
+                genieRegenSelected
+                  ? 'border-db-red bg-db-red-50 text-db-red'
+                  : 'border-db-red/40 bg-surface text-db-red hover:bg-db-red-50'
+              }`}
+            >
+              {genieRegenSelected ? <CheckCircle2 size={13} /> : <Sparkles size={13} />}
+              {genieRegenSelected ? 'Marked Ready for Genie Code Generation' : 'Mark Ready for Genie Code Generation'}
+            </button>
+          )}
+          {genieActions.regenerate && (
+            <button
+              type="button"
+              aria-pressed={genieRegenSelected}
+              onClick={() => onToggleGenieRegenSelect(!genieRegenSelected)}
+              className={`inline-flex items-center gap-1 text-[11px] font-medium transition-smooth ${
+                genieRegenSelected ? 'text-db-red' : 'text-text-secondary hover:text-db-red'
+              }`}
+            >
+              {genieRegenSelected ? <CheckCircle2 size={12} /> : <RefreshCw size={12} />}
+              {genieRegenSelected ? 'Marked to regenerate' : 'Mark to regenerate'}
+            </button>
+          )}
+          {genieActions.openCurrentNotebook && (
+            <a
+              href={workspaceNotebookHref}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 text-[11px] font-medium text-text-secondary hover:text-db-red transition-smooth"
+            >
+              <ExternalLink size={12} />
+              Open the current notebook
+            </a>
+          )}
+        </div>
+      )}
 
       {/* Expanded */}
       {expanded && (
@@ -3671,6 +3780,9 @@ function UseCaseCard({
               </p>
             </div>
           )}
+
+          <BestOfBestDetail info={v130} />
+          <UseCaseStrategyDetail info={v130} knownPriorities={priorityList} foundationsById={foundationsById} />
 
           {/* Detail chips */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-[11px]">
@@ -3812,6 +3924,17 @@ function UseCaseCard({
                 </div>
               )}
             </div>
+          )}
+
+          {typeof onFeedback === 'function' && (
+            <FeedbackControls
+              useCaseKey={v130?.useCaseKey}
+              available={feedbackAvailable}
+              current={feedbackCurrent}
+              busy={feedbackBusy}
+              error={feedbackError}
+              onSubmit={onFeedback}
+            />
           )}
         </div>
       )}

@@ -19,6 +19,7 @@ import {
   BarChart3,
 } from 'lucide-react';
 import ResultsPage from './ResultsPage';
+import { countEntries, parseStrategicContext, treeDepth } from '../lib/strategyContext';
 
 // Run lifecycle phases
 const PHASE_PENDING = 'PENDING';
@@ -445,6 +446,7 @@ export default function MonitorPage({ settings, update, sessionId, runId, onComp
         {runInfo?.run_name && !latestStep && (
           <p className="text-[11px] text-text-tertiary mt-3 font-mono">{runInfo.run_name}</p>
         )}
+        <RunSetupSummary widgetValues={session?.widget_values} />
       </div>
 
       {/* Pending info */}
@@ -918,6 +920,7 @@ export default function MonitorPage({ settings, update, sessionId, runId, onComp
   );
 }
 
+
 /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
    Sub-components
    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
@@ -1170,6 +1173,35 @@ function ResultJsonDisplay({ resultJson }) {
   }
 
   return null;
+}
+
+function RunSetupSummary({ widgetValues }) {
+  const discovery = String(widgetValues?.discovery_type || '').trim();
+  const strategyText = String(widgetValues?.strategic_context || '').trim();
+  if (!discovery && !strategyText) return null;
+  const parsed = parseStrategicContext(strategyText);
+  let strategy = 'No strategy given: built-in goals';
+  if (parsed.mode === 'path') strategy = 'Customer strategy';
+  else if (parsed.mode === 'tree') {
+    const entries = countEntries(parsed.model.strategy);
+    const levels = treeDepth(parsed.model.strategy);
+    const priorities = parsed.model.priorities.length;
+    strategy = `Strategy: ${entries} entr${entries === 1 ? 'y' : 'ies'}` +
+      (levels ? `, ${levels} level${levels === 1 ? '' : 's'}` : '') +
+      (priorities ? `, ${priorities} priorit${priorities === 1 ? 'y' : 'ies'}` : '');
+  }
+  return (
+    <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px]">
+      {discovery && (
+        <span className="px-2 py-0.5 rounded-full border border-border bg-bg-subtle text-text-secondary">
+          {discovery === 'Standard' ? 'Standard discovery: no data read' : 'Deep discovery: aggregates only'}
+        </span>
+      )}
+      <span className="px-2 py-0.5 rounded-full border border-border bg-bg-subtle text-text-secondary" title={parsed.error || ''}>
+        {parsed.error ? 'Strategy could not be read' : strategy}
+      </span>
+    </div>
+  );
 }
 
 function formatDuration(ms) {
