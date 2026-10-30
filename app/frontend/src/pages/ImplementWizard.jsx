@@ -1022,10 +1022,10 @@ export default function ImplementWizard({
             {footerErrors.map((e) => <p key={e} className="text-xs text-error">{e}</p>)}
           </div>
         )}
-        <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center justify-between gap-3 min-h-10">
           <button
             type="button"
-            className={`inline-flex items-center gap-1 text-xs text-text-secondary ${step === 0 ? 'invisible' : ''}`}
+            className={`btn-secondary ${step === 0 ? 'invisible' : ''}`}
             disabled={step === 0 || busy}
             onClick={() => { setErrors([]); setStep(0); }}
           >
@@ -1035,7 +1035,7 @@ export default function ImplementWizard({
             <button
               type="button"
               disabled={Boolean(checking)}
-              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-semibold text-white bg-db-red disabled:opacity-70"
+              className="btn-primary disabled:opacity-70"
               onClick={goNext}
             >
               {checking ? <><Loader2 size={14} className="animate-spin" /> {checking}…</> : <>Next <ChevronRight size={14} /></>}
@@ -1044,7 +1044,7 @@ export default function ImplementWizard({
             <button
               type="button"
               disabled={implementBlocked}
-              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-semibold text-white bg-db-red disabled:opacity-50"
+              className="btn-primary"
               onClick={submit}
             >
               {(busy || checksBusy) && <Loader2 size={14} className="animate-spin" />}
@@ -1085,12 +1085,12 @@ function Overlay({ title, step, onClose, children }) {
     <BodyPortal>
       <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" data-implement-overlay="">
         <div role="dialog" aria-modal="true" aria-label="Implement with Genie" className="bg-surface border border-border rounded-xl shadow-elevated w-full max-w-3xl max-h-full flex flex-col overflow-hidden">
-          <header className="flex items-start justify-between gap-4 px-6 py-4 border-b border-border">
+          <header className="flex items-center justify-between gap-4 px-6 py-3.5 border-b border-border">
             <div className="min-w-0">
               <h2 className="text-sm font-semibold text-text-primary">Implement with Genie</h2>
               <p className="text-[11px] text-text-secondary truncate">{title}</p>
             </div>
-            <div className="flex items-center gap-4 shrink-0">
+            <div className="flex items-center gap-3 shrink-0">
               <ol className="flex items-center gap-2 text-[11px]">
                 {IMPLEMENT_STEPS.map((item, i) => (
                   <li
@@ -1103,7 +1103,7 @@ function Overlay({ title, step, onClose, children }) {
                 ))}
               </ol>
               <span className="sr-only">Step {step + 1} of {IMPLEMENT_STEPS.length}</span>
-              <button type="button" onClick={onClose} className="text-text-tertiary hover:text-text-primary" aria-label="Close">
+              <button type="button" onClick={onClose} className="inline-flex items-center justify-center w-8 h-8 rounded-lg text-text-tertiary hover:text-text-primary hover:bg-bg-subtle" aria-label="Close">
                 <X size={16} />
               </button>
             </div>

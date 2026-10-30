@@ -35,6 +35,7 @@ import {
   Sparkles,
 } from 'lucide-react';
 import DocumentLanguagesMultiselect from '../components/DocumentLanguagesMultiselect';
+import SegmentedControl from '../components/SegmentedControl';
 import StrategyEditor from '../components/StrategyEditor';
 import { parseStrategicContext, splitPriorities, validateStrategicContextText, withPriorities } from '../lib/strategyContext';
 import UcPermissionErrorHelp from '../components/UcPermissionErrorHelp';
@@ -48,14 +49,20 @@ const DISCOVERY_OPTIONS = [
   {
     key: 'Deep',
     icon: Eye,
-    desc: 'Reads aggregates over your tables: row counts, date coverage, null rates and join match rates. Never sends a data row to the AI and never reads the values of personal columns.',
+    desc: 'Reads aggregates (counts, dates, null rates). Never sends row values to the AI.',
   },
   {
     key: 'Standard',
     icon: Lock,
-    desc: 'Reads metadata only. Never reads a row of your data.',
+    desc: 'Metadata only. Never reads a row of your data.',
   },
 ];
+const GENIE_SCOPE_OPTIONS = [
+  { value: '0', label: 'Off' },
+  { value: '5', label: 'Top 5' },
+  { value: 'all', label: 'All' },
+];
+const QUALITY_SEGMENTS = QUALITY_OPTIONS.map((q) => ({ value: q, label: q.replace(' Quality', '') }));
 const TABLE_ELECTION = ['Let Inspire Decides', 'All Tables', 'Transactional Only'];
 /** Show guidance when explicit table selection exceeds this count. */
 const TABLE_SELECTION_WARN_THRESHOLD = 10;
@@ -1265,8 +1272,8 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
             </FieldSection>
 
             {/* Discovery Type — v1.3.0 widget 03_discovery_type */}
-            <FieldSection label="Discovery Type" hint="Widget 03_discovery_type — whether Inspire may read your data">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+            <FieldSection label="Discovery Type" hint="Whether Inspire may read aggregates from your tables">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 items-stretch">
                 {DISCOVERY_OPTIONS.map((opt) => {
                   const active = params['03_discovery_type'] === opt.key;
                   const Icon = opt.icon;
@@ -1278,17 +1285,17 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
                         setDiscoveryTouched(true);
                         updateParam('03_discovery_type', opt.key);
                       }}
-                      className={`relative p-3 rounded-xl text-left transition-smooth border ${
-                        active ? 'border-db-red/30 bg-db-red-50 shadow-sm' : 'border-border hover:border-border-strong'
+                      className={`relative flex flex-col h-full min-h-[5.5rem] p-3.5 rounded-xl text-left transition-smooth border ${
+                        active ? 'border-db-red/30 bg-db-red-50 shadow-sm' : 'border-border hover:border-border-strong bg-surface'
                       }`}
                     >
                       <span className={`flex items-center gap-1.5 text-xs font-semibold ${active ? 'text-db-red' : 'text-text-primary'}`}>
-                        <Icon size={13} className={active ? 'text-db-red' : 'text-text-tertiary'} />
+                        <Icon size={14} className={active ? 'text-db-red' : 'text-text-tertiary'} />
                         {opt.key}
                         {opt.key === 'Deep' && <span className="text-[10px] font-normal text-text-tertiary">(default)</span>}
                       </span>
-                      <p className="text-[10px] text-text-tertiary leading-snug mt-1">{opt.desc}</p>
-                      {active && <CheckCircle2 size={14} className="absolute top-2.5 right-2.5 text-db-red" />}
+                      <p className="text-[11px] text-text-tertiary leading-snug mt-1.5 pr-5">{opt.desc}</p>
+                      {active && <CheckCircle2 size={14} className="absolute top-3 right-3 text-db-red" />}
                     </button>
                   );
                 })}
@@ -1346,7 +1353,7 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
 
               {/* Business Priorities */}
               <FieldSection label="Business Priorities" hint="Pick what matters most, or add your own">
-                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2 items-stretch">
                   {BUSINESS_PRIORITIES.map((bp) => {
                     const active = !!priorityChecks[bp.key];
                     return (
@@ -1354,24 +1361,24 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
                         key={bp.key}
                         type="button"
                         onClick={() => toggleBuiltInPriority(bp.key)}
-                        className={`relative px-3 py-2 rounded-lg text-xs font-medium text-left transition-smooth border ${
+                        className={`relative flex items-center min-h-10 px-3 py-2 rounded-lg text-xs font-medium text-left transition-smooth border ${
                           active
                             ? 'border-db-red/30 bg-db-red-50 text-db-red'
-                            : 'border-border text-text-secondary hover:border-border-strong'
+                            : 'border-border text-text-secondary hover:border-border-strong bg-surface'
                         }`}
                       >
-                        <span className="flex items-center gap-1.5">
-                          <bp.icon size={13} className={active ? 'text-db-red' : 'text-text-tertiary'} />
+                        <span className="flex items-center gap-1.5 min-w-0 pr-4">
+                          <bp.icon size={13} className={`shrink-0 ${active ? 'text-db-red' : 'text-text-tertiary'}`} />
                           <span className="truncate">{bp.key}</span>
                         </span>
-                        {active && <CheckCircle2 size={12} className="absolute top-1.5 right-1.5 text-db-red" />}
+                        {active && <CheckCircle2 size={12} className="absolute top-1/2 -translate-y-1/2 right-1.5 text-db-red" />}
                       </button>
                     );
                   })}
                   {customPriorities.map((name) => (
                     <span
                       key={name}
-                      className="relative px-3 py-2 rounded-lg text-xs font-medium border border-db-red/30 bg-db-red-50 text-db-red flex items-center gap-1.5"
+                      className="relative min-h-10 px-3 py-2 rounded-lg text-xs font-medium border border-db-red/30 bg-db-red-50 text-db-red flex items-center gap-1.5"
                     >
                       <Target size={13} className="text-db-red shrink-0" />
                       <span className="truncate" title={name}>{name}</span>
@@ -1386,7 +1393,7 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
                     </span>
                   ))}
                 </div>
-                <div className="flex gap-2 mt-2">
+                <div className="flex items-center gap-2 mt-2">
                   <input
                     type="text"
                     value={customPriorityDraft}
@@ -1399,13 +1406,13 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
                     }}
                     placeholder="Add your own priority, for example Improve on-time delivery"
                     aria-label="Add your own business priority"
-                    className="flex-1 px-3 py-2 text-sm border border-border rounded-lg bg-surface text-text-primary placeholder:text-text-tertiary glow-focus transition-smooth"
+                    className="flex-1 h-10 px-3 text-sm border border-border rounded-lg bg-surface text-text-primary placeholder:text-text-tertiary glow-focus transition-smooth"
                   />
                   <button
                     type="button"
                     onClick={addCustomPriority}
                     disabled={!customPriorityDraft.trim()}
-                    className="px-3 py-2 text-xs font-semibold rounded-lg border border-border text-text-secondary hover:border-border-strong disabled:opacity-40 transition-smooth"
+                    className="btn-secondary h-10 px-4 disabled:opacity-40"
                   >
                     Add
                   </button>
@@ -1431,22 +1438,26 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
                 <button
                   type="button"
                   onClick={() => setShowStrategy(!showStrategy)}
-                  className="w-full flex items-center gap-2 px-4 py-3 text-left hover:bg-bg-subtle/50 transition-smooth"
+                  className="w-full flex items-center gap-2.5 px-4 py-3 text-left hover:bg-bg-subtle/50 transition-smooth"
                 >
-                  <Target size={14} className="text-text-tertiary" />
-                  <span className="text-xs font-bold text-text-primary">Strategy and organization</span>
-                  <span className="text-[10px] text-text-tertiary">
-                    Optional · widget 10_strategic_context · aligns and orders results after discovery
-                  </span>
-                  {(strategyBase || strategyProblems.length > 0) && (
-                    <span className={`ml-auto text-[10px] font-semibold ${strategyProblems.length ? 'text-db-red' : 'text-success'}`}>
-                      {strategyProblems.length ? `${strategyProblems.length} problem${strategyProblems.length > 1 ? 's' : ''}` : 'Set'}
+                  <Target size={14} className="text-text-tertiary shrink-0" />
+                  <span className="min-w-0 flex-1">
+                    <span className="text-xs font-bold text-text-primary block">Strategy and organization</span>
+                    <span className="text-[10px] text-text-tertiary">
+                      Optional — aligns and orders results after discovery
                     </span>
-                  )}
-                  <ChevronDown
-                    size={14}
-                    className={`text-text-tertiary transition-transform duration-200 ${strategyBase || strategyProblems.length > 0 ? '' : 'ml-auto'} ${showStrategy ? 'rotate-180' : ''}`}
-                  />
+                  </span>
+                  <span className="ml-auto flex items-center gap-2 shrink-0">
+                    {(strategyBase || strategyProblems.length > 0) && (
+                      <span className={`text-[10px] font-semibold ${strategyProblems.length ? 'text-db-red' : 'text-success'}`}>
+                        {strategyProblems.length ? `${strategyProblems.length} problem${strategyProblems.length > 1 ? 's' : ''}` : 'Set'}
+                      </span>
+                    )}
+                    <ChevronDown
+                      size={14}
+                      className={`text-text-tertiary transition-transform duration-200 ${showStrategy ? 'rotate-180' : ''}`}
+                    />
+                  </span>
                 </button>
                 {showStrategy && (
                   <div className="px-4 pb-4 pt-1 border-t border-border">
@@ -1461,7 +1472,7 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
                 icon={Layers}
                 hint="PDF / Presentation artifacts. Auto-Genie is configured separately below."
               >
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 items-stretch">
                   {GENERATION_OPTIONS.map((opt) => {
                     const Icon = opt.icon;
                     const active = !!genChecks[opt.key];
@@ -1470,10 +1481,10 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
                         key={opt.key}
                         type="button"
                         onClick={() => setGenChecks((p) => ({ ...p, [opt.key]: !p[opt.key] }))}
-                        className={`relative p-3.5 rounded-xl text-left transition-smooth border group ${
+                        className={`relative flex flex-col h-full min-h-[6.5rem] p-3.5 rounded-xl text-left transition-smooth border group ${
                           active
                             ? 'border-db-red/30 bg-db-red-50 shadow-sm'
-                            : 'border-border hover:border-border-strong hover:shadow-sm'
+                            : 'border-border hover:border-border-strong hover:shadow-sm bg-surface'
                         }`}
                       >
                         <div className="flex items-center gap-2 mb-1.5">
@@ -1542,40 +1553,26 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
                 </FieldSection>
 
                 <FieldSection label="Use Cases Quality">
-                  <div className="flex gap-1.5">
-                    {QUALITY_OPTIONS.map((q) => {
-                      const active = params['05_use_cases_quality'] === q;
-                      return (
-                        <button
-                          key={q}
-                          type="button"
-                          onClick={() => updateParam('05_use_cases_quality', q)}
-                          className={`flex-1 py-2 rounded-lg text-[11px] font-medium transition-smooth border ${
-                            active
-                              ? 'border-db-red/30 bg-db-red-50 text-db-red'
-                              : 'border-border text-text-secondary hover:border-border-strong'
-                          }`}
-                        >
-                          {q.replace(' Quality', '')}
-                        </button>
-                      );
-                    })}
-                  </div>
+                  <SegmentedControl
+                    ariaLabel="Use cases quality"
+                    options={QUALITY_SEGMENTS}
+                    value={params['05_use_cases_quality']}
+                    onChange={(v) => updateParam('05_use_cases_quality', v)}
+                  />
                 </FieldSection>
               </div>
 
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 items-start">
                 <Field
                   label="Auto-Genie scope"
                   icon={Bot}
-                  hint="13_generate_genie_code_for — in Discover mode, generate full Genie instructions for all, top-N (e.g. 5), or 0 to keep skeleton notebooks only."
+                  hint="Full Genie instructions for Off, the top 5, or every use case."
                 >
-                  <input
-                    type="text"
-                    value={params['13_generate_genie_code_for']}
-                    onChange={(e) => updateParam('13_generate_genie_code_for', e.target.value)}
-                    placeholder="5"
-                    className="w-full pl-10 pr-4 py-2.5 text-sm border border-border rounded-lg bg-surface text-text-primary glow-focus transition-smooth font-mono"
+                  <SegmentedControl
+                    ariaLabel="Auto-Genie scope"
+                    options={GENIE_SCOPE_OPTIONS}
+                    value={String(params['13_generate_genie_code_for'] || '5')}
+                    onChange={(v) => updateParam('13_generate_genie_code_for', v)}
                   />
                 </Field>
                 <Field
@@ -1656,8 +1653,8 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
         <button
           onClick={handleLaunch}
           disabled={launching || !canLaunch}
-          className="w-full py-3.5 bg-linear-to-r from-db-red to-db-red-hover text-white text-sm font-bold rounded-xl disabled:opacity-50 disabled:cursor-not-allowed transition-smooth flex items-center justify-center gap-2.5 hover:-translate-y-0.5"
-          style={{ boxShadow: '0 0 0 1px rgba(255,54,33,0.3), 0 4px 12px rgba(255,54,33,0.2), 0 8px 30px rgba(255,54,33,0.15), 0 20px 60px rgba(255,54,33,0.1)' }}
+          className="w-full min-h-12 py-3.5 bg-linear-to-r from-db-red to-db-red-hover text-white text-sm font-bold rounded-xl disabled:opacity-50 disabled:cursor-not-allowed transition-smooth flex items-center justify-center gap-2.5"
+          style={{ boxShadow: '0 0 0 1px rgba(255,54,33,0.3), 0 4px 12px rgba(255,54,33,0.2), 0 8px 30px rgba(255,54,33,0.15)' }}
         >
           {launching ? (
             <>
@@ -1688,18 +1685,18 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
 
 function Field({ label, required, icon: Icon, hint, children }) {
   return (
-    <div>
-      <div className="flex items-center gap-2 mb-2">
+    <div className="space-y-2">
+      <div className="flex items-center gap-2 min-h-5">
         {Icon && (
-          <div className="w-5 h-5 rounded flex items-center justify-center bg-bg-subtle">
+          <div className="w-5 h-5 rounded-md flex items-center justify-center bg-bg-subtle shrink-0">
             <Icon size={12} className="text-text-tertiary" />
           </div>
         )}
-        <span className="text-xs font-bold text-text-primary">
+        <span className="text-xs font-bold text-text-primary shrink-0">
           {label}
           {required && <span className="text-db-red ml-0.5">*</span>}
         </span>
-        {hint && <span className="text-[10px] text-text-tertiary">&mdash; {hint}</span>}
+        {hint && <span className="text-[10px] text-text-tertiary truncate">{hint}</span>}
       </div>
       {children}
     </div>
@@ -1708,13 +1705,13 @@ function Field({ label, required, icon: Icon, hint, children }) {
 
 function FieldSection({ label, required, hint, children }) {
   return (
-    <div>
-      <div className="flex items-baseline gap-1.5 mb-1.5">
-        <span className="text-xs font-semibold text-text-primary">
+    <div className="space-y-2">
+      <div className="flex items-center gap-2 min-h-5">
+        <span className="text-xs font-semibold text-text-primary shrink-0">
           {label}
           {required && <span className="text-db-red ml-0.5">*</span>}
         </span>
-        {hint && <span className="text-[10px] text-text-tertiary">{hint}</span>}
+        {hint && <span className="text-[10px] text-text-tertiary truncate">{hint}</span>}
       </div>
       {children}
     </div>

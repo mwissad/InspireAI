@@ -12,7 +12,7 @@ import {
 function Section({ title, tone, children }) {
   return (
     <div>
-      <h4 className={`text-[10px] font-bold ${tone} uppercase tracking-[0.18em] mb-1`}>{title}</h4>
+      <h4 className={`mb-1.5 text-xs font-semibold ${tone}`}>{title}</h4>
       {children}
     </div>
   );
@@ -30,13 +30,13 @@ export function StrategyChip({ info }) {
   if (!info?.hasStrategyData) return null;
   if (!info.paths.length) {
     return (
-      <span className="text-[10px] px-2 py-0.5 rounded-full border border-border bg-bg text-text-tertiary font-medium">Not aligned</span>
+      <span className="text-xs leading-5 px-2 py-0.5 rounded-md border bg-card text-subtle-foreground font-medium">Not aligned</span>
     );
   }
   const extra = info.paths.length - 1;
   return (
     <span
-      className="max-w-[22rem] truncate text-[10px] px-2 py-0.5 rounded-full border border-db-red/20 bg-db-red-50 text-db-red font-medium"
+      className="max-w-[22rem] truncate text-xs leading-5 px-2 py-0.5 rounded-md border bg-card text-muted-foreground font-medium"
       title={info.paths.join('\n')}
     >
       {info.paths[0]}{extra > 0 ? ` +${extra}` : ''}
@@ -48,7 +48,7 @@ export function FeedbackChip({ status }) {
   const label = feedbackLabel(status);
   if (!label) return null;
   return (
-    <span className="text-[10px] px-2 py-0.5 rounded-full border border-success/30 bg-success-bg text-success font-medium">{label}</span>
+    <span className="text-xs leading-5 px-2 py-0.5 rounded-md border border-success/25 bg-success-bg text-success font-medium">{label}</span>
   );
 }
 
@@ -56,8 +56,8 @@ export function BestOfBestDetail({ info }) {
   const star = info?.bestOfBest;
   if (!star && !info?.notStarredReason) return null;
   return (
-    <div className={`rounded-lg border p-4 ${star ? 'border-amber-300 bg-amber-50' : 'border-border bg-bg'}`}>
-      <Section title={star ? bestOfBestLabel(star) : 'Not starred as Best of Best'} tone={star ? 'text-amber-700' : 'text-text-tertiary'}>
+    <div className={`rounded-lg border p-4 ${star ? 'border-warning/25 bg-warning-bg' : 'border-border bg-card'}`}>
+      <Section title={star ? bestOfBestLabel(star) : 'Not starred as Best of Best'} tone={star ? 'text-warning' : 'text-text-tertiary'}>
         <p className="text-sm text-text-secondary leading-relaxed">{star ? star.reason || 'Passed every elite test.' : info.notStarredReason}</p>
       </Section>
     </div>
@@ -72,7 +72,7 @@ export function UseCaseStrategyDetail({ info, knownPriorities, foundationsById }
   return (
     <div className="space-y-4 rounded-lg border border-border bg-bg p-4">
       {info.hasStrategyData && (
-        <Section title="Strategy alignment" tone="text-db-red">
+        <Section title="Strategy alignment" tone="text-text-primary">
           {info.alignments.length > 0 ? (
             <div className="space-y-1.5">
               {info.alignments.map((a) => (
@@ -97,7 +97,7 @@ export function UseCaseStrategyDetail({ info, knownPriorities, foundationsById }
         </Section>
       )}
       {info.kpis.length > 0 && (
-        <Section title="KPIs" tone="text-info">
+        <Section title="KPIs" tone="text-text-primary">
           <ul className="space-y-1.5">
             {info.kpis.map((k, i) => (
               <li key={`${k.name}-${i}`}>
@@ -108,7 +108,7 @@ export function UseCaseStrategyDetail({ info, knownPriorities, foundationsById }
                 )}
                 {k.query && (
                   <details className="mt-0.5">
-                    <summary className="cursor-pointer text-[10px] text-text-tertiary hover:text-db-red">KPI query</summary>
+                    <summary className="cursor-pointer text-[10px] text-text-tertiary hover:text-text-primary">KPI query</summary>
                     <pre className="mt-1 overflow-x-auto rounded border border-border bg-panel p-2 font-mono text-[10px] text-text-primary whitespace-pre-wrap">{k.query}</pre>
                   </details>
                 )}
@@ -118,7 +118,7 @@ export function UseCaseStrategyDetail({ info, knownPriorities, foundationsById }
         </Section>
       )}
       {info.keyResults.length > 0 && (
-        <Section title="Expected key results" tone="text-success">
+        <Section title="Expected key results" tone="text-text-primary">
           <ul className="space-y-1">
             {info.keyResults.map((kr, i) => (
               <li key={`${kr.id || 'p'}-${i}`} className="text-sm text-text-secondary leading-relaxed">
@@ -132,22 +132,22 @@ export function UseCaseStrategyDetail({ info, knownPriorities, foundationsById }
         </Section>
       )}
       {info.measures.length > 0 && (
-        <Section title="Measures of success" tone="text-warning">
+        <Section title="Measures of success" tone="text-text-primary">
           <Bullets items={info.measures} />
         </Section>
       )}
       {(info.financial.length > 0 || info.nonFinancial.length > 0) && (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           {info.financial.length > 0 && (
-            <Section title="Financial benefits" tone="text-success"><Bullets items={info.financial} /></Section>
+            <Section title="Financial benefits" tone="text-text-primary"><Bullets items={info.financial} /></Section>
           )}
           {info.nonFinancial.length > 0 && (
-            <Section title="Non-financial benefits" tone="text-info"><Bullets items={info.nonFinancial} /></Section>
+            <Section title="Non-financial benefits" tone="text-text-primary"><Bullets items={info.nonFinancial} /></Section>
           )}
         </div>
       )}
       {info.dataEvidence && (
-        <Section title="Data evidence" tone="text-text-secondary">
+        <Section title="Data evidence" tone="text-text-primary">
           <ul className="space-y-0.5 text-[11px] text-text-secondary">
             {evidenceTables.map(([table, t]) => (
               <li key={table}>
@@ -170,7 +170,7 @@ export function UseCaseStrategyDetail({ info, knownPriorities, foundationsById }
         </Section>
       )}
       {info.foundations.length > 0 && (
-        <Section title="Data foundations" tone="text-text-secondary">
+        <Section title="Data foundations" tone="text-text-primary">
           <div className="flex flex-wrap gap-1.5">
             {info.foundations.map((id) => {
               const f = foundationsById?.get(id);
@@ -196,12 +196,12 @@ export function FeedbackControls({ useCaseKey, available, current, busy, error, 
   const status = String(current?.status || '').toLowerCase();
   const pill = (active) =>
     `px-2.5 py-1 rounded-lg text-[11px] font-medium border transition-smooth disabled:opacity-50 ${
-      active ? 'border-db-red/30 bg-db-red-50 text-db-red' : 'border-border bg-surface text-text-secondary hover:border-border-strong'
+      active ? 'border-foreground bg-foreground text-background' : 'border-border bg-surface text-text-secondary hover:border-border-strong'
     }`;
   return (
     <div className="rounded-lg border border-border bg-bg p-3">
       <div className="flex flex-wrap items-center gap-2">
-        <span className="text-[10px] font-bold uppercase tracking-[0.18em] text-text-tertiary">Your feedback</span>
+        <span className="text-xs font-semibold text-text-primary">Your feedback</span>
         {FEEDBACK_BUTTONS.map((s) => (
           <button key={s} type="button" disabled={busy} onClick={() => onSubmit(s, '')} className={pill(status === s)}>
             {feedbackLabel(s)}
@@ -227,7 +227,7 @@ export function FeedbackControls({ useCaseKey, available, current, busy, error, 
             maxLength={2000}
             onChange={(e) => setReason(e.target.value)}
             placeholder="Why is this not useful? (optional)"
-            className="min-w-[14rem] flex-1 px-2.5 py-1.5 text-xs border border-border rounded-lg bg-surface text-text-primary placeholder:text-text-tertiary focus:outline-none focus:border-db-red/30"
+            className="min-w-[14rem] flex-1 px-2.5 py-1.5 text-xs border border-border rounded-lg bg-surface text-text-primary placeholder:text-text-tertiary focus:outline-none"
           />
           <button
             type="button"

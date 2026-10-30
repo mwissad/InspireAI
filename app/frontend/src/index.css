@@ -3,11 +3,16 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 @theme {
-  /* Databricks brand */
+  /* Databricks brand — Lakehouse coral, nile, seafoam */
   --color-db-red: #FF3621;
   --color-db-red-hover: #FF4A36;
   --color-db-red-50: rgba(255, 54, 33, 0.08);
   --color-db-red-100: rgba(255, 54, 33, 0.15);
+  --color-db-navy: #1B3139;
+  --color-db-navy-deep: #0D1E24;
+  --color-db-darkest: #09171D;
+  --color-db-teal: #00A972;
+  --color-db-teal-50: rgba(0, 169, 114, 0.12);
 
   /* Surfaces — resolved via CSS vars below */
   --color-surface: var(--t-surface);
@@ -27,35 +32,62 @@
   --color-text-disabled: var(--t-text-disabled);
 
   /* Status */
-  --color-success: #22C55E;
+  --color-success: #00A972;
   --color-success-bg: var(--t-success-bg);
-  --color-warning: #EAB308;
+  --color-warning: #C47B16;
   --color-warning-bg: var(--t-warning-bg);
-  --color-error: #EF4444;
+  --color-error: #E02424;
   --color-error-bg: var(--t-error-bg);
   --color-info: #3B82F6;
   --color-info-bg: var(--t-info-bg);
+
+  /* shadcn/ui semantic tokens */
+  --color-background: var(--t-bg);
+  --color-foreground: var(--t-text-primary);
+  --color-card: var(--t-surface);
+  --color-card-foreground: var(--t-text-primary);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--t-text-secondary);
+  --color-subtle-foreground: var(--t-text-tertiary);
+  --color-input: var(--t-border-strong);
+  --color-ring: var(--accent);
+  /* The only brand accent: active nav, primary CTAs, Inspire score */
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent-soft: var(--accent-soft);
+}
+
+@layer base {
+  *, ::before, ::after {
+    border-color: var(--color-border);
+  }
 }
 
 /* ═══ Light theme (default) ═══ */
 :root {
+  /* #D93A26 keeps white label text at 4.6:1 (WCAG AA) */
+  --accent: #D93A26;
+  --accent-foreground: #FFFFFF;
+  --accent-soft: rgba(217, 58, 38, 0.08);
+  --muted: #F2F2EF;
+
   --t-surface: #FFFFFF;
-  --t-bg: #F7F7F8;
-  --t-bg-subtle: #EEEFF1;
-  --t-panel: #FAFAFA;
+  --t-bg: #F6F6F4;
+  --t-bg-subtle: #EDEDEA;
+  --t-panel: #FAFAF8;
 
   --t-border: rgba(0, 0, 0, 0.10);
   --t-border-subtle: rgba(0, 0, 0, 0.05);
   --t-border-strong: rgba(0, 0, 0, 0.18);
 
   --t-text-primary: #1A1A1F;
-  --t-text-secondary: #5C5C66;
-  --t-text-tertiary: #8C8C96;
+  --t-text-secondary: #55555F;
+  --t-text-tertiary: #6E6E78;
   --t-text-disabled: #B8B8C0;
 
-  --t-success-bg: rgba(34, 197, 94, 0.10);
-  --t-warning-bg: rgba(234, 179, 8, 0.10);
-  --t-error-bg: rgba(239, 68, 68, 0.10);
+  --t-success-bg: rgba(0, 169, 114, 0.10);
+  --t-warning-bg: rgba(196, 123, 22, 0.12);
+  --t-error-bg: rgba(224, 36, 36, 0.10);
   --t-info-bg: rgba(59, 130, 246, 0.10);
 
   --t-scrollbar-thumb: rgba(0, 0, 0, 0.12);
@@ -67,28 +99,34 @@
 
 /* ═══ Dark theme ═══ */
 .dark {
-  --t-surface: #111113;
-  --t-bg: #09090B;
-  --t-bg-subtle: #1A1A1F;
-  --t-panel: #0F0F12;
+  /* Dark label text on the brighter coral keeps primary buttons at AA */
+  --accent: #FF5A45;
+  --accent-foreground: #1A0603;
+  --accent-soft: rgba(255, 90, 69, 0.12);
+  --muted: #17313A;
+
+  --t-surface: #12262E;
+  --t-bg: #09171D;
+  --t-bg-subtle: #1B3139;
+  --t-panel: #0D1E24;
 
   --t-border: rgba(255, 255, 255, 0.08);
   --t-border-subtle: rgba(255, 255, 255, 0.04);
   --t-border-strong: rgba(255, 255, 255, 0.15);
 
   --t-text-primary: #F0F0F3;
-  --t-text-secondary: #A0A0AB;
-  --t-text-tertiary: #63636E;
-  --t-text-disabled: #3F3F46;
+  --t-text-secondary: #A9B3B8;
+  --t-text-tertiary: #8A949A;
+  --t-text-disabled: #4A5A60;
 
-  --t-success-bg: rgba(34, 197, 94, 0.1);
-  --t-warning-bg: rgba(234, 179, 8, 0.1);
-  --t-error-bg: rgba(239, 68, 68, 0.1);
+  --t-success-bg: rgba(0, 169, 114, 0.14);
+  --t-warning-bg: rgba(196, 123, 22, 0.16);
+  --t-error-bg: rgba(224, 36, 36, 0.14);
   --t-info-bg: rgba(59, 130, 246, 0.1);
 
   --t-scrollbar-thumb: rgba(255, 255, 255, 0.1);
   --t-scrollbar-hover: rgba(255, 255, 255, 0.2);
-  --t-input-bg: #111113;
+  --t-input-bg: #0D1E24;
   --t-input-color: #F0F0F3;
   --t-placeholder: #63636E;
 }
@@ -108,6 +146,83 @@ body {
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--t-scrollbar-thumb); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--t-scrollbar-hover); }
+
+/* Shared controls — equal height, aligned labels */
+.ui-control {
+  min-height: 2.25rem;
+  display: inline-flex;
+  align-items: center;
+}
+.seg-track {
+  display: flex;
+  align-items: stretch;
+  gap: 0.375rem;
+}
+.seg-btn {
+  flex: 1 1 0;
+  min-height: 2.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.5rem 0.75rem;
+  border-radius: 0.5rem;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.2;
+  text-align: center;
+  border: 1px solid var(--t-border);
+  color: var(--t-text-secondary);
+  background: var(--t-surface);
+  transition: border-color 0.2s ease, background-color 0.2s ease, color 0.2s ease;
+}
+.seg-btn:hover {
+  border-color: var(--t-border-strong);
+  color: var(--t-text-primary);
+}
+.seg-btn[data-active="true"],
+.seg-btn.is-active {
+  border-color: rgba(255, 54, 33, 0.35);
+  background: var(--color-db-red-50);
+  color: var(--color-db-red);
+}
+.btn-primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.375rem;
+  min-height: 2.5rem;
+  padding: 0.5rem 1rem;
+  border-radius: 0.5rem;
+  font-size: 12px;
+  font-weight: 600;
+  color: #fff;
+  background: var(--color-db-red);
+  border: 1px solid transparent;
+}
+.btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.btn-secondary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.375rem;
+  min-height: 2.5rem;
+  padding: 0.5rem 0.875rem;
+  border-radius: 0.5rem;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--t-text-secondary);
+  background: var(--t-surface);
+  border: 1px solid var(--t-border);
+}
+.toolbar-control {
+  min-height: 2.25rem;
+  height: 2.25rem;
+  display: inline-flex;
+  align-items: center;
+}
 
 /* Glow focus ring */
 .glow-focus:focus-within {

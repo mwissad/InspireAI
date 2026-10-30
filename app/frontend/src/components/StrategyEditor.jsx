@@ -17,7 +17,7 @@ import {
 const inputClass =
   'w-full px-2.5 py-1.5 text-xs border border-border rounded-md bg-surface text-text-primary placeholder:text-text-tertiary glow-focus transition-smooth';
 const smallButton =
-  'inline-flex shrink-0 items-center gap-1 whitespace-nowrap px-2 py-1 rounded-md text-[11px] font-medium border border-border text-text-secondary hover:border-border-strong transition-smooth';
+  'inline-flex shrink-0 items-center justify-center gap-1 whitespace-nowrap min-h-7 h-7 px-2 rounded-md text-[11px] font-medium border border-border text-text-secondary hover:border-border-strong bg-surface transition-smooth';
 
 const layerName = (depth) => STRATEGY_LAYERS[depth - 1] || `Level ${depth}`;
 const samePath = (a, b) => Boolean(a && b) && a.length === b.length && a.every((v, i) => v === b[i]);
@@ -60,14 +60,14 @@ function removeAt(entries, path) {
 
 function Column({ title, hint, footer, children }) {
   return (
-    <div className="min-w-0">
-      <div className="flex items-center gap-1.5 mb-2 min-w-0">
+    <div className="min-w-0 flex flex-col h-full">
+      <div className="flex items-center gap-1.5 mb-2 min-h-5 min-w-0">
         <span className="text-[11px] font-semibold text-text-secondary shrink-0">{title}</span>
         {hint && <span className="text-[10px] text-text-tertiary truncate" title={hint}>{hint}</span>}
       </div>
-      <div className="rounded-lg border border-border bg-bg overflow-hidden flex flex-col">
-        <div className="max-h-[min(24rem,60vh)] min-h-[9rem] overflow-y-auto p-1.5 space-y-1.5">{children}</div>
-        {footer && <div className="border-t border-border p-1.5 bg-bg-subtle/40 flex gap-1.5">{footer}</div>}
+      <div className="rounded-lg border border-border bg-bg overflow-hidden flex flex-col h-full">
+        <div className="max-h-[min(24rem,60vh)] min-h-[9rem] overflow-y-auto p-1.5 space-y-1.5 flex-1">{children}</div>
+        {footer && <div className="border-t border-border p-1.5 bg-bg-subtle/40 flex items-center gap-1.5 min-h-10">{footer}</div>}
       </div>
     </div>
   );
@@ -125,7 +125,7 @@ export default function StrategyEditor({ value, onChange, onProblems }) {
         </p>
       )}
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-stretch">
         <Column
           title="Strategy entries"
           hint={`${countEntries(model.strategy)} of ${STRATEGY_MAX_ENTRIES} · ${STRATEGY_LAYERS.join(' › ')}`}
@@ -216,7 +216,7 @@ export default function StrategyEditor({ value, onChange, onProblems }) {
           ) : (
             current.kpis.map((kpi, k) => (
               <div key={`kpi-${k}`} className="rounded-md border border-border bg-surface p-1.5 space-y-1.5">
-                <div className="flex gap-1.5">
+                <div className="flex items-center gap-1.5">
                   <input
                     value={kpi.name}
                     onChange={(e) => editCurrent({ kpis: replaceAt(current.kpis, k, { ...kpi, name: e.target.value }) })}
@@ -283,7 +283,7 @@ export default function StrategyEditor({ value, onChange, onProblems }) {
           ) : (
             current.key_results.map((result, r) => (
               <div key={`kr-${r}`} className="rounded-md border border-border bg-surface p-1.5 space-y-1.5">
-                <div className="flex gap-1.5">
+                <div className="flex items-center gap-1.5">
                   <input
                     value={result.statement}
                     onChange={(e) =>

@@ -5,9 +5,9 @@ import MagneticButton from '../components/MagneticButton';
 import { SkeletonCard } from '../components/SkeletonLoader';
 
 const STATUS_CONFIG = {
-  completed: { label: 'Completed', bg: 'bg-[#27AE60]/10', text: 'text-[#27AE60]', dot: 'bg-[#27AE60]' },
-  running:   { label: 'In Progress', bg: 'bg-[#FF8A6B]/10', text: 'text-[#FF8A6B]', dot: 'bg-[#FF8A6B]' },
-  failed:    { label: 'Failed', bg: 'bg-[#E74C3C]/10', text: 'text-[#E74C3C]', dot: 'bg-[#E74C3C]' },
+  completed: { label: 'Completed', bg: 'bg-success-bg', text: 'text-success', dot: 'bg-success' },
+  running:   { label: 'In Progress', bg: 'bg-db-red-50', text: 'text-db-red', dot: 'bg-db-red' },
+  failed:    { label: 'Failed', bg: 'bg-error-bg', text: 'text-error', dot: 'bg-error' },
 };
 
 function getStatus(session) {
@@ -247,14 +247,14 @@ export default function ChoosePage({ settings, onNewExperiment, onNoData, onView
             onClick={onNewExperiment}
             className="group w-full flex items-center gap-4 px-6 py-5 rounded-2xl border border-[#FF3621]/20 bg-gradient-to-r from-[#FF3621]/[0.06] to-transparent hover:from-[#FF3621]/[0.12] text-left transition-all"
           >
-            <div className="w-12 h-12 rounded-xl bg-[#FF3621]/10 flex items-center justify-center">
-              <Rocket size={22} className="text-[#FF3621]" />
+            <div className="w-12 h-12 rounded-xl bg-db-red/10 flex items-center justify-center">
+              <Rocket size={22} className="text-db-red" />
             </div>
             <div className="flex-1">
               <p className="text-sm font-semibold text-text-primary">I have Unity Catalog data</p>
               <p className="text-xs text-text-secondary mt-0.5">Pick catalogs, schemas, or tables</p>
             </div>
-            <ArrowRight size={18} className="text-text-tertiary group-hover:text-[#FF3621]" />
+            <ArrowRight size={18} className="text-text-tertiary group-hover:text-db-red" />
           </button>
           <button
             type="button"
@@ -331,14 +331,14 @@ export default function ChoosePage({ settings, onNewExperiment, onNoData, onView
         </div>
 
         {/* ── New experiment CTAs ── */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-stretch">
           <button
             type="button"
             onClick={onNewExperiment}
-            className="group flex items-center gap-4 px-5 py-4 rounded-2xl border border-[#FF3621]/20 bg-gradient-to-r from-[#FF3621]/[0.06] to-transparent hover:from-[#FF3621]/[0.12] text-left transition-all"
+            className="group flex items-center gap-4 min-h-[4.5rem] px-5 py-4 rounded-2xl border border-db-red/20 bg-linear-to-r from-db-red/[0.06] to-transparent hover:from-db-red/[0.12] text-left transition-all"
           >
-            <div className="w-10 h-10 rounded-xl bg-[#FF3621]/10 flex items-center justify-center shrink-0">
-              <Rocket size={20} className="text-[#FF3621]" />
+            <div className="w-10 h-10 rounded-xl bg-db-red/10 flex items-center justify-center shrink-0">
+              <Rocket size={20} className="text-db-red" />
             </div>
             <div className="flex-1 min-w-0">
               <p className="text-sm font-semibold text-text-primary">I have data</p>
@@ -348,7 +348,7 @@ export default function ChoosePage({ settings, onNewExperiment, onNoData, onView
           <button
             type="button"
             onClick={onNoData}
-            className="group flex items-center gap-4 px-5 py-4 rounded-2xl border border-border bg-surface hover:border-border-strong text-left transition-all"
+            className="group flex items-center gap-4 min-h-[4.5rem] px-5 py-4 rounded-2xl border border-border bg-surface hover:border-border-strong text-left transition-all"
           >
             <div className="w-10 h-10 rounded-xl bg-bg-subtle flex items-center justify-center shrink-0">
               <Sparkles size={20} className="text-db-red" />
@@ -366,7 +366,7 @@ export default function ChoosePage({ settings, onNewExperiment, onNoData, onView
             <h2 className="text-xs font-semibold text-text-secondary uppercase tracking-[0.1em]">Previous Experiments</h2>
             <button
               onClick={() => onViewResults(null)}
-              className="text-[11px] text-text-tertiary hover:text-[#FF3621] transition-colors flex items-center gap-1"
+              className="text-[11px] text-text-tertiary hover:text-db-red transition-colors flex items-center gap-1"
             >
               View all <ChevronRight size={12} />
             </button>
@@ -513,7 +513,7 @@ export default function ChoosePage({ settings, onNewExperiment, onNoData, onView
                               if (!has) fetchUcsForQuickView(session.session_id);
                             }
                           }}
-                          className="px-2.5 py-1.5 text-[10px] font-medium rounded-lg flex items-center gap-1 transition-all border border-border hover:border-[#FF3621]/30 hover:bg-[#FF3621]/5 text-text-tertiary hover:text-[#FF3621]"
+                          className="px-2.5 py-1.5 text-[10px] font-medium rounded-lg flex items-center gap-1 transition-all border border-border hover:border-[#FF3621]/30 hover:bg-[#FF3621]/5 text-text-tertiary hover:text-db-red"
                           title="Quick view use cases"
                         >
                           {isQuickOpen ? (

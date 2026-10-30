@@ -261,7 +261,7 @@ export default function App() {
   return (
     <ThemeProvider>
     <div className="min-h-screen bg-bg text-text-primary relative">
-      <ParticleField count={40} />
+      {page !== 'results' && <ParticleField count={40} />}
 
       {page !== 'landing' && page !== 'loading' && page !== 'setup' && (
         <Header
@@ -346,7 +346,7 @@ export default function App() {
 
         {page === 'results' && (
           <ErrorBoundary key="results">
-            <div className="max-w-6xl mx-auto px-6 py-4 sm:py-5">
+            <div>
               <ResultsPage
                 settings={settings}
                 update={update}

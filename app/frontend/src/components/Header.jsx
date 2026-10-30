@@ -1,6 +1,8 @@
 import { Sun, Moon } from 'lucide-react';
 import DatabricksLogo from './DatabricksLogo';
 import { useTheme } from '../ThemeContext';
+import { Button } from './ui/button';
+import { cn } from '../lib/utils';
 
 const NAV = [
   { id: 'choose', label: 'Get Started', step: 1 },
@@ -23,25 +25,18 @@ export default function Header({
   };
 
   return (
-    <header className="bg-surface/80 backdrop-blur-xl border-b border-border sticky top-0 z-40">
-      <div className="max-w-screen-xl mx-auto px-6">
-        <div className="flex items-center justify-between h-14">
-          {/* Brand */}
+    <header className="sticky top-0 z-40 border-b bg-card/85 backdrop-blur-xl">
+      <div className="mx-auto max-w-[1200px] px-6">
+        <div className="grid h-14 grid-cols-[1fr_auto_1fr] items-center gap-3">
           <button
             onClick={() => setPage('landing')}
-            className="flex items-center gap-2.5 group"
+            className="flex items-center gap-2 justify-self-start rounded-md outline-none focus-visible:ring-2 focus-visible:ring-ring/30"
           >
-            <DatabricksLogo className="w-7 h-7" />
-            <span className="text-text-primary font-bold text-xl tracking-tight">
-              Inspire AI
-            </span>
-            <span className="text-[10px] font-semibold text-db-red border border-db-red/30 bg-db-red-50 rounded-full px-2 py-0.5 ml-0.5">
-              V9
-            </span>
+            <DatabricksLogo className="h-6 w-6" />
+            <span className="text-base font-semibold tracking-tight text-foreground">Inspire AI</span>
           </button>
 
-          {/* Navigation */}
-          <nav className="flex items-center gap-0.5">
+          <nav className="flex h-14 items-stretch gap-1 justify-self-center" aria-label="Steps">
             {NAV.map((item) => {
               const active = page === item.id;
               const can = enabled[item.id];
@@ -50,41 +45,36 @@ export default function Header({
                   key={item.id}
                   onClick={() => can && setPage(item.id)}
                   disabled={!can}
-                  className={`
-                    relative px-4 py-2 text-sm font-medium rounded-md transition-smooth
-                    ${active
-                      ? 'text-db-red bg-db-red-50'
+                  aria-current={active ? 'page' : undefined}
+                  className={cn(
+                    'relative inline-flex items-center gap-1.5 px-3 text-sm font-medium outline-none transition-colors focus-visible:bg-muted',
+                    active
+                      ? 'text-foreground'
                       : can
-                        ? 'text-text-secondary hover:text-text-primary hover:bg-bg-subtle'
-                        : 'text-text-disabled cursor-not-allowed'
-                    }
-                  `}
-                >
-                  <span className="flex items-center gap-1.5">
-                    {item.step && (
-                      <span className={`text-xs font-mono ${active ? 'text-db-red' : 'opacity-50'}`}>
-                        {String(item.step).padStart(2, '0')}
-                      </span>
-                    )}
-                    {item.label}
-                  </span>
-                  {active && (
-                    <span className="absolute bottom-0 left-3 right-3 h-0.5 bg-db-red rounded-full" />
+                        ? 'text-muted-foreground hover:text-foreground'
+                        : 'cursor-not-allowed text-text-disabled',
                   )}
+                >
+                  <span className={cn('font-mono text-xs tabular-nums', active ? 'text-accent' : 'opacity-60')}>
+                    {String(item.step).padStart(2, '0')}
+                  </span>
+                  {item.label}
+                  {active && <span className="absolute inset-x-3 -bottom-px h-0.5 rounded-full bg-accent" aria-hidden />}
                 </button>
               );
             })}
           </nav>
 
-          {/* Theme toggle */}
-          <div className="flex items-center gap-1">
-            <button
+          <div className="flex items-center justify-end">
+            <Button
+              variant="ghost"
+              size="icon"
               onClick={toggle}
-              className="p-2 rounded-md text-text-secondary hover:text-db-red hover:bg-db-red-50 transition-smooth"
               title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+              aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
             >
               {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
-            </button>
+            </Button>
           </div>
         </div>
       </div>
