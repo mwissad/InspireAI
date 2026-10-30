@@ -1,0 +1,18 @@
+/** Inspire mark: a small agent head. No tile, no brick, reads at 16px. */
+export default function InspireLogo({ className = 'h-6 w-6', title = 'Inspire AI' }) {
+  return (
+    <svg
+      viewBox="0 0 32 32"
+      className={className}
+      role="img"
+      aria-label={title}
+      xmlns="http://www.w3.org/2000/svg"
+    >
+      <circle cx="16" cy="3.6" r="2.1" fill="#FF3621" />
+      <rect x="15.15" y="5.4" width="1.7" height="4.2" rx="0.85" fill="#FF3621" />
+      <rect x="5.5" y="9.2" width="21" height="19.2" rx="7.2" fill="#FF3621" />
+      <circle cx="12.2" cy="18.6" r="2.35" fill="#0D1E24" />
+      <circle cx="19.8" cy="18.6" r="2.35" fill="#0D1E24" />
+    </svg>
+  );
+}

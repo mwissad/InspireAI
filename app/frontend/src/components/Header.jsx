@@ -32,7 +32,7 @@ export default function Header({
             onClick={() => setPage('landing')}
             className="flex items-center gap-2 justify-self-start rounded-md outline-none focus-visible:ring-2 focus-visible:ring-ring/30"
           >
-            <DatabricksLogo className="h-6 w-6" />
+            <DatabricksLogo className="h-7 w-7" />
             <span className="text-base font-semibold tracking-tight text-foreground">Inspire AI</span>
           </button>
 
