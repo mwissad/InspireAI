@@ -18,9 +18,26 @@ const { triggerDemoDataPipeline } = require('./lib/demoDataPipeline');
 const { resolveInspireAppServicePrincipalId } = require('./lib/inspireSpGrants');
 const {
   INSPIRE_AGENT_VERSION,
+  inspireJobTags,
+  inspireTaskCompute,
   normalizeUseCasesQualityParams,
   sanitizeInspireNotebookJobParams,
+  normalizeV130UseCaseFields,
 } = require('./lib/inspireJobParams');
+const { notebookParamsFromSessionForGenerateRun } = require('./lib/inspireSessionParams');
+const { splitInspireDatabase, isTimestampText, stepsStatement } = require('./lib/sqlInputs');
+const { createExecuteSql, runWithRequestDeadline } = require('./lib/sqlStatements');
+const { registerImplementRoutes } = require('./implementRoutes');
+const { registerShowcaseRoutes } = require('./lib/showcase');
+const {
+  FEEDBACK_NOT_AVAILABLE,
+  isMissingTableError,
+  validateFeedbackBody,
+  feedbackInsertStatement,
+  sessionBusinessStatement,
+  feedbackHistoryStatement,
+  latestFeedbackByKey,
+} = require('./lib/inspireFeedback');
 
 const app = express();
 app.use(express.json({ limit: '50mb' }));
@@ -67,10 +84,7 @@ function hasDatabricksPlatformAuth() {
 
 // Path to the bundled notebook file — try several candidate locations
 // v47: switched from DBC archive to direct JUPYTER (.ipynb) format
-const NOTEBOOK_CANDIDATES = [
-  path.resolve(__dirname, '..', 'dbx_inspire_ai_agent.ipynb'),
-  path.resolve(__dirname, 'dbx_inspire_ai_agent.ipynb'),
-];
+const { NOTEBOOK_CANDIDATES } = require('./lib/appShell');
 let BUNDLED_NOTEBOOK_PATH = NOTEBOOK_CANDIDATES.find(p => fs.existsSync(p)) || '';
 const IS_IPYNB = BUNDLED_NOTEBOOK_PATH.endsWith('.ipynb');
 
@@ -142,6 +156,8 @@ app.use((req, res, next) => {
   }
   next();
 });
+
+registerShowcaseRoutes(app);
 
 // Multer for file uploads (store in memory)
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
@@ -457,71 +473,14 @@ async function requireToken(req, res, next) {
     if (!req.dbHost) {
       return res.status(400).json({ error: 'Databricks host not configured.' });
     }
-    next();
+    runWithRequestDeadline(next);
   } catch (err) {
     console.error(`🔒 requireToken error: ${err.message}`);
     next(err);
   }
 }
 
-// Execute SQL via Databricks SQL Statement Execution API
-async function executeSql(host, token, warehouseId, sql) {
-  console.log(`   🔶 SQL: ${sql.substring(0, 150)}...`);
-
-  const submitResp = await dbFetch(host, token, '/api/2.0/sql/statements', {
-    method: 'POST',
-    body: JSON.stringify({
-      warehouse_id: warehouseId,
-      statement: sql,
-      wait_timeout: '50s',
-      on_wait_timeout: 'CONTINUE',
-      disposition: 'INLINE',
-      format: 'JSON_ARRAY',
-    }),
-  });
-  if (!submitResp.ok) {
-    const errText = await submitResp.text();
-    console.error(`   ❌ SQL submit failed (${submitResp.status}): ${errText.substring(0, 200)}`);
-    throw new Error(`SQL failed (${submitResp.status}): ${errText}`);
-  }
-  let result = await submitResp.json();
-  console.log(`   📄 SQL state: ${result.status?.state}`);
-
-  // Poll if still running
-  let pollCount = 0;
-  while (result.status?.state === 'PENDING' || result.status?.state === 'RUNNING') {
-    pollCount++;
-    await new Promise(r => setTimeout(r, 2000));
-    const pollResp = await dbFetch(host, token, `/api/2.0/sql/statements/${result.statement_id}`);
-    if (!pollResp.ok) throw new Error(`SQL polling failed`);
-    result = await pollResp.json();
-    if (pollCount % 5 === 0) console.log(`   ⏳ Polling (${pollCount})...`);
-  }
-
-  if (result.status?.state === 'FAILED') {
-    const errMsg = result.status?.error?.message || 'SQL statement execution failed';
-    throw new Error(errMsg);
-  }
-
-  // Handle chunked results
-  if (result.manifest?.total_chunk_count > 1 && result.manifest?.chunks) {
-    let allData = result.result?.data_array || [];
-    for (const chunk of result.manifest.chunks) {
-      if (chunk.chunk_index === 0) continue;
-      const chunkResp = await dbFetch(host, token, `/api/2.0/sql/statements/${result.statement_id}/result/chunks/${chunk.chunk_index}`);
-      if (chunkResp.ok) {
-        const chunkData = await chunkResp.json();
-        if (chunkData.data_array) allData = allData.concat(chunkData.data_array);
-      }
-    }
-    result.result = result.result || {};
-    result.result.data_array = allData;
-  }
-
-  const rowCount = result.result?.data_array?.length ?? 0;
-  console.log(`   ✅ SQL done: ${rowCount} rows`);
-  return result;
-}
+const executeSql = createExecuteSql(dbFetch);
 
 /** Delta optimistic concurrency (notebook + UI can touch __inspire_usecases at once). */
 function isDeltaConcurrentWriteConflict(message) {
@@ -539,7 +498,7 @@ async function executeSqlWithDeltaRetry(host, token, warehouseId, sql, options =
   const baseDelayMs = options.baseDelayMs ?? 100;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      return await executeSql(host, token, warehouseId, sql);
+      return await executeSql(host, token, warehouseId, sql, options.parameters || null);
     } catch (e) {
       const msg = e.message || String(e);
       if (!isDeltaConcurrentWriteConflict(msg) || attempt === maxAttempts) {
@@ -570,12 +529,8 @@ function sqlResultToObjects(result) {
 }
 
 /** inspire_database must be exactly `catalog_name`.`schema_name` (one dot). */
-function splitInspireDatabase(inspire_database) {
-  if (!inspire_database || typeof inspire_database !== 'string') return null;
-  const s = inspire_database.trim();
-  const parts = s.split('.');
-  if (parts.length !== 2 || !parts[0] || !parts[1]) return null;
-  return { catalog: parts[0], schema: parts[1] };
+function invalidSessionId(sessionId) {
+  return sessionId != null && String(sessionId).trim() !== '' && !/^\d+$/.test(String(sessionId).trim());
 }
 
 function escapeSqlStringLiteral(value) {
@@ -592,17 +547,12 @@ function isAlterAddColumnAlreadyExistsError(message) {
   );
 }
 
-/**
- * Older __inspire_usecases Delta tables lack Route-1 Genie columns; add them before UPDATE.
- * Tries `ADD COLUMN` (Spark/Inspire notebook style), then `ADD COLUMNS (...)` if the warehouse
- * rejects the first form. Ignores "already exists" so this is safe to repeat.
- */
-async function ensureUsecasesGenieRoute1Columns(host, token, warehouseId, ucTable) {
+async function ensureTableColumns(host, token, warehouseId, table, columns) {
   const tryAddColumn = async (colName, colType) => {
     const colSql = `${colName} ${colType}`;
     const variants = [
-      `ALTER TABLE ${ucTable} ADD COLUMN ${colSql}`,
-      `ALTER TABLE ${ucTable} ADD COLUMNS (${colSql})`,
+      `ALTER TABLE ${table} ADD COLUMN ${colSql}`,
+      `ALTER TABLE ${table} ADD COLUMNS (${colSql})`,
     ];
     for (let i = 0; i < variants.length; i++) {
       const sql = variants[i];
@@ -628,8 +578,19 @@ async function ensureUsecasesGenieRoute1Columns(host, token, warehouseId, ucTabl
       }
     }
   };
-  await tryAddColumn('generate_genie_code_instruction', 'STRING');
-  await tryAddColumn('has_genie_code', 'STRING');
+  for (const [colName, colType] of columns) await tryAddColumn(colName, colType);
+}
+
+/**
+ * Older __inspire_usecases Delta tables lack Route-1 Genie columns; add them before UPDATE.
+ * Tries `ADD COLUMN` (Spark/Inspire notebook style), then `ADD COLUMNS (...)` if the warehouse
+ * rejects the first form. Ignores "already exists" so this is safe to repeat.
+ */
+async function ensureUsecasesGenieRoute1Columns(host, token, warehouseId, ucTable) {
+  await ensureTableColumns(host, token, warehouseId, ucTable, [
+    ['generate_genie_code_instruction', 'STRING'],
+    ['has_genie_code', 'STRING'],
+  ]);
 }
 
 function workspaceOriginFromHost(host) {
@@ -684,82 +645,26 @@ async function runRoute1GenieFlagUpdates(host, token, warehouseId, catalog, sche
   }
 }
 
-function buildUcMetadataFromSessionRow(session) {
-  const jf = String(session.json_file_path || '').trim();
-  if (jf.startsWith('/')) return jf;
-  const parts = [];
-  const pushSplit = (raw) => {
-    for (const x of String(raw || '').split(',')) {
-      const t = x.trim();
-      if (t) parts.push(t);
-    }
-  };
-  pushSplit(session.tables_str);
-  pushSplit(session.schemas_str);
-  pushSplit(session.catalogs);
-  return parts.join(',');
-}
-
-function mapSessionQualityToWidget(v) {
-  const params = { '05_use_cases_quality': v };
-  normalizeUseCasesQualityParams(params);
-  return params['05_use_cases_quality'];
-}
-
-/** Rebuild notebook base_parameters for Operation = Generate Use Cases (Route 1). */
-function notebookParamsFromSessionForGenerateRun(session, targetSessionIdStr) {
-  const ucMeta = buildUcMetadataFromSessionRow(session);
-  const genPath = String(session.generation_path || './../demos/').trim() || './../demos/';
-  const genChoices = String(session.generate_choices || '').trim();
-  const genOptions = genChoices
-    ? genChoices
-        .split(',')
-        .map((x) => x.trim())
-        .filter((g) => g === 'PDF Catalog' || g === 'Presentation')
-        .join(',')
-    : 'PDF Catalog';
-  const outLang = String(session.output_language || 'English').trim() || 'English';
-  const priorities = String(session.business_priorities || 'Increase Revenue').trim() || 'Increase Revenue';
-  const instruct = String(session.generation_instructions_section || '').trim();
-
-  return {
-    '15_operation': 'Generate Use Cases',
-    '00_business_name': String(session.business_name || '').trim(),
-    '01_uc_metadata': ucMeta,
-    '02_inspire_database': String(session.inspire_database_name || '').trim(),
-    '04_table_election': String(session.table_election_mode || 'Let Inspire Decides').trim() || 'Let Inspire Decides',
-    '05_use_cases_quality': mapSessionQualityToWidget(session.use_cases_quality),
-    '06_business_domains': String(session.business_domains || '').trim(),
-    '07_business_priorities': priorities,
-    '08_generation_instructions': instruct,
-    '09_generation_options': genOptions || 'PDF Catalog',
-    '11_generation_path': genPath,
-    '12_documents_languages': outLang,
-    '13_generate_genie_code_for': '5',
-    '14_session_id': String(targetSessionIdStr).trim(),
-  };
-}
-
 async function fetchInspireSessionWidgetRow(host, token, warehouseId, catalog, schema, sessionIdStr) {
   const table = `\`${catalog}\`.\`${schema}\`.\`__inspire_session\``;
   const widgetColsBase = `business_name, inspire_database_name, operation_mode, table_election_mode, use_cases_quality, strategic_goals, business_priorities, business_domains, catalogs, schemas_str, tables_str, generate_choices, generation_path, output_language, sql_generation_per_domain, technical_exclusion_strategy, json_file_path`;
   const widgetColsV08 = `${widgetColsBase}, enriched_business_context, enriched_strategic_goals, enriched_business_priorities, enriched_strategic_initiative, enriched_value_chain, enriched_revenue_model, generation_instructions_section`;
+  const widgetColsV13 = `${widgetColsV08}, discovery_type, strategic_context`;
   const baseCols = `session_id, processing_status, completed_percent, create_at, last_updated, completed_on, inspire_json, results_json`;
-  let sql = `SELECT ${baseCols}, ${widgetColsV08} FROM ${table} WHERE session_id = ${sessionIdStr} LIMIT 1`;
-  try {
-    const result = await executeSql(host, token, warehouseId, sql);
-    const rows = sqlResultToObjects(result);
-    return rows[0] || null;
-  } catch (e1) {
-    const msg = String(e1.message || e1);
-    if (/enriched_|generation_instructions_section|UNRESOLVED_COLUMN|FIELD_NOT_FOUND|cannot resolve/i.test(msg)) {
-      sql = `SELECT ${baseCols}, ${widgetColsBase} FROM ${table} WHERE session_id = ${sessionIdStr} LIMIT 1`;
+  const columnSets = [widgetColsV13, widgetColsV08, widgetColsBase];
+  for (let i = 0; i < columnSets.length; i++) {
+    const sql = `SELECT ${baseCols}, ${columnSets[i]} FROM ${table} WHERE session_id = ${sessionIdStr} LIMIT 1`;
+    try {
       const result = await executeSql(host, token, warehouseId, sql);
       const rows = sqlResultToObjects(result);
       return rows[0] || null;
+    } catch (e1) {
+      const msg = String(e1.message || e1);
+      const missingColumn = /discovery_type|strategic_context|enriched_|generation_instructions_section|UNRESOLVED_COLUMN|FIELD_NOT_FOUND|cannot resolve/i.test(msg);
+      if (!missingColumn || i === columnSets.length - 1) throw e1;
     }
-    throw e1;
   }
+  return null;
 }
 
 /**
@@ -813,9 +718,10 @@ async function resolveWorkspaceNotebookObjectPath(host, token, candidatePath) {
  * @param {Record<string,string>} opts.params notebook base_parameters
  * @param {string} [opts.notebook_path]
  * @param {string} [opts.cluster_id]
- * @param {'discovery'|'genie_regen'} [opts.jobType]
+ * @param {'discovery'|'genie_regen'|'implement'} [opts.jobType]
+ * @param {string} [opts.jobName]
  */
-async function triggerInspireNotebookJob(host, token, { params, notebook_path, cluster_id, jobType = 'discovery' }) {
+async function triggerInspireNotebookJob(host, token, { params, notebook_path, cluster_id, jobType = 'discovery', jobName: requestedJobName = '', useCaseIds = [] }) {
   normalizeUseCasesQualityParams(params);
   const sanitized = sanitizeInspireNotebookJobParams(params);
   for (const k of Object.keys(params)) delete params[k];
@@ -864,23 +770,13 @@ async function triggerInspireNotebookJob(host, token, { params, notebook_path, c
   } catch (_) {}
 
   const businessName = params['00_business_name'] || 'Run';
-  const sanitizeTag = (v) => String(v || '').replace(/[^A-Za-z0-9._-]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '').slice(0, 255);
-  const jobName = `Inspire AI - ${businessName} - ${new Date().toISOString().slice(0, 19)}`;
-  const jobSessionId = crypto.randomUUID();
+  const jobName = requestedJobName || `Inspire AI - ${businessName} - ${new Date().toISOString().slice(0, 19)}`;
   const notebookFilename = resolvedPath.split('/').pop() || 'inspire_notebook';
-  const inspireRunType = jobType === 'genie_regen' ? 'genie_regen' : 'discovery';
+  const inspireRunType = jobType === 'genie_regen' ? 'genie_regen' : (jobType === 'implement' ? 'implement' : 'discovery');
 
   const createPayload = {
     name: jobName,
-    tags: {
-      inspire_version: INSPIRE_AGENT_VERSION,
-      dbx_inspire_ai_business: sanitizeTag(businessName),
-      dbx_inspire_ai_type: inspireRunType,
-      dbx_inspire_ai_run_type: inspireRunType,
-      dbx_inspire_ai_session: sanitizeTag(jobSessionId),
-      dbx_inspire_ai_usecases: '0',
-      dbx_inspire_ai_notebook: sanitizeTag(notebookFilename),
-    },
+    tags: inspireJobTags({ runType: inspireRunType, params, businessName, notebookFilename, useCaseIds }),
     tasks: [{
       task_key: 'inspire_notebook',
       notebook_task: {
@@ -888,10 +784,7 @@ async function triggerInspireNotebookJob(host, token, { params, notebook_path, c
         base_parameters: params,
         source: 'WORKSPACE',
       },
-      ...(cluster_id
-        ? { existing_cluster_id: cluster_id }
-        : { environment_key: 'Default' }
-      ),
+      ...inspireTaskCompute(cluster_id),
     }],
     ...(!cluster_id ? {
       environments: [{
@@ -2239,27 +2132,21 @@ app.get('/api/inspire/session', requireToken, async (req, res) => {
     // Notebook uses individual widget columns (not a single widget_values VARIANT)
     const widgetColsBase = `business_name, inspire_database_name, operation_mode, table_election_mode, use_cases_quality, strategic_goals, business_priorities, business_domains, catalogs, schemas_str, tables_str, generate_choices, generation_path, output_language, sql_generation_per_domain, technical_exclusion_strategy, json_file_path`;
     const widgetColsV08 = `${widgetColsBase}, enriched_business_context, enriched_strategic_goals, enriched_business_priorities, enriched_strategic_initiative, enriched_value_chain, enriched_revenue_model, generation_instructions_section`;
+    const widgetColsV13 = `${widgetColsV08}, discovery_type, strategic_context`;
     const baseCols = `session_id, processing_status, completed_percent, create_at, last_updated, completed_on, inspire_json, results_json`;
-
-    let sql;
-    if (session_id) {
-      sql = `SELECT ${baseCols}, ${widgetColsV08} FROM ${table} WHERE session_id = ${session_id} LIMIT 1`;
-    } else {
-      sql = `SELECT ${baseCols}, ${widgetColsV08} FROM ${table} ORDER BY create_at DESC LIMIT 1`;
-    }
+    if (invalidSessionId(session_id)) return res.status(400).json({ error: 'session_id must be numeric.' });
+    const where = session_id ? `WHERE session_id = ${String(session_id).trim()} LIMIT 1` : 'ORDER BY create_at DESC LIMIT 1';
 
     let result;
-    try {
-      result = await executeSql(req.dbHost, req.dbToken, warehouse_id, sql);
-    } catch (e1) {
-      const msg = String(e1.message || e1);
-      if (/enriched_|generation_instructions_section|UNRESOLVED_COLUMN|FIELD_NOT_FOUND|cannot resolve/i.test(msg)) {
-        sql = session_id
-          ? `SELECT ${baseCols}, ${widgetColsBase} FROM ${table} WHERE session_id = ${session_id} LIMIT 1`
-          : `SELECT ${baseCols}, ${widgetColsBase} FROM ${table} ORDER BY create_at DESC LIMIT 1`;
-        result = await executeSql(req.dbHost, req.dbToken, warehouse_id, sql);
-      } else {
-        throw e1;
+    const columnSets = [widgetColsV13, widgetColsV08, widgetColsBase];
+    for (let i = 0; i < columnSets.length; i++) {
+      try {
+        result = await executeSql(req.dbHost, req.dbToken, warehouse_id, `SELECT ${baseCols}, ${columnSets[i]} FROM ${table} ${where}`);
+        break;
+      } catch (e1) {
+        const msg = String(e1.message || e1);
+        const missingColumn = /discovery_type|strategic_context|enriched_|generation_instructions_section|UNRESOLVED_COLUMN|FIELD_NOT_FOUND|cannot resolve/i.test(msg);
+        if (!missingColumn || i === columnSets.length - 1) throw e1;
       }
     }
     const rows = sqlResultToObjects(result);
@@ -2295,6 +2182,10 @@ app.get('/api/inspire/session', requireToken, async (req, res) => {
       enriched_value_chain: session.enriched_value_chain || '',
       enriched_revenue_model: session.enriched_revenue_model || '',
       generation_instructions_section: session.generation_instructions_section || '',
+      discovery_type: session.discovery_type || '',
+      '03_discovery_type': session.discovery_type || '',
+      strategic_context: session.strategic_context || '',
+      '10_strategic_context': session.strategic_context || '',
     };
 
     // Parse VARIANT fields (may come as object or string)
@@ -2323,6 +2214,7 @@ app.get('/api/inspire/session', requireToken, async (req, res) => {
 app.get('/api/inspire/steps', requireToken, async (req, res) => {
   try {
     const { inspire_database, warehouse_id, session_id, since } = req.query;
+    if (invalidSessionId(session_id)) return res.status(400).json({ error: 'session_id must be numeric.' });
     if (!inspire_database || !warehouse_id) {
       return res.status(400).json({ error: 'inspire_database and warehouse_id required.' });
     }
@@ -2333,17 +2225,11 @@ app.get('/api/inspire/steps', requireToken, async (req, res) => {
     }
     const { catalog, schema } = parsedDb;
     const table = `\`${catalog}\`.\`${schema}\`.\`__inspire_step\``;
-
-    let sql;
-    if (session_id && since) {
-      sql = `SELECT step_id, session_id, last_updated, stage_name, step_name, sub_step_name, progress_increment, message, status, result_json FROM ${table} WHERE session_id = ${session_id} AND last_updated > '${since}' ORDER BY last_updated, step_id`;
-    } else if (session_id) {
-      sql = `SELECT step_id, session_id, last_updated, stage_name, step_name, sub_step_name, progress_increment, message, status, result_json FROM ${table} WHERE session_id = ${session_id} ORDER BY last_updated, step_id`;
-    } else {
-      sql = `SELECT step_id, session_id, last_updated, stage_name, step_name, sub_step_name, progress_increment, message, status, result_json FROM ${table} ORDER BY last_updated DESC, step_id DESC LIMIT 100`;
+    if (since && !isTimestampText(since)) {
+      return res.status(400).json({ error: 'since must be a timestamp such as 2026-01-31T12:00:00.000Z.' });
     }
-
-    const result = await executeSql(req.dbHost, req.dbToken, warehouse_id, sql);
+    const statement = stepsStatement(table, session_id, since);
+    const result = await executeSql(req.dbHost, req.dbToken, warehouse_id, statement.sql, statement.parameters);
     const steps = sqlResultToObjects(result);
 
     // Parse result_json and progress_increment for each step
@@ -2365,6 +2251,7 @@ app.get('/api/inspire/steps', requireToken, async (req, res) => {
 app.get('/api/inspire/step-results', requireToken, async (req, res) => {
   try {
     const { inspire_database, warehouse_id, session_id } = req.query;
+    if (invalidSessionId(session_id)) return res.status(400).json({ error: 'session_id must be numeric.' });
     if (!inspire_database || !warehouse_id || !session_id) {
       return res.status(400).json({ error: 'inspire_database, warehouse_id, and session_id required.' });
     }
@@ -2546,6 +2433,7 @@ app.get('/api/inspire/step-results', requireToken, async (req, res) => {
 app.get('/api/inspire/usecases', requireToken, async (req, res) => {
   try {
     const { inspire_database, warehouse_id, session_id, all_sessions, limit: limitRaw } = req.query;
+    if (invalidSessionId(session_id)) return res.status(400).json({ error: 'session_id must be numeric.' });
     if (!inspire_database || !warehouse_id) {
       return res.status(400).json({ error: 'inspire_database and warehouse_id required.' });
     }
@@ -2612,6 +2500,7 @@ app.get('/api/inspire/usecases', requireToken, async (req, res) => {
       row.elite_score = row.elite_score ?? null;
       row.elite_assessment = row.elite_assessment ?? null;
       row.selection_flags = row.selection_flags ?? null;
+      normalizeV130UseCaseFields(row);
     }
     console.log(
       listAll
@@ -2631,6 +2520,7 @@ app.get('/api/inspire/usecases', requireToken, async (req, res) => {
 app.post('/api/inspire/ack', requireToken, async (req, res) => {
   try {
     const { inspire_database, warehouse_id, session_id } = req.body;
+    if (invalidSessionId(session_id)) return res.status(400).json({ error: 'session_id must be numeric.' });
     if (!inspire_database || !warehouse_id || !session_id) {
       return res.status(400).json({ error: 'inspire_database, warehouse_id, and session_id required.' });
     }
@@ -2651,106 +2541,67 @@ app.post('/api/inspire/ack', requireToken, async (req, res) => {
   }
 });
 
-/**
- * Route 1: set generate_genie_code_instruction = 'Yes' for selected UC ids, then submit
- * notebook job with 15_operation = Generate Use Cases and 14_session_id = session.
- */
-async function handleInspireGenerateGenie(req, res) {
-  try {
-    const {
-      inspire_database,
-      warehouse_id,
-      session_id,
-      use_case_ids: useCaseIdsRaw,
-      cluster_id,
-      notebook_path,
-    } = req.body || {};
-
-    if (!inspire_database || !warehouse_id) {
-      return res.status(400).json({ error: 'inspire_database and warehouse_id are required.' });
-    }
-    const sidStr = String(session_id ?? '').trim();
-    if (!/^\d+$/.test(sidStr)) {
-      return res.status(400).json({ error: 'session_id must be a numeric Inspire session id.' });
-    }
-
-    const use_case_ids = Array.isArray(useCaseIdsRaw)
-      ? useCaseIdsRaw.map((x) => String(x).trim()).filter(Boolean)
-      : [];
-    if (use_case_ids.length === 0) {
-      return res.status(400).json({ error: 'use_case_ids must be a non-empty array of use case id strings.' });
-    }
-    if (use_case_ids.length > 50) {
-      return res.status(400).json({ error: 'At most 50 use cases per Generate request.' });
-    }
-
-    const safeIds = use_case_ids.filter((id) => /^[a-zA-Z0-9_.\-]+$/.test(id));
-    if (safeIds.length !== use_case_ids.length) {
-      return res.status(400).json({
-        error: 'Each use_case_id must match /^[a-zA-Z0-9_.\\-]+$/ (Inspire tracking table id / No).',
-      });
-    }
-
-    const parsedDb = splitInspireDatabase(inspire_database);
-    if (!parsedDb) {
-      return res.status(400).json({ error: 'inspire_database must be exactly catalog.schema (one dot).' });
-    }
-    const { catalog, schema } = parsedDb;
-
-    const session = await fetchInspireSessionWidgetRow(
-      req.dbHost,
-      req.dbToken,
-      warehouse_id,
-      catalog,
-      schema,
-      sidStr,
-    );
-    if (!session) {
-      return res.status(404).json({ error: `No __inspire_session row for session_id=${sidStr}.` });
-    }
-
-    const params = notebookParamsFromSessionForGenerateRun(session, sidStr);
-    if (!params['02_inspire_database']) {
-      params['02_inspire_database'] = inspire_database.trim();
-    }
-    if (!params['01_uc_metadata']) {
-      return res.status(400).json({
-        error:
-          'This session has no UC metadata (catalogs/schemas/tables or docs-only JSON path) stored on __inspire_session. Run Discover from this app first, or set metadata manually.',
-      });
-    }
-
-    await runRoute1GenieFlagUpdates(
-      req.dbHost,
-      req.dbToken,
-      warehouse_id,
-      catalog,
-      schema,
-      sidStr,
-      safeIds,
-    );
-
-    const out = await triggerInspireNotebookJob(req.dbHost, req.dbToken, {
-      params,
-      notebook_path,
-      cluster_id,
-      jobType: 'genie_regen',
-    });
-
-    console.log(`   🧞 Generate Genie: session=${sidStr}, flagged=${safeIds.length}, run_id=${out.run_id}`);
-    res.json({
-      ...out,
-      session_id: sidStr,
-      flagged_use_case_ids: safeIds,
-    });
-  } catch (err) {
-    const code = err.statusCode && Number.isFinite(err.statusCode) ? err.statusCode : 500;
-    res.status(code).json({ error: err.message });
-  }
+function feedbackTables(inspire_database) {
+  const parsedDb = splitInspireDatabase(inspire_database);
+  if (!parsedDb) return null;
+  const prefix = `\`${parsedDb.catalog}\`.\`${parsedDb.schema}\``;
+  return { feedback: `${prefix}.\`__inspire_feedback\``, session: `${prefix}.\`__inspire_session\`` };
 }
 
-app.post('/api/inspire/generate-genie', requireToken, handleInspireGenerateGenie);
-app.post('/api/inspire/generate_genie', requireToken, handleInspireGenerateGenie);
+app.post('/api/inspire/feedback', requireToken, async (req, res) => {
+  try {
+    const { inspire_database, warehouse_id } = req.body || {};
+    const tables = feedbackTables(inspire_database);
+    if (!tables || !warehouse_id) {
+      return res.status(400).json({ error: 'inspire_database (catalog.schema) and warehouse_id required.' });
+    }
+    const values = validateFeedbackBody(req.body);
+    const lookup = sessionBusinessStatement(tables.session, values.sessionId);
+    const sessionRows = sqlResultToObjects(await executeSql(req.dbHost, req.dbToken, warehouse_id, lookup.sql, lookup.parameters));
+    if (!sessionRows.length) return res.status(404).json({ error: `Session ${values.sessionId} not found.` });
+    const insert = feedbackInsertStatement(tables.feedback, values, sessionRows[0].business_name,
+      req.headers['x-forwarded-email']);
+    await executeSqlWithDeltaRetry(req.dbHost, req.dbToken, warehouse_id, insert.sql,
+      { maxAttempts: 6, baseDelayMs: 120, parameters: insert.parameters });
+    res.json({ success: true, available: true, status: values.status, use_case_key: values.useCaseKey });
+  } catch (err) {
+    if (err.statusCode === 400) return res.status(400).json({ error: err.message });
+    if (isMissingTableError(err)) return res.status(409).json({ available: false, error: FEEDBACK_NOT_AVAILABLE });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/inspire/feedback', requireToken, async (req, res) => {
+  try {
+    const { inspire_database, warehouse_id, business_name } = req.query;
+    const tables = feedbackTables(inspire_database);
+    if (!tables || !warehouse_id || !String(business_name || '').trim()) {
+      return res.status(400).json({ error: 'inspire_database (catalog.schema), warehouse_id and business_name required.' });
+    }
+    const query = feedbackHistoryStatement(tables.feedback, business_name);
+    const history = sqlResultToObjects(await executeSql(req.dbHost, req.dbToken, warehouse_id, query.sql, query.parameters));
+    res.json({ available: true, history, latest: latestFeedbackByKey(history) });
+  } catch (err) {
+    if (isMissingTableError(err)) return res.json({ available: false, history: [], latest: [], message: FEEDBACK_NOT_AVAILABLE });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+registerImplementRoutes(app, {
+  requireToken,
+  executeSql,
+  executeSqlWithDeltaRetry,
+  sqlResultToObjects,
+  dbFetch,
+  fetchInspireSessionWidgetRow,
+  notebookParamsFromSessionForGenerateRun,
+  triggerInspireNotebookJob,
+  splitInspireDatabase,
+  databricksJobRunUrl,
+  ensureTableColumns,
+  runRoute1GenieFlagUpdates,
+});
 
 /**
  * Sync Route 1 flags to Delta while selecting (debounced in UI). Same SQL as generate-genie minus the job.
@@ -2876,6 +2727,7 @@ app.get('/api/inspire/genie-progress', requireToken, async (req, res) => {
 app.get('/api/inspire/results', requireToken, async (req, res) => {
   try {
     const { inspire_database, warehouse_id, session_id } = req.query;
+    if (invalidSessionId(session_id)) return res.status(400).json({ error: 'session_id must be numeric.' });
     if (!inspire_database || !warehouse_id) {
       return res.status(400).json({ error: 'inspire_database and warehouse_id required.' });
     }
@@ -3002,6 +2854,7 @@ app.get('/api/inspire/sessions', requireToken, async (req, res) => {
 app.delete('/api/inspire/session', requireToken, async (req, res) => {
   try {
     const { inspire_database, warehouse_id, session_id } = req.query;
+    if (invalidSessionId(session_id)) return res.status(400).json({ error: 'session_id must be numeric.' });
     if (!inspire_database || !warehouse_id || !session_id) {
       return res.status(400).json({ error: 'inspire_database, warehouse_id, and session_id required.' });
     }

@@ -10,10 +10,12 @@ import {
   Terminal,
   ChevronDown,
   MessageSquareText,
+  Eye,
 } from 'lucide-react';
 import DatabricksLogo from '../components/DatabricksLogo';
 import { useTheme } from '../ThemeContext';
 import { Sun, Moon } from 'lucide-react';
+import { SHOWCASE_BUTTON } from '../lib/showcase';
 
 /* ═══════════════════════════════════════════════════
    DATA
@@ -94,13 +96,20 @@ const TERMINAL_LINES = [
   { text: 'Run complete in 4m 23s', delay: 8000, color: '#FF3621' },
 ];
 
+const TONES = {
+  red: { dot: 'var(--color-db-red)', bg: 'var(--color-db-red-50)', fg: 'var(--t-db-red-fg)' },
+  warning: { dot: 'var(--color-warning)', bg: 'var(--t-warning-bg)', fg: 'var(--t-warning-fg)' },
+  success: { dot: 'var(--color-success)', bg: 'var(--t-success-bg)', fg: 'var(--t-success-fg)' },
+  info: { dot: 'var(--color-info)', bg: 'var(--t-info-bg)', fg: 'var(--t-info-fg)' },
+};
+
 const USE_CASES = [
-  { title: 'Predict Customer Churn', priority: 'Ultra High', domain: 'Customer Intelligence', color: '#FF3621' },
-  { title: 'Detect Fraud Patterns', priority: 'Ultra High', domain: 'Risk & Compliance', color: '#EAB308' },
-  { title: 'Forecast Inventory Demand', priority: 'Very High', domain: 'Operations', color: '#22C55E' },
-  { title: 'Optimize Revenue Leakage', priority: 'Very High', domain: 'Financial Analytics', color: '#3B82F6' },
-  { title: 'Classify Customer Segments', priority: 'High', domain: 'Customer Intelligence', color: '#FF3621' },
-  { title: 'Predict Equipment Failure', priority: 'High', domain: 'Operations', color: '#22C55E' },
+  { title: 'Predict Customer Churn', priority: 'Ultra High', domain: 'Customer Intelligence', tone: 'red' },
+  { title: 'Detect Fraud Patterns', priority: 'Ultra High', domain: 'Risk & Compliance', tone: 'warning' },
+  { title: 'Forecast Inventory Demand', priority: 'Very High', domain: 'Operations', tone: 'success' },
+  { title: 'Optimize Revenue Leakage', priority: 'Very High', domain: 'Financial Analytics', tone: 'info' },
+  { title: 'Classify Customer Segments', priority: 'High', domain: 'Customer Intelligence', tone: 'red' },
+  { title: 'Predict Equipment Failure', priority: 'High', domain: 'Operations', tone: 'success' },
 ];
 
 const PIPELINE_STEPS = [
@@ -180,8 +189,6 @@ function useScrollProgress(containerRef) {
 
 /* Floating schema names background */
 function FloatingSchemas({ opacity = 0.04 }) {
-  const { theme } = useTheme();
-  const schemaColor = theme === 'dark' ? '#FFF8ED' : '#1A1A1F';
   return (
     <div className="absolute inset-0 overflow-hidden pointer-events-none" aria-hidden="true">
       {FLOATING_SCHEMAS.map((schema, i) => {
@@ -196,7 +203,7 @@ function FloatingSchemas({ opacity = 0.04 }) {
               top: `${top}%`,
               right: '-300px',
               opacity,
-              color: schemaColor,
+              color: C.text,
               animationDuration: `${dur}s`,
               animationDelay: `${delay}s`,
             }}
@@ -547,12 +554,12 @@ function UseCaseCard({ uc, index, visible, palette }) {
       }`}
       style={{ transitionDelay: `${index * 120}ms`, background: palette.cardBg, border: `1px solid ${palette.cardBorder}` }}
     >
-      <div className="w-2 h-2 rounded-full shrink-0" style={{ background: uc.color }} />
+      <div className="w-2 h-2 rounded-full shrink-0" style={{ background: TONES[uc.tone].dot }} />
       <div className="flex-1 min-w-0">
         <p className="text-sm font-semibold truncate" style={{ color: palette.text }}>{uc.title}</p>
         <p className="text-[11px]" style={{ color: palette.textMuted }}>{uc.domain}</p>
       </div>
-      <span className="text-[10px] font-bold px-2.5 py-1 rounded-full shrink-0" style={{ background: `${uc.color}20`, color: uc.color }}>
+      <span className="text-[10px] font-bold px-2.5 py-1 rounded-full shrink-0" style={{ background: TONES[uc.tone].bg, color: TONES[uc.tone].fg }}>
         {uc.priority}
       </span>
     </div>
@@ -563,54 +570,47 @@ function UseCaseCard({ uc, index, visible, palette }) {
    LANDING PAGE
    ═══════════════════════════════════════════════════ */
 
-// Theme-aware color palette for the landing page
-const LIGHT_PALETTE = {
-  pageBg: '#F7F7F8',
-  text: '#1A1A1F',
-  textMuted: '#5C5C66',
-  textFaint: '#B0B0B8',
-  navBg: 'rgba(247,247,248,0.7)',
-  navBorder: 'rgba(0,0,0,0.06)',
-  btnBg: 'rgba(0,0,0,0.04)',
-  btnBorder: 'rgba(0,0,0,0.08)',
-  btnHoverBg: 'rgba(0,0,0,0.08)',
-  gridStroke: '#1A1A1F',
-  cardBg: 'rgba(0,0,0,0.03)',
-  cardBorder: 'rgba(0,0,0,0.08)',
-  termBg: '#FFFFFF',
-  termHeaderBg: '#F0F0F3',
-  termBorder: 'rgba(0,0,0,0.10)',
-};
-const DARK_PALETTE = {
-  pageBg: '#0A0808',
-  text: '#FFF8ED',
-  textMuted: '#ABABAB',
-  textFaint: '#666',
-  navBg: 'rgba(10,8,8,0.7)',
-  navBorder: 'rgba(255,248,237,0.05)',
-  btnBg: 'rgba(255,248,237,0.06)',
-  btnBorder: 'rgba(255,248,237,0.08)',
-  btnHoverBg: 'rgba(255,248,237,0.1)',
-  gridStroke: '#FFF8ED',
-  cardBg: 'rgba(255,255,255,0.03)',
-  cardBorder: 'rgba(255,255,255,0.06)',
-  termBg: 'rgba(0,0,0,0.4)',
-  termHeaderBg: 'rgba(255,255,255,0.04)',
-  termBorder: 'rgba(255,255,255,0.06)',
+const C = {
+  pageBg: 'var(--t-bg)',
+  text: 'var(--t-text-primary)',
+  textMuted: 'var(--t-text-secondary)',
+  textFaint: 'var(--t-text-tertiary)',
+  navBg: 'color-mix(in srgb, var(--t-bg) 70%, transparent)',
+  navBorder: 'var(--t-border-subtle)',
+  btnBg: 'var(--t-bg-subtle)',
+  btnBorder: 'var(--t-border)',
+  gridStroke: 'var(--t-text-primary)',
+  cardBg: 'var(--t-bg-subtle)',
+  cardBorder: 'var(--t-border)',
 };
 
-export default function LandingPage({ onStart, onOpenSetup }) {
+function DemoButton({ onDemo, large = false, className = '' }) {
+  if (!onDemo) return null;
+  return (
+    <button
+      type="button"
+      onClick={onDemo}
+      aria-label={SHOWCASE_BUTTON}
+      className={`group inline-flex items-center gap-2.5 font-semibold rounded-xl transition-all duration-300 hover:-translate-y-0.5 ${large ? 'px-10 py-5 text-base' : 'px-8 py-4 text-sm'} ${className}`}
+      style={{ color: C.text, backgroundColor: C.btnBg, border: `1px solid ${C.btnBorder}` }}
+    >
+      <Eye size={large ? 18 : 16} aria-hidden="true" />
+      {SHOWCASE_BUTTON}
+    </button>
+  );
+}
+
+export default function LandingPage({ onStart, onOpenSetup, onDemo }) {
   const typedText = useTypingEffect(HERO_WORDS);
   const scrollContainerRef = useRef(null);
   const { progress, section } = useScrollProgress(scrollContainerRef);
   const { theme, toggle } = useTheme();
-  const C = theme === 'dark' ? DARK_PALETTE : LIGHT_PALETTE;
 
   return (
     <div className="h-screen overflow-hidden relative" style={{ backgroundColor: C.pageBg, color: C.text }}>
       {/* ═══ Progress bar ═══ */}
       <div className="fixed top-0 left-0 right-0 z-[100] h-[2px]">
-        <div className="h-full bg-gradient-to-r from-[#FF3621] to-[#FF8A6B]" style={{ width: `${progress * 100}%`, transition: 'width 0.15s' }} />
+        <div className="h-full bg-gradient-to-r from-db-red to-db-red-hover" style={{ width: `${progress * 100}%`, transition: 'width 0.15s' }} />
       </div>
 
       {/* ═══ The Inspire Orb — persistent scroll-linked object ═══ */}
@@ -622,7 +622,7 @@ export default function LandingPage({ onStart, onOpenSetup }) {
           <div className="flex items-center gap-3">
             <DatabricksLogo className="w-8 h-8" />
             <span className="font-bold text-xl tracking-[-0.03em]" style={{ color: C.text }}>Inspire AI</span>
-            <span className="text-[10px] font-semibold text-[#FF3621] border border-[#FF3621]/30 bg-[#FF3621]/10 rounded-full px-2 py-0.5">V9</span>
+            <span className="text-[10px] font-semibold text-db-red-fg border border-db-red/30 bg-db-red-50 rounded-full px-2 py-0.5">V9</span>
           </div>
           {/* Section indicators */}
           <div className="hidden md:flex items-center gap-1.5">
@@ -635,8 +635,8 @@ export default function LandingPage({ onStart, onOpenSetup }) {
                 }}
                 className="px-3 py-1.5 rounded-full text-[11px] font-medium transition-all duration-300"
                 style={{
-                  color: section === i ? '#FF3621' : C.textMuted,
-                  backgroundColor: section === i ? 'rgba(255,54,33,0.15)' : 'transparent',
+                  color: section === i ? 'var(--t-db-red-fg)' : C.textMuted,
+                  backgroundColor: section === i ? 'var(--color-db-red-50)' : 'transparent',
                 }}
               >
                 {label}
@@ -676,8 +676,8 @@ export default function LandingPage({ onStart, onOpenSetup }) {
         <section className="h-screen snap-start relative flex items-center justify-center overflow-hidden">
           <FloatingSchemas opacity={0.03} />
           {/* Ambient glow */}
-          <div className="absolute top-[-20%] left-[-10%] w-[60%] h-[60%] rounded-full bg-[#FF3621]/[0.05] blur-[150px] animate-ambient-float" aria-hidden="true" />
-          <div className="absolute bottom-[-10%] right-[10%] w-[40%] h-[40%] rounded-full bg-[#FF6B50]/[0.03] blur-[120px] animate-ambient-float-delayed" aria-hidden="true" />
+          <div className="absolute top-[-20%] left-[-10%] w-[60%] h-[60%] rounded-full bg-db-red/[0.05] blur-[150px] animate-ambient-float" aria-hidden="true" />
+          <div className="absolute bottom-[-10%] right-[10%] w-[40%] h-[40%] rounded-full bg-db-red/[0.03] blur-[120px] animate-ambient-float-delayed" aria-hidden="true" />
 
           <div className="relative z-10 max-w-7xl mx-auto px-6 w-full pt-20">
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-12 items-center">
@@ -685,16 +685,16 @@ export default function LandingPage({ onStart, onOpenSetup }) {
               <div>
                 <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full mb-8" style={{ background: C.btnBg, border: `1px solid ${C.btnBorder}` }}>
                   <span className="relative flex h-2 w-2">
-                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#FF3621] opacity-60" />
-                    <span className="relative inline-flex rounded-full h-2 w-2 bg-[#FF3621]" />
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-db-red opacity-60" />
+                    <span className="relative inline-flex rounded-full h-2 w-2 bg-db-red" />
                   </span>
                   <span className="text-[11px] font-medium" style={{ color: C.textMuted }}>Powered by Databricks Foundation Models</span>
                 </div>
 
                 <h1 className="text-4xl sm:text-5xl lg:text-6xl font-bold leading-[1.08] tracking-[-0.04em] mb-6">
                   Discover{' '}
-                  <span className="bg-gradient-to-r from-[#FF3621] to-[#FF8A6B] bg-clip-text text-transparent">{typedText}</span>
-                  <span className="text-[#FF3621] animate-cursor-blink">|</span>
+                  <span className="bg-gradient-to-r from-db-red-fg to-db-red bg-clip-text text-transparent">{typedText}</span>
+                  <span className="text-db-red-fg animate-cursor-blink">|</span>
                   <br />
                   <span style={{ color: C.textMuted }}>from your data.</span>
                 </h1>
@@ -703,15 +703,18 @@ export default function LandingPage({ onStart, onOpenSetup }) {
                   AI-powered analytics use case discovery from your Unity Catalog metadata. Scored, prioritized, and implementation-ready.
                 </p>
 
-                <button
-                  onClick={onStart}
-                  aria-label="Get Started"
-                  className="group inline-flex items-center gap-2.5 px-8 py-4 bg-gradient-to-r from-[#FF3621] to-[#E02E1B] text-white text-sm font-bold rounded-xl transition-all duration-300 hover:-translate-y-0.5"
-                  style={{ boxShadow: '0 0 0 1px rgba(255,54,33,0.3), 0 4px 12px rgba(255,54,33,0.2), 0 8px 30px rgba(255,54,33,0.15), 0 20px 60px rgba(255,54,33,0.1)' }}
-                >
-                  Get Started
-                  <ArrowRight size={16} className="group-hover:translate-x-0.5 transition-transform duration-300" />
-                </button>
+                <div className="flex flex-wrap items-center gap-3">
+                  <button
+                    onClick={onStart}
+                    aria-label="Get Started"
+                    className="group inline-flex items-center gap-2.5 px-8 py-4 bg-gradient-to-r from-db-red-solid to-db-red-solid-hover text-white text-sm font-bold rounded-xl transition-all duration-300 hover:-translate-y-0.5"
+                    style={{ boxShadow: '0 0 0 1px rgba(255,54,33,0.3), 0 4px 12px rgba(255,54,33,0.2), 0 8px 30px rgba(255,54,33,0.15), 0 20px 60px rgba(255,54,33,0.1)' }}
+                  >
+                    Get Started
+                    <ArrowRight size={16} className="group-hover:translate-x-0.5 transition-transform duration-300" />
+                  </button>
+                  <DemoButton onDemo={onDemo} />
+                </div>
 
                 <aside className="mt-5 max-w-lg space-y-3" aria-label="Setup and legal disclaimer">
                   <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm" style={{ color: C.textFaint }}>
@@ -721,7 +724,7 @@ export default function LandingPage({ onStart, onOpenSetup }) {
                       <button
                         type="button"
                         onClick={onOpenSetup}
-                        className="text-[#FF3621] font-medium hover:underline ml-1"
+                        className="text-db-red-fg font-medium hover:underline ml-1"
                       >
                         Workspace setup
                       </button>
@@ -742,7 +745,7 @@ export default function LandingPage({ onStart, onOpenSetup }) {
               {/* Right: AI Vision Hero Image */}
               <div className="hidden lg:block relative">
                 {/* Glow behind image */}
-                <div className="absolute inset-0 bg-[#FF3621]/[0.08] blur-[80px] rounded-full scale-75" aria-hidden="true" />
+                <div className="absolute inset-0 bg-db-red/[0.08] blur-[80px] rounded-full scale-75" aria-hidden="true" />
                 <img
                   src="/hero-vision.jpg"
                   alt="AI discovering insights through data"
@@ -759,9 +762,9 @@ export default function LandingPage({ onStart, onOpenSetup }) {
           </div>
 
           {/* Scroll hint */}
-          <div className="absolute bottom-8 left-1/2 -translate-x-1/2 flex flex-col items-center gap-2 animate-pulse">
+          <div className="absolute bottom-8 left-1/2 -translate-x-1/2 flex flex-col items-center gap-2">
             <span className="text-[10px] font-medium text-text-tertiary uppercase tracking-[0.15em]">Scroll to explore</span>
-            <ChevronDown size={16} className="text-text-tertiary" />
+            <ChevronDown size={16} className="text-text-tertiary animate-pulse" />
           </div>
         </section>
 
@@ -772,7 +775,7 @@ export default function LandingPage({ onStart, onOpenSetup }) {
 
           <div className="relative z-10 max-w-6xl mx-auto px-6 w-full">
             <div className="text-center mb-8">
-              <span className="text-[11px] font-medium text-[#FF3621] uppercase tracking-[0.15em] block mb-3">How Inspire Thinks</span>
+              <span className="text-[11px] font-medium text-db-red-fg uppercase tracking-[0.15em] block mb-3">How Inspire Thinks</span>
               <h2 className={`text-3xl sm:text-4xl lg:text-5xl font-bold tracking-[-0.03em] transition-all duration-1000 ${section >= 1 ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-8'}`}>
                 Your tables.{' '}
                 <span className="text-text-tertiary">Connected.</span>
@@ -805,11 +808,11 @@ export default function LandingPage({ onStart, onOpenSetup }) {
         {/* ═══ SECTION 3: Pipeline — "Insights" ═══ */}
         <section className="h-screen snap-start relative flex items-center justify-center overflow-hidden">
           <div className="absolute inset-0" style={{ background: C.pageBg }} />
-          <div className="absolute top-[30%] right-[-5%] w-[30%] h-[30%] rounded-full bg-[#FF3621]/[0.03] blur-[100px]" aria-hidden="true" />
+          <div className="absolute top-[30%] right-[-5%] w-[30%] h-[30%] rounded-full bg-db-red/[0.03] blur-[100px]" aria-hidden="true" />
 
           <div className="relative z-10 max-w-5xl mx-auto px-6 w-full">
             <div className="text-center mb-16">
-              <span className="text-[11px] font-medium text-[#FF3621] uppercase tracking-[0.15em] block mb-3">The Pipeline</span>
+              <span className="text-[11px] font-medium text-db-red-fg uppercase tracking-[0.15em] block mb-3">The Pipeline</span>
               <h2 className={`text-3xl sm:text-4xl lg:text-5xl font-bold tracking-[-0.03em] transition-all duration-1000 ${section >= 2 ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-8'}`}>
                 From catalog to strategy{' '}
                 <span className="text-text-tertiary">in minutes.</span>
@@ -821,13 +824,13 @@ export default function LandingPage({ onStart, onOpenSetup }) {
               {PIPELINE_STEPS.map((step, i) => (
                 <div key={step.label} className="flex items-center gap-2 sm:gap-2">
                   <div
-                    className={`flex items-center gap-3 px-6 py-4 rounded-2xl transition-all duration-700 hover:border-[#FF3621]/20 group ${
+                    className={`flex items-center gap-3 px-6 py-4 rounded-2xl transition-all duration-700 hover:border-db-red/20 group ${
                       section >= 2 ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-8'
                     }`}
                     style={{ background: C.cardBg, border: `1px solid ${C.cardBorder}`, transitionDelay: `${i * 150}ms` }}
                   >
-                    <div className="w-10 h-10 rounded-xl bg-[#FF3621]/10 flex items-center justify-center">
-                      <step.icon size={20} className="text-[#FF3621] group-hover:scale-110 transition-transform" />
+                    <div className="w-10 h-10 rounded-xl bg-db-red/10 flex items-center justify-center">
+                      <step.icon size={20} className="text-db-red-fg group-hover:scale-110 transition-transform" />
                     </div>
                     <div>
                       <span className="text-[10px] text-text-tertiary font-mono">0{i + 1}</span>
@@ -847,8 +850,8 @@ export default function LandingPage({ onStart, onOpenSetup }) {
         <section className="h-screen snap-start relative flex items-center justify-center overflow-hidden">
           <div className="absolute inset-0" style={{ background: C.pageBg }} />
           {/* Subtle blue-ish glow to match the robot's lighting */}
-          <div className="absolute top-[20%] left-[30%] w-[40%] h-[50%] rounded-full bg-[#1a2a4a]/[0.15] blur-[120px]" aria-hidden="true" />
-          <div className="absolute bottom-[10%] right-[20%] w-[25%] h-[30%] rounded-full bg-[#FF3621]/[0.04] blur-[100px]" aria-hidden="true" />
+          <div className="absolute top-[20%] left-[30%] w-[40%] h-[50%] rounded-full bg-info/[0.06] blur-[120px]" aria-hidden="true" />
+          <div className="absolute bottom-[10%] right-[20%] w-[25%] h-[30%] rounded-full bg-db-red/[0.04] blur-[100px]" aria-hidden="true" />
 
           <div className="relative z-10 max-w-7xl mx-auto px-6 w-full">
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 items-center">
@@ -866,10 +869,10 @@ export default function LandingPage({ onStart, onOpenSetup }) {
 
               {/* Right: Text */}
               <div className={`transition-all duration-1000 delay-300 ${section >= 3 ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-8'}`}>
-                <span className="text-[11px] font-medium text-[#FF3621] uppercase tracking-[0.15em] block mb-4">Meet the Agent</span>
+                <span className="text-[11px] font-medium text-db-red-fg uppercase tracking-[0.15em] block mb-4">Meet the Agent</span>
                 <h2 className="text-3xl sm:text-4xl lg:text-5xl font-bold tracking-[-0.03em] leading-[1.1] mb-6">
                   Your AI-powered{' '}
-                  <span className="bg-gradient-to-r from-[#FF3621] to-[#FF8A6B] bg-clip-text text-transparent">data strategist.</span>
+                  <span className="bg-gradient-to-r from-db-red-fg to-db-red bg-clip-text text-transparent">data strategist.</span>
                 </h2>
                 <p className="text-base leading-relaxed mb-8 max-w-md" style={{ color: C.textMuted }}>
                   Inspire AI works like a senior data consultant — scanning your entire Unity Catalog, understanding table relationships, and delivering a prioritized analytics strategy tailored to your business.
@@ -899,10 +902,10 @@ export default function LandingPage({ onStart, onOpenSetup }) {
 
           <div className="relative z-10 max-w-5xl mx-auto px-6 w-full">
             <div className="text-center mb-12">
-              <span className="text-[11px] font-medium text-[#FF3621] uppercase tracking-[0.15em] block mb-3">What You Get</span>
+              <span className="text-[11px] font-medium text-db-red-fg uppercase tracking-[0.15em] block mb-3">What You Get</span>
               <h2 className={`text-3xl sm:text-4xl lg:text-5xl font-bold tracking-[-0.03em] transition-all duration-1000 ${section >= 4 ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-8'}`}>
                 Scored. Prioritized.{' '}
-                <span className="bg-gradient-to-r from-[#FF3621] to-[#FF8A6B] bg-clip-text text-transparent">Ready.</span>
+                <span className="bg-gradient-to-r from-db-red-fg to-db-red bg-clip-text text-transparent">Ready.</span>
               </h2>
             </div>
 
@@ -921,13 +924,13 @@ export default function LandingPage({ onStart, onOpenSetup }) {
         {/* ═══ SECTION 6: CTA — "Start" ═══ */}
         <section className="h-screen snap-start relative flex items-center justify-center overflow-hidden">
           <div className="absolute inset-0" style={{ background: C.pageBg }} />
-          <div className="absolute top-[40%] left-[40%] w-[30%] h-[30%] rounded-full bg-[#FF3621]/[0.06] blur-[120px]" aria-hidden="true" />
+          <div className="absolute top-[40%] left-[40%] w-[30%] h-[30%] rounded-full bg-db-red/[0.06] blur-[120px]" aria-hidden="true" />
 
           <div className="relative z-10 text-center max-w-2xl mx-auto px-6">
             <h2 className={`text-4xl sm:text-5xl lg:text-6xl font-bold tracking-[-0.03em] leading-[1.1] mb-6 transition-all duration-1000 ${section >= 5 ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-8'}`}>
               <span style={{ color: C.textFaint }}>Your data already has the answers.</span>
               <br />
-              <span className="bg-gradient-to-r from-[#FF3621] to-[#FF8A6B] bg-clip-text text-transparent">Inspire finds the questions.</span>
+              <span className="bg-gradient-to-r from-db-red-fg to-db-red bg-clip-text text-transparent">Inspire finds the questions.</span>
             </h2>
 
             <p className={`mb-10 transition-all duration-700 delay-200 ${section >= 5 ? 'opacity-100' : 'opacity-0'}`} style={{ color: C.textMuted }}>
@@ -937,7 +940,7 @@ export default function LandingPage({ onStart, onOpenSetup }) {
             <button
               onClick={onStart}
               aria-label="Get Started"
-              className={`group inline-flex items-center gap-2.5 px-10 py-5 bg-gradient-to-r from-[#FF3621] to-[#E02E1B] text-white text-base font-bold rounded-xl transition-all duration-700 hover:-translate-y-1 ${section >= 5 ? 'opacity-100 scale-100' : 'opacity-0 scale-95'}`}
+              className={`group inline-flex items-center gap-2.5 px-10 py-5 bg-gradient-to-r from-db-red-solid to-db-red-solid-hover text-white text-base font-bold rounded-xl transition-all duration-700 hover:-translate-y-1 ${section >= 5 ? 'opacity-100 scale-100' : 'opacity-0 scale-95'}`}
               style={{
                 transitionDelay: '400ms',
                 boxShadow: '0 0 0 1px rgba(255,54,33,0.4), 0 4px 15px rgba(255,54,33,0.25), 0 10px 40px rgba(255,54,33,0.2), 0 20px 70px rgba(255,54,33,0.15), 0 40px 100px rgba(255,54,33,0.1)',
@@ -946,6 +949,7 @@ export default function LandingPage({ onStart, onOpenSetup }) {
               Get Started
               <ArrowRight size={18} className="group-hover:translate-x-1 transition-transform duration-300" />
             </button>
+            <DemoButton onDemo={onDemo} large className={`ml-3 ${section >= 5 ? 'opacity-100' : 'opacity-0'}`} />
 
             <div className="flex items-center justify-center gap-3 mt-12">
               {['Unity Catalog', 'Foundation Models', 'Genie'].map((tag) => (

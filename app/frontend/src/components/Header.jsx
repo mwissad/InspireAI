@@ -6,6 +6,7 @@ const NAV = [
   { id: 'choose', label: 'Get Started', step: 1 },
   { id: 'monitor', label: 'Monitor', step: 2 },
   { id: 'results', label: 'Results', step: 3 },
+  { id: 'implement', label: 'Build', step: 4 },
 ];
 
 export default function Header({
@@ -14,12 +15,14 @@ export default function Header({
   canLaunch,
   canMonitor,
   canResults,
+  canImplement,
 }) {
   const { theme, toggle } = useTheme();
   const enabled = {
     choose: true,
     monitor: canMonitor,
     results: canResults || true,
+    implement: canImplement,
   };
 
   return (
@@ -35,7 +38,7 @@ export default function Header({
             <span className="text-text-primary font-bold text-xl tracking-tight">
               Inspire AI
             </span>
-            <span className="text-[10px] font-semibold text-db-red border border-db-red/30 bg-db-red-50 rounded-full px-2 py-0.5 ml-0.5">
+            <span className="text-[10px] font-semibold text-db-red-fg border border-db-red/30 bg-db-red-50 rounded-full px-2 py-0.5 ml-0.5">
               V9
             </span>
           </button>
@@ -53,7 +56,7 @@ export default function Header({
                   className={`
                     relative px-4 py-2 text-sm font-medium rounded-md transition-smooth
                     ${active
-                      ? 'text-db-red bg-db-red-50'
+                      ? 'text-db-red-fg bg-db-red-50'
                       : can
                         ? 'text-text-secondary hover:text-text-primary hover:bg-bg-subtle'
                         : 'text-text-disabled cursor-not-allowed'
@@ -62,7 +65,7 @@ export default function Header({
                 >
                   <span className="flex items-center gap-1.5">
                     {item.step && (
-                      <span className={`text-xs font-mono ${active ? 'text-db-red' : 'opacity-50'}`}>
+                      <span className={`text-xs font-mono ${active ? 'text-db-red-fg' : can ? 'text-text-tertiary' : 'opacity-50'}`}>
                         {String(item.step).padStart(2, '0')}
                       </span>
                     )}
@@ -80,7 +83,7 @@ export default function Header({
           <div className="flex items-center gap-1">
             <button
               onClick={toggle}
-              className="p-2 rounded-md text-text-secondary hover:text-db-red hover:bg-db-red-50 transition-smooth"
+              className="p-2 rounded-md text-text-secondary hover:text-db-red-fg hover:bg-db-red-50 transition-smooth"
               title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
             >
               {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}

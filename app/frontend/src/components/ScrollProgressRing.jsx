@@ -34,7 +34,7 @@ export default function ScrollProgressRing() {
           strokeDashoffset={offset}
         />
       </svg>
-      <span className="absolute inset-0 flex items-center justify-center text-[8px] font-bold text-db-red">
+      <span className="absolute inset-0 flex items-center justify-center text-[8px] font-bold text-db-red-fg">
         {Math.round(progress * 100)}
       </span>
     </div>

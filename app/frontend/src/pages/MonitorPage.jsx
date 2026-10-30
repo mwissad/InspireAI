@@ -19,6 +19,9 @@ import {
   BarChart3,
 } from 'lucide-react';
 import ResultsPage from './ResultsPage';
+import { countEntries, parseStrategicContext, treeDepth } from '../lib/strategyContext';
+import { formatDuration } from '../lib/formatWhen';
+import { responseError } from '../lib/apiClient';
 
 // Run lifecycle phases
 const PHASE_PENDING = 'PENDING';
@@ -28,13 +31,13 @@ const PHASE_TERMINATED = 'TERMINATED';
 // Filter presets
 const STATUS_FILTERS = [
   { key: 'all', label: 'All', color: 'text-text-secondary' },
-  { key: 'running', label: 'In Progress', color: 'text-info' },
-  { key: 'success', label: 'Success', color: 'text-success' },
-  { key: 'warning', label: 'Warning', color: 'text-warning' },
-  { key: 'error', label: 'Error', color: 'text-error' },
+  { key: 'running', label: 'In Progress', color: 'text-info-fg' },
+  { key: 'success', label: 'Success', color: 'text-success-fg' },
+  { key: 'warning', label: 'Warning', color: 'text-warning-fg' },
+  { key: 'error', label: 'Error', color: 'text-error-fg' },
 ];
 
-export default function MonitorPage({ settings, update, sessionId, runId, onComplete }) {
+export default function MonitorPage({ settings, update, sessionId, runId, onComplete, onResultsSession, onOpenImplement }) {
   const { databricksHost, token, warehouseId, inspireDatabase } = settings;
 
   // Run-level state
@@ -75,7 +78,7 @@ export default function MonitorPage({ settings, update, sessionId, runId, onComp
       }
       if (databricksHost) headers['X-Databricks-Host'] = databricksHost;
       const resp = await fetch(url, { ...opts, headers });
-      if (!resp.ok) throw new Error(`${resp.status}`);
+      if (!resp.ok) throw await responseError(resp);
       return resp.json();
     },
     [token, databricksHost]
@@ -373,13 +376,13 @@ export default function MonitorPage({ settings, update, sessionId, runId, onComp
             <StatusIcon isPending={isPending} isRunning={isRunning} isComplete={isComplete} isFailed={isFailed} />
             <div>
               <span className={`text-base font-bold ${
-                isComplete ? 'text-success' : isFailed ? 'text-error' : 'text-text-primary'
+                isComplete ? 'text-success-fg' : isFailed ? 'text-error-fg' : 'text-text-primary'
               }`}>
                 {statusLabel}
               </span>
               {statusDetail && (
                 <p className={`text-xs mt-0.5 ${
-                  isComplete ? 'text-success' : isFailed ? 'text-error' : 'text-text-secondary'
+                  isComplete ? 'text-success-fg' : isFailed ? 'text-error-fg' : 'text-text-secondary'
                 }`}>
                   {statusDetail}
                 </p>
@@ -395,17 +398,17 @@ export default function MonitorPage({ settings, update, sessionId, runId, onComp
             )}
             {runInfo?.life_cycle_state && (
               <span className={`font-mono px-2.5 py-1 rounded-lg font-medium text-[11px] ${
-                isComplete ? 'bg-success-bg text-success' :
-                isFailed ? 'bg-error-bg text-error' :
-                isPending ? 'bg-info-bg text-info' :
-                'bg-db-red-50 text-db-red'
+                isComplete ? 'bg-success-bg text-success-fg' :
+                isFailed ? 'bg-error-bg text-error-fg' :
+                isPending ? 'bg-info-bg text-info-fg' :
+                'bg-db-red-50 text-db-red-fg'
               }`}>
                 {isComplete ? 'SUCCESS' : runInfo.life_cycle_state}
                 {!isComplete && runInfo.result_state ? ` / ${runInfo.result_state}` : ''}
               </span>
             )}
             {isRunning && (
-              <span className="font-mono text-lg font-bold text-db-red">
+              <span className="font-mono text-lg font-bold text-db-red-fg">
                 {Math.round(percent)}%
               </span>
             )}
@@ -431,7 +434,7 @@ export default function MonitorPage({ settings, update, sessionId, runId, onComp
         {/* Latest activity line */}
         {latestStep && isRunning && (
           <div className="mt-3 flex items-center gap-2">
-            <Activity size={11} className="text-db-red shrink-0 animate-pulse" />
+            <Activity size={11} className="text-db-red-fg shrink-0 animate-pulse" />
             <p className="text-[11px] text-text-secondary font-mono truncate">
               <span className="text-text-tertiary">{latestStep.stage_name}</span>
               {' → '}
@@ -445,12 +448,13 @@ export default function MonitorPage({ settings, update, sessionId, runId, onComp
         {runInfo?.run_name && !latestStep && (
           <p className="text-[11px] text-text-tertiary mt-3 font-mono">{runInfo.run_name}</p>
         )}
+        <RunSetupSummary widgetValues={session?.widget_values} />
       </div>
 
       {/* Pending info */}
       {isPending && (
         <div className="bg-info-bg border border-info/20 rounded-xl p-5 mb-6 flex items-start gap-3">
-          <Clock size={16} className="text-info mt-0.5 shrink-0" />
+          <Clock size={16} className="text-info-fg mt-0.5 shrink-0" />
           <div>
             <p className="text-sm font-semibold text-text-primary">Job is queued</p>
             <p className="text-xs text-text-secondary mt-1">
@@ -475,8 +479,8 @@ export default function MonitorPage({ settings, update, sessionId, runId, onComp
               <h2 className="text-sm font-bold text-text-primary">Detailed Steps</h2>
               <p className="text-xs text-text-secondary">
                 {stageNames.length} stage{stageNames.length !== 1 ? 's' : ''} &middot; {totalCount} step{totalCount !== 1 ? 's' : ''}
-                {statusCounts.running > 0 && <> &middot; <span className="text-info font-medium">{statusCounts.running} in progress</span></>}
-                {statusCounts.error > 0 && <> &middot; <span className="text-error font-medium">{statusCounts.error} error{statusCounts.error > 1 ? 's' : ''}</span></>}
+                {statusCounts.running > 0 && <> &middot; <span className="text-info-fg font-medium">{statusCounts.running} in progress</span></>}
+                {statusCounts.error > 0 && <> &middot; <span className="text-error-fg font-medium">{statusCounts.error} error{statusCounts.error > 1 ? 's' : ''}</span></>}
               </p>
             </div>
             <div className={`transition-transform duration-200 ${showFilters ? 'rotate-180' : ''}`}>
@@ -493,7 +497,7 @@ export default function MonitorPage({ settings, update, sessionId, runId, onComp
               {/* Sidebar header */}
               <div className="px-4 py-3 border-b border-border bg-gradient-to-b from-db-red-50 to-surface">
                 <div className="flex items-center gap-2">
-                  <Layers size={14} className="text-db-red" />
+                  <Layers size={14} className="text-db-red-fg" />
                   <span className="text-xs font-bold text-text-primary">Stages</span>
                 </div>
                 <p className="text-[10px] text-text-tertiary mt-0.5">
@@ -515,16 +519,16 @@ export default function MonitorPage({ settings, update, sessionId, runId, onComp
                   <div className={`w-5 h-5 rounded-full flex items-center justify-center shrink-0 ${
                     stageFilter === 'all' ? 'bg-db-red/10' : 'bg-bg-subtle'
                   }`}>
-                    <Layers size={10} className={stageFilter === 'all' ? 'text-db-red' : 'text-text-tertiary'} />
+                    <Layers size={10} className={stageFilter === 'all' ? 'text-db-red-fg' : 'text-text-tertiary'} />
                   </div>
                   <div className="flex-1 min-w-0">
                     <span className={`text-[11px] font-semibold block ${
-                      stageFilter === 'all' ? 'text-db-red' : 'text-text-primary'
+                      stageFilter === 'all' ? 'text-db-red-fg' : 'text-text-primary'
                     }`}>
                       All Stages
                     </span>
                   </div>
-                  <span className={`text-[10px] font-mono ${stageFilter === 'all' ? 'text-db-red' : 'text-text-tertiary'}`}>
+                  <span className={`text-[10px] font-mono ${stageFilter === 'all' ? 'text-db-red-fg' : 'text-text-tertiary'}`}>
                     {totalCount}
                   </span>
                 </button>
@@ -552,15 +556,15 @@ export default function MonitorPage({ settings, update, sessionId, runId, onComp
                       {/* Status indicator */}
                       {errors > 0 ? (
                         <div className="w-5 h-5 rounded-full bg-error-bg flex items-center justify-center shrink-0 mt-0.5">
-                          <XCircle size={10} className="text-error" />
+                          <XCircle size={10} className="text-error-fg" />
                         </div>
                       ) : running > 0 ? (
                         <div className="w-5 h-5 rounded-full bg-info-bg flex items-center justify-center shrink-0 mt-0.5">
-                          <Loader2 size={10} className="animate-spin text-info" />
+                          <Loader2 size={10} className="animate-spin text-info-fg" />
                         </div>
                       ) : done === total && total > 0 ? (
                         <div className="w-5 h-5 rounded-full bg-success-bg flex items-center justify-center shrink-0 mt-0.5">
-                          <CheckCircle2 size={10} className="text-success" />
+                          <CheckCircle2 size={10} className="text-success-fg" />
                         </div>
                       ) : (
                         <div className="w-5 h-5 rounded-full bg-bg-subtle flex items-center justify-center shrink-0 mt-0.5">
@@ -570,7 +574,7 @@ export default function MonitorPage({ settings, update, sessionId, runId, onComp
 
                       <div className="flex-1 min-w-0">
                         <span className={`text-[11px] font-semibold block truncate ${
-                          active ? 'text-db-red' : 'text-text-primary'
+                          active ? 'text-db-red-fg' : 'text-text-primary'
                         }`}>
                           {name}
                         </span>
@@ -586,7 +590,7 @@ export default function MonitorPage({ settings, update, sessionId, runId, onComp
                           <span className="text-[10px] font-mono text-text-tertiary shrink-0">{done}/{total}</span>
                         </div>
                         {errors > 0 && (
-                          <span className="text-[10px] text-error font-medium mt-0.5 block">
+                          <span className="text-[10px] text-error-fg font-medium mt-0.5 block">
                             {errors} error{errors > 1 ? 's' : ''}
                           </span>
                         )}
@@ -627,12 +631,12 @@ export default function MonitorPage({ settings, update, sessionId, runId, onComp
                         onClick={() => setStatusFilter(active ? 'all' : f.key)}
                         className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-smooth border ${
                           active
-                            ? 'border-db-red/30 bg-db-red-50 text-db-red'
+                            ? 'border-db-red/30 bg-db-red-50 text-db-red-fg'
                             : 'border-transparent text-text-secondary hover:bg-bg-subtle'
                         }`}
                       >
                         {f.label}
-                        <span className={`text-[10px] font-mono ${active ? 'text-db-red' : 'text-text-tertiary'}`}>{count}</span>
+                        <span className={`text-[10px] font-mono ${active ? 'text-db-red-fg' : 'text-text-tertiary'}`}>{count}</span>
                       </button>
                     );
                   })}
@@ -642,7 +646,7 @@ export default function MonitorPage({ settings, update, sessionId, runId, onComp
                 <button
                   onClick={() => setAutoScroll(!autoScroll)}
                   className={`p-1.5 rounded-lg transition-smooth border ${
-                    autoScroll ? 'border-db-red/20 bg-db-red-50 text-db-red' : 'border-transparent text-text-tertiary hover:bg-bg-subtle'
+                    autoScroll ? 'border-db-red/20 bg-db-red-50 text-db-red-fg' : 'border-transparent text-text-tertiary hover:bg-bg-subtle'
                   }`}
                   aria-label={autoScroll ? 'Disable auto-scroll' : 'Enable auto-scroll'}
                 >
@@ -652,7 +656,7 @@ export default function MonitorPage({ settings, update, sessionId, runId, onComp
                 {hasActiveFilters && (
                   <button
                     onClick={() => { setSearchQuery(''); setStatusFilter('all'); setStageFilter('all'); }}
-                    className="text-[11px] text-db-red hover:underline font-medium shrink-0"
+                    className="text-[11px] text-db-red-fg hover:underline font-medium shrink-0"
                     aria-label="Clear all filters"
                   >
                     Clear
@@ -663,27 +667,27 @@ export default function MonitorPage({ settings, update, sessionId, runId, onComp
               {/* Active filter chips */}
               {hasActiveFilters && (
                 <div className="px-4 py-2 bg-db-red-50/50 border-t border-border flex items-center gap-2 flex-wrap">
-                  <Filter size={12} className="text-db-red shrink-0" />
+                  <Filter size={12} className="text-db-red-fg shrink-0" />
                   <span className="text-[11px] text-text-secondary">
                     <span className="font-semibold text-text-primary">{filteredCount}</span> of{' '}
                     <span className="font-semibold text-text-primary">{totalCount}</span> steps
                   </span>
                   {statusFilter !== 'all' && (
-                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-db-red-50 text-db-red text-[10px] font-medium border border-db-red/20">
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-db-red-50 text-db-red-fg text-[10px] font-medium border border-db-red/20">
                       {STATUS_FILTERS.find((f) => f.key === statusFilter)?.label}
-                      <button onClick={() => setStatusFilter('all')} aria-label="Remove status filter" className="hover:text-db-red-hover">&times;</button>
+                      <button onClick={() => setStatusFilter('all')} aria-label="Remove status filter" className="hover:text-db-red-fg">&times;</button>
                     </span>
                   )}
                   {stageFilter !== 'all' && (
-                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-db-red-50 text-db-red text-[10px] font-medium border border-db-red/20">
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-db-red-50 text-db-red-fg text-[10px] font-medium border border-db-red/20">
                       {stageFilter}
-                      <button onClick={() => setStageFilter('all')} aria-label="Remove stage filter" className="hover:text-db-red-hover">&times;</button>
+                      <button onClick={() => setStageFilter('all')} aria-label="Remove stage filter" className="hover:text-db-red-fg">&times;</button>
                     </span>
                   )}
                   {searchQuery && (
-                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-db-red-50 text-db-red text-[10px] font-medium border border-db-red/20">
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-db-red-50 text-db-red-fg text-[10px] font-medium border border-db-red/20">
                       "{searchQuery}"
-                      <button onClick={() => setSearchQuery('')} aria-label="Clear search" className="hover:text-db-red-hover">&times;</button>
+                      <button onClick={() => setSearchQuery('')} aria-label="Clear search" className="hover:text-db-red-fg">&times;</button>
                     </span>
                   )}
                 </div>
@@ -709,18 +713,18 @@ export default function MonitorPage({ settings, update, sessionId, runId, onComp
                           <ChevronDown size={14} className="text-text-tertiary" />
                         </div>
                         {errorCount > 0 ? (
-                          <div className="w-5 h-5 rounded-full bg-error-bg flex items-center justify-center"><XCircle size={11} className="text-error" /></div>
+                          <div className="w-5 h-5 rounded-full bg-error-bg flex items-center justify-center"><XCircle size={11} className="text-error-fg" /></div>
                         ) : runningCount > 0 ? (
-                          <div className="w-5 h-5 rounded-full bg-info-bg flex items-center justify-center"><Loader2 size={11} className="animate-spin text-info" /></div>
+                          <div className="w-5 h-5 rounded-full bg-info-bg flex items-center justify-center"><Loader2 size={11} className="animate-spin text-info-fg" /></div>
                         ) : doneCount === stageSteps.length ? (
-                          <div className="w-5 h-5 rounded-full bg-success-bg flex items-center justify-center"><CheckCircle2 size={11} className="text-success" /></div>
+                          <div className="w-5 h-5 rounded-full bg-success-bg flex items-center justify-center"><CheckCircle2 size={11} className="text-success-fg" /></div>
                         ) : (
                           <div className="w-5 h-5 rounded-full bg-bg-subtle flex items-center justify-center"><Clock size={11} className="text-text-tertiary" /></div>
                         )}
                         <h3 className="text-xs font-bold text-text-primary flex-1">{stageName}</h3>
                         <div className="flex items-center gap-2">
                           {errorCount > 0 && (
-                            <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-error-bg text-error">
+                            <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-error-bg text-error-fg">
                               {errorCount} error{errorCount > 1 ? 's' : ''}
                             </span>
                           )}
@@ -753,7 +757,7 @@ export default function MonitorPage({ settings, update, sessionId, runId, onComp
                 <p className="text-sm text-text-secondary">No steps match your filters</p>
                 <button
                   onClick={() => { setSearchQuery(''); setStatusFilter('all'); setStageFilter('all'); }}
-                  className="text-xs text-db-red hover:underline mt-2 font-medium"
+                  className="text-xs text-db-red-fg hover:underline mt-2 font-medium"
                 >
                   Clear all filters
                 </button>
@@ -766,7 +770,7 @@ export default function MonitorPage({ settings, update, sessionId, runId, onComp
         </section>
       ) : isRunning || isPending ? (
         <div className="bg-surface border border-border rounded-xl p-10 text-center shadow-sm">
-          <Loader2 size={24} className="animate-spin text-db-red mx-auto mb-3" />
+          <Loader2 size={24} className="animate-spin text-db-red-fg mx-auto mb-3" />
           <p className="text-sm font-medium text-text-primary">
             {isPending ? 'Waiting for cluster to start...' : 'Waiting for pipeline steps...'}
           </p>
@@ -780,7 +784,7 @@ export default function MonitorPage({ settings, update, sessionId, runId, onComp
       {!isComplete && liveUseCases.length > 0 && (
         <div className="bg-surface border border-border rounded-xl overflow-hidden shadow-sm mb-6">
           <div className="px-4 py-3 border-b border-border bg-gradient-to-r from-db-red-50 to-surface flex items-center gap-2">
-            <BarChart3 size={14} className="text-db-red" />
+            <BarChart3 size={14} className="text-db-red-fg" />
             <span className="text-xs font-bold text-text-primary">Use Cases Discovered</span>
             <span className="text-[10px] text-text-tertiary ml-auto">
               {liveUseCases.length} use case{liveUseCases.length !== 1 ? 's' : ''} so far
@@ -791,11 +795,11 @@ export default function MonitorPage({ settings, update, sessionId, runId, onComp
             {liveUseCases.slice(0, 20).map((uc, i) => {
               const priorityLower = (uc.priority || '').toLowerCase();
               const priBadge = priorityLower.includes('ultra') || priorityLower.includes('very high')
-                ? 'text-db-red bg-db-red-50'
+                ? 'text-db-red-fg bg-db-red-50'
                 : priorityLower.includes('high')
-                  ? 'text-error bg-error-bg'
+                  ? 'text-error-fg bg-error-bg'
                   : priorityLower.includes('medium')
-                    ? 'text-warning bg-warning-bg'
+                    ? 'text-warning-fg bg-warning-bg'
                     : 'text-text-secondary bg-bg';
               return (
                 <div key={uc.id || i} className="flex items-center gap-3 px-4 py-2.5">
@@ -840,7 +844,7 @@ export default function MonitorPage({ settings, update, sessionId, runId, onComp
       {isFailed && (
         <div className="mt-6 bg-error-bg border border-error/20 rounded-xl p-5">
           <div className="flex items-start gap-3">
-            <XCircle size={18} className="text-error mt-0.5 shrink-0" />
+            <XCircle size={18} className="text-error-fg mt-0.5 shrink-0" />
             <div className="flex-1">
               <p className="text-sm font-bold text-text-primary">Pipeline failed</p>
               {runInfo?.state_message && (
@@ -853,7 +857,7 @@ export default function MonitorPage({ settings, update, sessionId, runId, onComp
                   href={runInfo.run_page_url}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="inline-flex items-center gap-1 text-xs text-db-red mt-3 hover:underline font-medium"
+                  className="inline-flex items-center gap-1 text-xs text-db-red-fg mt-3 hover:underline font-medium"
                 >
                   View full error in Databricks <ExternalLink size={12} />
                 </a>
@@ -869,7 +873,7 @@ export default function MonitorPage({ settings, update, sessionId, runId, onComp
           <div className="bg-success-bg border border-success/20 rounded-xl p-5 flex items-center justify-between shadow-sm">
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 rounded-xl bg-success/10 flex items-center justify-center">
-                <CheckCircle2 size={22} className="text-success" />
+                <CheckCircle2 size={22} className="text-success-fg" />
               </div>
               <div>
                 <p className="text-sm font-bold text-text-primary">Pipeline completed successfully</p>
@@ -885,7 +889,7 @@ export default function MonitorPage({ settings, update, sessionId, runId, onComp
                 onClick={() => setShowInlineResults(!showInlineResults)}
                 className={`inline-flex items-center gap-2 px-4 py-2.5 text-sm font-bold rounded-xl transition-smooth border ${
                   showInlineResults
-                    ? 'border-db-red/20 bg-db-red-50 text-db-red'
+                    ? 'border-db-red/20 bg-db-red-50 text-db-red-fg'
                     : 'border-border bg-surface text-text-secondary hover:bg-bg-subtle'
                 }`}
               >
@@ -894,7 +898,7 @@ export default function MonitorPage({ settings, update, sessionId, runId, onComp
               </button>
               <button
                 onClick={onComplete}
-                className="inline-flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-db-red to-db-red-hover text-white text-sm font-bold rounded-xl hover:shadow-md transition-smooth"
+                className="inline-flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-db-red-solid to-db-red-solid-hover text-white text-sm font-bold rounded-xl hover:shadow-md transition-smooth"
               >
                 Open Results Page
                 <ArrowRight size={14} />
@@ -906,10 +910,10 @@ export default function MonitorPage({ settings, update, sessionId, runId, onComp
           {showInlineResults && (
             <div className="border border-border rounded-xl overflow-hidden shadow-sm bg-surface">
               <div className="px-4 py-3 border-b border-border bg-panel flex items-center gap-2">
-                <BarChart3 size={14} className="text-db-red" />
+                <BarChart3 size={14} className="text-db-red-fg" />
                 <span className="text-xs font-bold text-text-primary">Results — Session {sessionId}</span>
               </div>
-              <ResultsPage settings={settings} update={update} sessionId={sessionId} embedded />
+              <ResultsPage settings={settings} update={update} sessionId={sessionId} embedded onSessionChange={onResultsSession} onOpenImplement={onOpenImplement} />
             </div>
           )}
         </div>
@@ -918,16 +922,17 @@ export default function MonitorPage({ settings, update, sessionId, runId, onComp
   );
 }
 
+
 /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
    Sub-components
    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
 
 function StatusIcon({ isPending, isRunning, isComplete, isFailed }) {
   const base = 'w-10 h-10 rounded-xl flex items-center justify-center';
-  if (isComplete) return <div className={`${base} bg-success/10`}><CheckCircle2 size={22} className="text-success" /></div>;
-  if (isFailed) return <div className={`${base} bg-error/10`}><XCircle size={22} className="text-error" /></div>;
-  if (isPending) return <div className={`${base} bg-info/10`}><Clock size={22} className="text-info" /></div>;
-  if (isRunning) return <div className={`${base} bg-db-red/10`}><Loader2 size={22} className="animate-spin text-db-red" /></div>;
+  if (isComplete) return <div className={`${base} bg-success/10`}><CheckCircle2 size={22} className="text-success-fg" /></div>;
+  if (isFailed) return <div className={`${base} bg-error/10`}><XCircle size={22} className="text-error-fg" /></div>;
+  if (isPending) return <div className={`${base} bg-info/10`}><Clock size={22} className="text-info-fg" /></div>;
+  if (isRunning) return <div className={`${base} bg-db-red/10`}><Loader2 size={22} className="animate-spin text-db-red-fg" /></div>;
   return <div className={`${base} bg-bg-subtle`}><Play size={22} className="text-text-tertiary" /></div>;
 }
 
@@ -944,13 +949,13 @@ function getStatusCategory(status) {
 function getStepStyle(status) {
   switch (status) {
     case 'ended_success': case 'completed':
-      return { icon: <CheckCircle2 size={14} className="text-success" />, badge: 'bg-success-bg text-success', label: 'Success' };
+      return { icon: <CheckCircle2 size={14} className="text-success-fg" />, badge: 'bg-success-bg text-success-fg', label: 'Success' };
     case 'started': case 'running':
-      return { icon: <Loader2 size={14} className="animate-spin text-info" />, badge: 'bg-info-bg text-info', label: 'In Progress' };
+      return { icon: <Loader2 size={14} className="animate-spin text-info-fg" />, badge: 'bg-info-bg text-info-fg', label: 'In Progress' };
     case 'ended_warning':
-      return { icon: <AlertCircle size={14} className="text-warning" />, badge: 'bg-warning-bg text-warning', label: 'Warning' };
+      return { icon: <AlertCircle size={14} className="text-warning-fg" />, badge: 'bg-warning-bg text-warning-fg', label: 'Warning' };
     case 'ended_error': case 'failed': case 'error':
-      return { icon: <XCircle size={14} className="text-error" />, badge: 'bg-error-bg text-error', label: 'Error' };
+      return { icon: <XCircle size={14} className="text-error-fg" />, badge: 'bg-error-bg text-error-fg', label: 'Error' };
     default:
       return { icon: <Clock size={14} className="text-text-tertiary" />, badge: 'bg-bg text-text-tertiary', label: status || 'Pending' };
   }
@@ -967,7 +972,7 @@ function highlightMatch(text, query) {
   return (
     <>
       {text.slice(0, idx)}
-      <mark className="bg-db-red-100 text-db-red rounded px-0.5">{text.slice(idx, idx + query.length)}</mark>
+      <mark className="bg-db-red-100 text-db-red-fg rounded px-0.5">{text.slice(idx, idx + query.length)}</mark>
       {text.slice(idx + query.length)}
     </>
   );
@@ -1041,7 +1046,7 @@ function ResultJsonDisplay({ resultJson }) {
   if (rj.error) {
     return (
       <div className="text-xs bg-error-bg/50 rounded-lg p-2.5 border border-error/10">
-        <span className="text-error font-semibold">Error:</span>{' '}
+        <span className="text-error-fg font-semibold">Error:</span>{' '}
         <span className="text-text-secondary">{rj.error}</span>
       </div>
     );
@@ -1052,10 +1057,10 @@ function ResultJsonDisplay({ resultJson }) {
     return (
       <div className="text-xs space-y-1.5">
         <div className="flex items-center gap-2">
-          <span className="px-1.5 py-0.5 rounded bg-success-bg text-success font-semibold text-[10px]">
+          <span className="px-1.5 py-0.5 rounded bg-success-bg text-success-fg font-semibold text-[10px]">
             {rj.use_cases_count || rj.use_cases.length} use cases
           </span>
-          {rj.is_truncated && <span className="px-1.5 py-0.5 rounded bg-warning-bg text-warning text-[10px]">truncated</span>}
+          {rj.is_truncated && <span className="px-1.5 py-0.5 rounded bg-warning-bg text-warning-fg text-[10px]">truncated</span>}
         </div>
         <div className="flex flex-wrap gap-1">
           {rj.use_cases.slice(0, 10).map((uc, i) => (
@@ -1077,7 +1082,7 @@ function ResultJsonDisplay({ resultJson }) {
   if (prompt === 'COMBINED_VALUE_QUALITY_SCORE_PROMPT' && Array.isArray(rj.scored_use_cases)) {
     return (
       <div className="text-xs space-y-1.5">
-        <span className="px-1.5 py-0.5 rounded bg-info-bg text-info font-semibold text-[10px]">
+        <span className="px-1.5 py-0.5 rounded bg-info-bg text-info-fg font-semibold text-[10px]">
           {rj.scored_count || rj.scored_use_cases.length} scored
         </span>
         <div className="grid grid-cols-1 gap-0.5 max-h-28 overflow-y-auto">
@@ -1085,7 +1090,7 @@ function ResultJsonDisplay({ resultJson }) {
             <div key={i} className="flex items-center gap-2 text-[10px] py-0.5">
               <span className="text-text-primary font-medium truncate flex-1">{sc.name || `#${sc.id}`}</span>
               <span className={`px-1.5 py-0.5 rounded font-semibold ${
-                ['Ultra High', 'Very High', 'High'].includes(sc.priority) ? 'bg-db-red-50 text-db-red' : 'bg-bg-subtle text-text-secondary'
+                ['Ultra High', 'Very High', 'High'].includes(sc.priority) ? 'bg-db-red-50 text-db-red-fg' : 'bg-bg-subtle text-text-secondary'
               }`}>{sc.priority}</span>
               <span className="text-text-tertiary">Q: {sc.quality}</span>
             </div>
@@ -1099,7 +1104,7 @@ function ResultJsonDisplay({ resultJson }) {
   if (prompt === 'DOMAIN_FINDER_PROMPT' && Array.isArray(rj.domains)) {
     return (
       <div className="text-xs space-y-1.5">
-        <span className="px-1.5 py-0.5 rounded bg-info-bg text-info font-semibold text-[10px]">
+        <span className="px-1.5 py-0.5 rounded bg-info-bg text-info-fg font-semibold text-[10px]">
           {rj.domains_count || rj.domains.length} domains
         </span>
         <div className="flex flex-wrap gap-1">
@@ -1117,7 +1122,7 @@ function ResultJsonDisplay({ resultJson }) {
   if (prompt === 'USE_CASE_SQL_GEN_PROMPT' && rj.sql_preview) {
     return (
       <div className="text-xs space-y-1">
-        <span className="px-1.5 py-0.5 rounded bg-info-bg text-info font-semibold text-[10px]">SQL Generated</span>
+        <span className="px-1.5 py-0.5 rounded bg-info-bg text-info-fg font-semibold text-[10px]">SQL Generated</span>
         <pre className="text-[10px] text-text-secondary bg-bg-subtle rounded p-2 font-mono max-h-20 overflow-hidden">
           {rj.sql_preview.slice(0, 200)}{rj.sql_preview.length > 200 ? '...' : ''}
         </pre>
@@ -1129,7 +1134,7 @@ function ResultJsonDisplay({ resultJson }) {
   if (prompt === 'SUMMARY_GEN_PROMPT') {
     return (
       <div className="flex items-center gap-2 text-xs">
-        <span className="px-1.5 py-0.5 rounded bg-success-bg text-success font-semibold text-[10px]">Summary generated</span>
+        <span className="px-1.5 py-0.5 rounded bg-success-bg text-success-fg font-semibold text-[10px]">Summary generated</span>
         {rj.response_chars && <span className="text-text-tertiary text-[10px]">{rj.response_chars.toLocaleString()} chars</span>}
       </div>
     );
@@ -1172,13 +1177,32 @@ function ResultJsonDisplay({ resultJson }) {
   return null;
 }
 
-function formatDuration(ms) {
-  const totalSec = Math.round(ms / 1000);
-  if (totalSec < 60) return `${totalSec}s`;
-  const min = Math.floor(totalSec / 60);
-  const sec = totalSec % 60;
-  if (min < 60) return `${min}m ${sec}s`;
-  const hr = Math.floor(min / 60);
-  const rm = min % 60;
-  return `${hr}h ${rm}m`;
+function RunSetupSummary({ widgetValues }) {
+  const discovery = String(widgetValues?.discovery_type || '').trim();
+  const strategyText = String(widgetValues?.strategic_context || '').trim();
+  if (!discovery && !strategyText) return null;
+  const parsed = parseStrategicContext(strategyText);
+  let strategy = 'No strategy given: built-in goals';
+  if (parsed.mode === 'path') strategy = 'Customer strategy';
+  else if (parsed.mode === 'tree') {
+    const entries = countEntries(parsed.model.strategy);
+    const levels = treeDepth(parsed.model.strategy);
+    const priorities = parsed.model.priorities.length;
+    strategy = `Strategy: ${entries} entr${entries === 1 ? 'y' : 'ies'}` +
+      (levels ? `, ${levels} level${levels === 1 ? '' : 's'}` : '') +
+      (priorities ? `, ${priorities} priorit${priorities === 1 ? 'y' : 'ies'}` : '');
+  }
+  return (
+    <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px]">
+      {discovery && (
+        <span className="px-2 py-0.5 rounded-full border border-border bg-bg-subtle text-text-secondary">
+          {discovery === 'Standard' ? 'Standard discovery: no data read' : 'Deep discovery: aggregates only'}
+        </span>
+      )}
+      <span className="px-2 py-0.5 rounded-full border border-border bg-bg-subtle text-text-secondary" title={parsed.error || ''}>
+        {parsed.error ? 'Strategy could not be read' : strategy}
+      </span>
+    </div>
+  );
 }
+

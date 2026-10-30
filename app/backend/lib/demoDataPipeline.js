@@ -2,8 +2,9 @@ const fs = require('fs');
 const path = require('path');
 const { buildDemoSchemaName } = require('./demoDataService');
 const {
-  INSPIRE_AGENT_VERSION,
   buildDemoInspireDiscoveryParams,
+  inspireJobTags,
+  inspireTaskCompute,
 } = require('./inspireJobParams');
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
@@ -213,9 +214,7 @@ async function triggerDemoDataPipeline(
   });
 
   const resolvedClusterId = await resolvePipelineClusterId(dbFetch, host, token, cluster_id);
-  const clusterSpec = resolvedClusterId
-    ? { existing_cluster_id: resolvedClusterId }
-    : { environment_key: 'Default' };
+  const clusterSpec = inspireTaskCompute(resolvedClusterId);
 
   const inspireParams = buildDemoInspireDiscoveryParams({
     inspireDatabase: inspireDb,
@@ -224,11 +223,12 @@ async function triggerDemoDataPipeline(
 
   const createPayload = {
     name: `Inspire AI Demo Pipeline - ${business} - ${new Date().toISOString().slice(0, 19)}`,
-    tags: {
-      inspire_version: INSPIRE_AGENT_VERSION,
-      dbx_inspire_ai_type: 'demo_pipeline',
-      dbx_inspire_ai_session: String(sid).replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 255),
-    },
+    tags: inspireJobTags({
+      runType: 'demo_pipeline',
+      params: inspireParams,
+      businessName: business,
+      notebookFilename: String(inspireNotebookPath || '').split('/').pop(),
+    }),
     tasks: [
       {
         task_key: 'generate_demo_data',

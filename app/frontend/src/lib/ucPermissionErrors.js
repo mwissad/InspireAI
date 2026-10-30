@@ -10,6 +10,12 @@ const JOB_SIGNAL = /job creation|jobs\/create|run-now|notebook.*publish|workspac
 const CATALOG_SIGNAL = /catalog|unity catalog|use_catalog|browse/i;
 const SCHEMA_SIGNAL = /schema|use_schema|create schema/i;
 
+export function apiErrorDetail(parsed) {
+  const detail = parsed && typeof parsed === 'object' ? parsed.error || parsed.message || parsed.error_message : '';
+  if (!detail) return '';
+  return typeof detail === 'string' ? detail : JSON.stringify(detail);
+}
+
 /** @param {string} errText */
 export function parseApiErrorMessage(errText) {
   const raw = String(errText || '').trim();
@@ -17,7 +23,7 @@ export function parseApiErrorMessage(errText) {
   try {
     const parsed = JSON.parse(raw);
     if (typeof parsed === 'string') return parsed;
-    return String(parsed.error || parsed.message || parsed.error_message || raw);
+    return apiErrorDetail(parsed) || raw;
   } catch {
     return raw;
   }
@@ -76,11 +82,11 @@ export function interpretUcPermissionError(message, opts = {}) {
   }
 
   adminBullets.push(
-    `Inspire tracking schema (\`${inspireCatalog}.${inspireSchema || '_inspire'}\`) — session and results tables:`,
+    `Inspire tracking schema (\`${inspireCatalog}.${inspireSchema || '_inspire'}\`) — session and results tables, and the run log volume:`,
     `  GRANT USE CATALOG ON CATALOG \`${inspireCatalog}\` TO ${principal};`,
     `  GRANT CREATE SCHEMA ON CATALOG \`${inspireCatalog}\` TO ${principal};  -- only if \`${inspireSchema || '_inspire'}\` does not exist yet`,
     `  GRANT USE SCHEMA ON SCHEMA \`${inspireCatalog}\`.\`${inspireSchema || '_inspire'}\` TO ${principal};`,
-    `  GRANT CREATE TABLE, MODIFY, SELECT ON SCHEMA \`${inspireCatalog}\`.\`${inspireSchema || '_inspire'}\` TO ${principal};`,
+    `  GRANT CREATE TABLE, MODIFY, SELECT, CREATE VOLUME, READ VOLUME, WRITE VOLUME ON SCHEMA \`${inspireCatalog}\`.\`${inspireSchema || '_inspire'}\` TO ${principal};`,
   );
 
   if (WAREHOUSE_SIGNAL.test(text) || opts.context === 'launch') {

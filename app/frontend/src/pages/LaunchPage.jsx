@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   Play,
   Loader2,
@@ -35,12 +35,29 @@ import {
   Sparkles,
 } from 'lucide-react';
 import DocumentLanguagesMultiselect from '../components/DocumentLanguagesMultiselect';
+import StrategyEditor from '../components/StrategyEditor';
+import { parseStrategicContext, splitPriorities, validateStrategicContextText, withPriorities } from '../lib/strategyContext';
 import UcPermissionErrorHelp from '../components/UcPermissionErrorHelp';
 import { parseDocumentLanguages, formatDocumentLanguages } from '../constants/documentLanguages';
 import { interpretUcPermissionError, parseApiErrorMessage } from '../lib/ucPermissionErrors';
+import { formatWhen } from '../lib/formatWhen';
+import { responseError } from '../lib/apiClient';
 
 /* ─── Constants — notebook v1.2.0 widget `05_use_cases_quality` ─── */
 const QUALITY_OPTIONS = ['Good', 'High', 'Ultra High'];
+
+const DISCOVERY_OPTIONS = [
+  {
+    key: 'Deep',
+    icon: Eye,
+    desc: 'Reads aggregates over your tables: row counts, date coverage, null rates and join match rates. Never sends a data row to the AI and never reads the values of personal columns.',
+  },
+  {
+    key: 'Standard',
+    icon: Lock,
+    desc: 'Reads metadata only. Never reads a row of your data.',
+  },
+];
 const TABLE_ELECTION = ['Let Inspire Decides', 'All Tables', 'Transactional Only'];
 /** Show guidance when explicit table selection exceeds this count. */
 const TABLE_SELECTION_WARN_THRESHOLD = 10;
@@ -128,23 +145,12 @@ function flattenPreviewFromResults(results) {
   return out;
 }
 
-function useCaseTitle(uc) {
+function titleOfUseCase(uc) {
   return uc.Name || uc.use_case_name || uc.name || 'Use case';
 }
 
-function useCaseBlurb(uc) {
+function blurbOfUseCase(uc) {
   return uc.Statement || uc.description || uc.problem_statement || uc.Solution || '';
-}
-
-function formatSessionWhen(iso) {
-  if (!iso) return '—';
-  try {
-    const d = new Date(iso);
-    if (Number.isNaN(d.getTime())) return '—';
-    return d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
-  } catch {
-    return '—';
-  }
 }
 
 /** Optional warehouse_id improves UC browsing for service principals (SQL SHOW … fallback). */
@@ -163,16 +169,19 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
     '00_business_name': '',
     '01_uc_metadata': '',
     '02_inspire_database': inspireDatabase || '',
+    '03_discovery_type': 'Deep',
     '04_table_election': 'Let Inspire Decides',
     '05_use_cases_quality': 'Good',
     '06_business_domains': '',
     '07_business_priorities': '',
     '08_generation_instructions': '',
     '09_generation_options': 'PDF Catalog',
+    '10_strategic_context': '',
     '11_generation_path': './../demos/',
     '12_documents_languages': 'English',
-    '13_generate_genie_code_for': '5',
+    '13_generate_genie_code_for': '0',
     '14_session_id': '',
+    '16_best_of_best_count': '',
   });
 
   // ── Catalog/Schema pickers ──
@@ -196,6 +205,10 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
   const [launchError, setLaunchError] = useState('');
   const [catalogBrowseError, setCatalogBrowseError] = useState('');
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [showStrategy, setShowStrategy] = useState(false);
+  const [discoveryTouched, setDiscoveryTouched] = useState(false);
+  const [strategyTouched, setStrategyTouched] = useState(false);
+  const [prefillNote, setPrefillNote] = useState('');
 
   const [sessionsList, setSessionsList] = useState([]);
   const [overviewLoading, setOverviewLoading] = useState(false);
@@ -218,6 +231,9 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
     Presentation: false,
   });
   const [priorityChecks, setPriorityChecks] = useState({});
+  const [customPriorities, setCustomPriorities] = useState([]);
+  const [customPriorityDraft, setCustomPriorityDraft] = useState('');
+  const [strategyBase, setStrategyBase] = useState('');
 
 
   // In Databricks App mode, the proxy injects x-forwarded-access-token automatically.
@@ -234,11 +250,7 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
       }
       if (databricksHost) headers['X-Databricks-Host'] = databricksHost;
       const resp = await fetch(url, { ...opts, headers });
-      if (!resp.ok) {
-        const errText = await resp.text().catch(() => '');
-        const message = parseApiErrorMessage(errText) || `${resp.status}`;
-        throw new Error(message);
-      }
+      if (!resp.ok) throw await responseError(resp);
       return resp.json();
     },
     [token, databricksHost]
@@ -522,6 +534,99 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
     }
   };
 
+  const strategicContextText = params['10_strategic_context'];
+  const strategyBaseRef = useRef(strategyBase);
+  useEffect(() => {
+    strategyBaseRef.current = strategyBase;
+  }, [strategyBase]);
+  const [strategyEditorKey, setStrategyEditorKey] = useState(0);
+  const [prioritiesTouched, setPrioritiesTouched] = useState(false);
+
+  const handleStrategyChange = useCallback((value) => {
+    if (strategyBaseRef.current === value) return;
+    strategyBaseRef.current = value;
+    setStrategyTouched(true);
+    setStrategyBase(value);
+  }, []);
+
+  const selectedBuiltInPriorities = useMemo(
+    () => BUSINESS_PRIORITIES.map((bp) => bp.key).filter((key) => priorityChecks[key]),
+    [priorityChecks],
+  );
+
+  useEffect(() => {
+    const merged = customPriorities.length ? [...selectedBuiltInPriorities, ...customPriorities] : [];
+    const value = withPriorities(strategyBase, merged);
+    setParams((p) => (p['10_strategic_context'] === value ? p : { ...p, '10_strategic_context': value }));
+  }, [strategyBase, selectedBuiltInPriorities, customPriorities]);
+
+  const toggleBuiltInPriority = (key) => {
+    setPrioritiesTouched(true);
+    setPriorityChecks((p) => ({ ...p, [key]: !p[key] }));
+  };
+
+  const addCustomPriority = () => {
+    const name = customPriorityDraft.trim();
+    if (!name) return;
+    setPrioritiesTouched(true);
+    const builtIn = BUSINESS_PRIORITIES.find((bp) => bp.key.toLowerCase() === name.toLowerCase());
+    if (builtIn) setPriorityChecks((p) => ({ ...p, [builtIn.key]: true }));
+    else setCustomPriorities((c) => (c.some((x) => x.toLowerCase() === name.toLowerCase()) ? c : [...c, name]));
+    setCustomPriorityDraft('');
+  };
+
+  const removeCustomPriority = (name) => {
+    setPrioritiesTouched(true);
+    setCustomPriorities((c) => c.filter((x) => x !== name));
+  };
+
+  useEffect(() => {
+    const name = String(params['00_business_name'] || '').trim().toLowerCase();
+    if (!name || !warehouseId || !previewDb || (discoveryTouched && strategyTouched)) return undefined;
+    const match = sessionsList.find((s) => String(s.business_name || '').trim().toLowerCase() === name);
+    if (!match) return undefined;
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      try {
+        const q = new URLSearchParams({ inspire_database: previewDb, warehouse_id: warehouseId, session_id: String(match.session_id) });
+        const data = await apiFetch(`/api/inspire/session?${q}`);
+        if (cancelled) return;
+        const wv = data?.session?.widget_values || {};
+        const next = {};
+        if (!discoveryTouched && (wv.discovery_type === 'Deep' || wv.discovery_type === 'Standard')) {
+          next['03_discovery_type'] = wv.discovery_type;
+        }
+        const prefillStrategy = !strategyTouched && wv.strategic_context ? String(wv.strategic_context) : '';
+        if (Object.keys(next).length || prefillStrategy) {
+          if (Object.keys(next).length) setParams((p) => ({ ...p, ...next }));
+          if (prefillStrategy) {
+            const saved = splitPriorities(parseStrategicContext(prefillStrategy).model.priorities, BUSINESS_PRIORITIES.map((bp) => bp.key));
+            if (!prioritiesTouched && (saved.builtIn.length || saved.custom.length)) {
+              setPriorityChecks(Object.fromEntries(saved.builtIn.map((key) => [key, true])));
+              setCustomPriorities(saved.custom);
+            }
+            setStrategyBase(withPriorities(prefillStrategy, []));
+            setStrategyEditorKey((k) => k + 1);
+          }
+          setPrefillNote(`Prefilled from this business's last session (${match.session_id}).`);
+        }
+      } catch {
+        if (!cancelled) setPrefillNote('');
+      }
+    }, 600);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [params['00_business_name'], sessionsList, warehouseId, previewDb]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const strategyProblems = useMemo(() => [
+    ...validateStrategicContextText(strategicContextText),
+    ...(customPriorities.length && parseStrategicContext(strategyBase).mode === 'path'
+      ? ['Your own business priorities cannot be added to a strategy that comes from a file. Remove them or clear the strategy.']
+      : []),
+  ], [strategicContextText, customPriorities, strategyBase]);
+
   // Launch
   const handleLaunch = async () => {
     if (!params['00_business_name'])
@@ -530,6 +635,8 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
       return setLaunchError('Inspire Database is required. Set it in Settings.');
     if (!params['01_uc_metadata'])
       return setLaunchError('Select at least one catalog, schema, or table for UC Metadata.');
+    if (strategyProblems.length)
+      return setLaunchError(`Fix the strategic context first (Advanced → Strategy and organization): ${strategyProblems[0]}`);
 
     const genOpts = params['09_generation_options'] || '';
     const needsDocLang =
@@ -600,7 +707,9 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
 
   // Validation state
   const effectiveDb = params['02_inspire_database'] || inspireDatabase;
-  const canLaunch = params['00_business_name'] && effectiveDb && params['01_uc_metadata'];
+  const bestOfBestText = String(params['16_best_of_best_count'] ?? '').trim();
+  const bestOfBestInvalid = bestOfBestText !== '' && (!/^\d{1,3}$/.test(bestOfBestText) || Number(bestOfBestText) > 100);
+  const canLaunch = params['00_business_name'] && effectiveDb && params['01_uc_metadata'] && strategyProblems.length === 0 && !bestOfBestInvalid;
 
   const launchErrorGuidance = useMemo(
     () => (launchError
@@ -715,7 +824,7 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
             className="flex w-full items-center gap-3 px-5 py-3 border-b border-border bg-bg-subtle/50 text-left transition-colors hover:bg-bg-subtle/80"
             aria-expanded={experimentsOverviewExpanded}
           >
-            <Layers size={16} className="text-db-red shrink-0" aria-hidden />
+            <Layers size={16} className="text-db-red-fg shrink-0" aria-hidden />
             <div className="min-w-0 flex-1">
               <h2 className="text-sm font-semibold text-text-primary">Discovery Overview</h2>
               <p className="text-[11px] text-text-secondary truncate">
@@ -735,13 +844,13 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
           {(overviewError || allCreatedError) && (
             <div className="space-y-2 border-b border-border bg-surface/60 px-5 py-2.5">
               {overviewError && (
-                <p className="flex items-center gap-1.5 text-xs text-error">
+                <p className="flex items-center gap-1.5 text-xs text-error-fg">
                   <AlertCircle size={14} className="shrink-0" />
                   {overviewError}
                 </p>
               )}
               {allCreatedError && (
-                <p className="flex items-center gap-1.5 text-xs text-amber-600 dark:text-amber-400">
+                <p className="flex items-center gap-1.5 text-xs text-warning-fg">
                   <AlertCircle size={14} className="shrink-0" />
                   {allCreatedError}
                 </p>
@@ -752,7 +861,7 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
           <div className="px-5 py-4">
             {overviewLoading && !overviewError && (
               <div className="flex items-center gap-2 text-sm text-text-secondary py-2">
-                <Loader2 size={16} className="animate-spin text-db-red" />
+                <Loader2 size={16} className="animate-spin text-db-red-fg" />
                 Loading experiments…
               </div>
             )}
@@ -785,7 +894,7 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
                               {sidStr}
                             </span>
                             {pct >= 100 ? (
-                              <span className="text-[10px] font-medium text-green-700 dark:text-green-400 bg-green-500/10 px-1.5 py-0.5 rounded border border-green-500/20">
+                              <span className="text-[10px] font-medium text-success-fg bg-success-bg px-1.5 py-0.5 rounded border border-success/20">
                                 Complete
                               </span>
                             ) : (
@@ -799,7 +908,7 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
                           </div>
                           <div className="flex items-center gap-1.5 text-[11px] text-text-secondary">
                             <Calendar size={12} className="shrink-0 text-text-tertiary" aria-hidden />
-                            <span>{formatSessionWhen(s.create_at)}</span>
+                            <span>{formatWhen(s.create_at, '—')}</span>
                           </div>
                         </div>
                         <div className="flex flex-wrap items-center gap-2 shrink-0">
@@ -808,8 +917,8 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
                             onClick={() => onQuickViewToggle(s.session_id)}
                             className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors ${
                               expanded
-                                ? 'border-db-red bg-db-red-50 text-db-red'
-                                : 'border-border bg-surface text-text-primary hover:border-db-red/40 hover:text-db-red'
+                                ? 'border-db-red bg-db-red-50 text-db-red-fg'
+                                : 'border-border bg-surface text-text-primary hover:border-db-red/40 hover:text-db-red-fg'
                             }`}
                             aria-expanded={expanded}
                           >
@@ -825,7 +934,7 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
                             <button
                               type="button"
                               onClick={() => onOpenResults(sidStr)}
-                              className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface px-3 py-1.5 text-xs font-medium text-text-primary hover:border-db-red/40 hover:text-db-red transition-colors"
+                              className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface px-3 py-1.5 text-xs font-medium text-text-primary hover:border-db-red/40 hover:text-db-red-fg transition-colors"
                             >
                               <ExternalLink size={14} aria-hidden />
                               Open results
@@ -837,7 +946,7 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
                         <div className="border-t border-border bg-bg-subtle/50 px-4 py-3">
                           {loadingUc && (
                             <div className="flex items-center gap-2 text-sm text-text-secondary py-2">
-                              <Loader2 size={14} className="animate-spin text-db-red" />
+                              <Loader2 size={14} className="animate-spin text-db-red-fg" />
                               Loading use cases for this session…
                             </div>
                           )}
@@ -849,8 +958,8 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
                           {!loadingUc && Array.isArray(ucs) && ucs.length > 0 && (
                             <ul className="max-h-72 overflow-y-auto space-y-2 pr-1">
                               {ucs.map((uc, i) => {
-                                const title = useCaseTitle(uc);
-                                const blurb = useCaseBlurb(uc);
+                                const title = titleOfUseCase(uc);
+                                const blurb = blurbOfUseCase(uc);
                                 const score = inspireScoreFromUc(uc);
                                 return (
                                   <li
@@ -862,7 +971,7 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
                                         {title}
                                       </span>
                                       {score != null && Number.isFinite(score) && (
-                                        <span className="shrink-0 text-[10px] font-bold tabular-nums text-db-red bg-db-red-50 border border-db-red/20 px-1.5 py-0.5 rounded">
+                                        <span className="shrink-0 text-[10px] font-bold tabular-nums text-db-red-fg bg-db-red-50 border border-db-red/20 px-1.5 py-0.5 rounded">
                                           {score.toFixed(1)}
                                         </span>
                                       )}
@@ -911,7 +1020,7 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
               <h2 className="text-sm font-bold text-text-primary">Essentials</h2>
               <p className="text-xs text-text-secondary">Required fields to run the pipeline</p>
             </div>
-            <span className="text-[10px] font-semibold text-db-red bg-db-red-50 border border-db-red/20 px-2 py-0.5 rounded-full uppercase tracking-wider">
+            <span className="text-[10px] font-semibold text-db-red-fg bg-db-red-50 border border-db-red/20 px-2 py-0.5 rounded-full uppercase tracking-wider">
               Required
             </span>
           </div>
@@ -936,7 +1045,7 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
                   <button
                     type="button"
                     onClick={onNoData}
-                    className="mb-3 w-full flex items-center justify-center gap-2 py-2.5 rounded-lg border border-dashed border-border text-sm text-text-secondary hover:border-db-red/40 hover:text-db-red hover:bg-db-red-50/30 transition-smooth"
+                    className="mb-3 w-full flex items-center justify-center gap-2 py-2.5 rounded-lg border border-dashed border-border text-sm text-text-secondary hover:border-db-red/40 hover:text-db-red-fg hover:bg-db-red-50/30 transition-smooth"
                   >
                     <Sparkles size={16} />
                     I don&apos;t have data — generate demo tables instead
@@ -946,8 +1055,8 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
                 {(selectedCatalogs.length > 0 || selectedSchemas.length > 0 || selectedTables.length > 0) && (
                   <div className="mb-3 rounded-lg border border-db-red/20 bg-db-red-50/50 p-3">
                     <div className="flex items-center gap-2 mb-2">
-                      <ShoppingCart size={12} className="text-db-red" />
-                      <span className="text-[11px] font-bold text-db-red">Selected Metadata</span>
+                      <ShoppingCart size={12} className="text-db-red-fg" />
+                      <span className="text-[11px] font-bold text-db-red-fg">Selected Metadata</span>
                       <span className="text-[10px] text-text-tertiary ml-auto">
                         {selectedTables.length > 0 && `${selectedTables.length} table${selectedTables.length > 1 ? 's' : ''}`}
                         {selectedTables.length > 0 && selectedSchemas.length > 0 && ', '}
@@ -958,23 +1067,23 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
                     </div>
                     <div className="max-h-32 overflow-y-auto flex flex-wrap gap-1">
                       {selectedTables.map((t) => (
-                        <span key={t} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-db-red-50 text-db-red text-[10px] font-medium border border-db-red/20">
+                        <span key={t} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-db-red-50 text-db-red-fg text-[10px] font-medium border border-db-red/20">
                           <Table2 size={9} />
                           {t.split('.').pop()}
-                          <button aria-label={`Remove ${t}`} onClick={() => setSelectedTables((p) => p.filter((x) => x !== t))} className="hover:text-db-red-hover ml-0.5"><X size={8} /></button>
+                          <button aria-label={`Remove ${t}`} onClick={() => setSelectedTables((p) => p.filter((x) => x !== t))} className="hover:text-db-red-fg ml-0.5"><X size={8} /></button>
                         </span>
                       ))}
                       {selectedSchemas.map((s) => (
                         <span key={s} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-bg-subtle text-text-secondary text-[10px] font-medium border border-border">
                           {s}
-                          <button aria-label={`Remove ${s}`} onClick={() => { setSelectedSchemas((p) => p.filter((x) => x !== s)); setSelectedTables((p) => p.filter((x) => !x.startsWith(s + '.'))); }} className="hover:text-db-red ml-0.5"><X size={8} /></button>
+                          <button aria-label={`Remove ${s}`} onClick={() => { setSelectedSchemas((p) => p.filter((x) => x !== s)); setSelectedTables((p) => p.filter((x) => !x.startsWith(s + '.'))); }} className="hover:text-db-red-fg ml-0.5"><X size={8} /></button>
                         </span>
                       ))}
                       {selectedCatalogs.map((c) => (
                         <span key={c} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-bg-subtle text-text-secondary text-[10px] font-medium border border-border">
                           <Database size={9} />
                           {c}
-                          <button aria-label={`Remove ${c}`} onClick={() => { setSelectedCatalogs((p) => p.filter((x) => x !== c)); setSelectedSchemas((p) => p.filter((x) => !x.startsWith(c + '.'))); setSelectedTables((p) => p.filter((x) => !x.startsWith(c + '.'))); }} className="hover:text-db-red ml-0.5"><X size={8} /></button>
+                          <button aria-label={`Remove ${c}`} onClick={() => { setSelectedCatalogs((p) => p.filter((x) => x !== c)); setSelectedSchemas((p) => p.filter((x) => !x.startsWith(c + '.'))); setSelectedTables((p) => p.filter((x) => !x.startsWith(c + '.'))); }} className="hover:text-db-red-fg ml-0.5"><X size={8} /></button>
                         </span>
                       ))}
                     </div>
@@ -1001,7 +1110,7 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
                   </div>
                   {pickerExpanded ? 'Hide catalog browser' : 'Browse catalogs'}
                   {!pickerExpanded && (selectedCatalogs.length + selectedSchemas.length + selectedTables.length > 0) && (
-                    <span className="text-[10px] text-db-red font-medium ml-1">
+                    <span className="text-[10px] text-db-red-fg font-medium ml-1">
                       ({selectedTables.length > 0 ? `${selectedTables.length} tables` : selectedSchemas.length > 0 ? `${selectedSchemas.length} schemas` : `${selectedCatalogs.length} catalogs`} selected)
                     </span>
                   )}
@@ -1081,7 +1190,7 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
                         <button
                           type="button"
                           onClick={toggleAllTables}
-                          className="mb-1.5 px-2.5 py-1 rounded-md text-[10px] font-semibold transition-smooth border border-border hover:border-border-strong text-text-secondary hover:text-db-red"
+                          className="mb-1.5 px-2.5 py-1 rounded-md text-[10px] font-semibold transition-smooth border border-border hover:border-border-strong text-text-secondary hover:text-db-red-fg"
                         >
                           {allTablesSelected ? 'Deselect All' : 'Select All'}
                         </button>
@@ -1112,12 +1221,12 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
                       onClick={() => setMetadataPreviewExpanded(!metadataPreviewExpanded)}
                       className="w-full flex items-center gap-2 px-4 py-2.5 text-left hover:bg-success/5 transition-smooth"
                     >
-                      <CheckCircle2 size={14} className="text-success shrink-0" />
-                      <p className="text-[10px] text-success font-semibold uppercase tracking-wider flex-1">Metadata Selected</p>
-                      <span className="text-[10px] text-success/70 font-mono">
+                      <CheckCircle2 size={14} className="text-success-fg shrink-0" />
+                      <p className="text-[10px] text-success-fg font-semibold uppercase tracking-wider flex-1">Metadata Selected</p>
+                      <span className="text-[10px] text-success-fg font-mono">
                         {params['01_uc_metadata'].split(',').length} item{params['01_uc_metadata'].split(',').length > 1 ? 's' : ''}
                       </span>
-                      <ChevronDown size={12} className={`text-success transition-transform duration-200 ${metadataPreviewExpanded ? 'rotate-180' : ''}`} />
+                      <ChevronDown size={12} className={`text-success-fg transition-transform duration-200 ${metadataPreviewExpanded ? 'rotate-180' : ''}`} />
                     </button>
                     {metadataPreviewExpanded && (
                       <div className="px-4 pb-3 max-h-32 overflow-y-auto">
@@ -1140,6 +1249,38 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
                   className="w-full pl-9 pr-4 py-2.5 text-sm border border-border rounded-lg bg-surface text-text-primary placeholder:text-text-tertiary glow-focus transition-smooth resize-none"
                 />
               </div>
+            </FieldSection>
+
+            {/* Discovery Type — v1.3.0 widget 03_discovery_type */}
+            <FieldSection label="Discovery Type" hint="Widget 03_discovery_type — whether Inspire may read your data">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                {DISCOVERY_OPTIONS.map((opt) => {
+                  const active = params['03_discovery_type'] === opt.key;
+                  const Icon = opt.icon;
+                  return (
+                    <button
+                      key={opt.key}
+                      type="button"
+                      onClick={() => {
+                        setDiscoveryTouched(true);
+                        updateParam('03_discovery_type', opt.key);
+                      }}
+                      className={`relative p-3 rounded-xl text-left transition-smooth border ${
+                        active ? 'border-db-red/30 bg-db-red-50 shadow-sm' : 'border-border hover:border-border-strong'
+                      }`}
+                    >
+                      <span className={`flex items-center gap-1.5 text-xs font-semibold ${active ? 'text-db-red-fg' : 'text-text-primary'}`}>
+                        <Icon size={13} className={active ? 'text-db-red-fg' : 'text-text-tertiary'} />
+                        {opt.key}
+                        {opt.key === 'Deep' && <span className="text-[10px] font-normal text-text-tertiary">(default)</span>}
+                      </span>
+                      <p className="text-[10px] text-text-tertiary leading-snug mt-1">{opt.desc}</p>
+                      {active && <CheckCircle2 size={14} className="absolute top-2.5 right-2.5 text-db-red-fg" />}
+                    </button>
+                  );
+                })}
+              </div>
+              {prefillNote && <p className="text-[10px] text-text-tertiary mt-1.5">{prefillNote}</p>}
             </FieldSection>
 
           </div>
@@ -1191,7 +1332,7 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
               </FieldSection>
 
               {/* Business Priorities */}
-              <FieldSection label="Business Priorities" hint="Select what matters most">
+              <FieldSection label="Business Priorities" hint="Pick what matters most, or add your own">
                 <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
                   {BUSINESS_PRIORITIES.map((bp) => {
                     const active = !!priorityChecks[bp.key];
@@ -1199,21 +1340,62 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
                       <button
                         key={bp.key}
                         type="button"
-                        onClick={() => setPriorityChecks((p) => ({ ...p, [bp.key]: !p[bp.key] }))}
+                        onClick={() => toggleBuiltInPriority(bp.key)}
                         className={`relative px-3 py-2 rounded-lg text-xs font-medium text-left transition-smooth border ${
                           active
-                            ? 'border-db-red/30 bg-db-red-50 text-db-red'
+                            ? 'border-db-red/30 bg-db-red-50 text-db-red-fg'
                             : 'border-border text-text-secondary hover:border-border-strong'
                         }`}
                       >
                         <span className="flex items-center gap-1.5">
-                          <bp.icon size={13} className={active ? 'text-db-red' : 'text-text-tertiary'} />
+                          <bp.icon size={13} className={active ? 'text-db-red-fg' : 'text-text-tertiary'} />
                           <span className="truncate">{bp.key}</span>
                         </span>
-                        {active && <CheckCircle2 size={12} className="absolute top-1.5 right-1.5 text-db-red" />}
+                        {active && <CheckCircle2 size={12} className="absolute top-1.5 right-1.5 text-db-red-fg" />}
                       </button>
                     );
                   })}
+                  {customPriorities.map((name) => (
+                    <span
+                      key={name}
+                      className="relative px-3 py-2 rounded-lg text-xs font-medium border border-db-red/30 bg-db-red-50 text-db-red-fg flex items-center gap-1.5"
+                    >
+                      <Target size={13} className="text-db-red-fg shrink-0" />
+                      <span className="truncate" title={name}>{name}</span>
+                      <button
+                        type="button"
+                        aria-label={`Remove ${name}`}
+                        onClick={() => removeCustomPriority(name)}
+                        className="ml-auto shrink-0 text-db-red-fg hover:text-text-primary transition-smooth"
+                      >
+                        <X size={12} />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+                <div className="flex gap-2 mt-2">
+                  <input
+                    type="text"
+                    value={customPriorityDraft}
+                    onChange={(e) => setCustomPriorityDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        addCustomPriority();
+                      }
+                    }}
+                    placeholder="Add your own priority, for example Improve on-time delivery"
+                    aria-label="Add your own business priority"
+                    className="flex-1 px-3 py-2 text-sm border border-border rounded-lg bg-surface text-text-primary placeholder:text-text-tertiary glow-focus transition-smooth"
+                  />
+                  <button
+                    type="button"
+                    onClick={addCustomPriority}
+                    disabled={!customPriorityDraft.trim()}
+                    className="px-3 py-2 text-xs font-semibold rounded-lg border border-border text-text-secondary hover:border-border-strong disabled:opacity-40 transition-smooth"
+                  >
+                    Add
+                  </button>
                 </div>
               </FieldSection>
 
@@ -1230,6 +1412,35 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
                   />
                 </div>
               </FieldSection>
+
+              {/* Strategy and organization — v1.3.0 widget 10_strategic_context */}
+              <div className="border border-border rounded-xl overflow-hidden">
+                <button
+                  type="button"
+                  onClick={() => setShowStrategy(!showStrategy)}
+                  className="w-full flex items-center gap-2 px-4 py-3 text-left hover:bg-bg-subtle/50 transition-smooth"
+                >
+                  <Target size={14} className="text-text-tertiary" />
+                  <span className="text-xs font-bold text-text-primary">Strategy and organization</span>
+                  <span className="text-[10px] text-text-tertiary">
+                    Optional · widget 10_strategic_context · aligns and orders results after discovery
+                  </span>
+                  {(strategyBase || strategyProblems.length > 0) && (
+                    <span className={`ml-auto text-[10px] font-semibold ${strategyProblems.length ? 'text-db-red-fg' : 'text-success-fg'}`}>
+                      {strategyProblems.length ? `${strategyProblems.length} problem${strategyProblems.length > 1 ? 's' : ''}` : 'Set'}
+                    </span>
+                  )}
+                  <ChevronDown
+                    size={14}
+                    className={`text-text-tertiary transition-transform duration-200 ${strategyBase || strategyProblems.length > 0 ? '' : 'ml-auto'} ${showStrategy ? 'rotate-180' : ''}`}
+                  />
+                </button>
+                {showStrategy && (
+                  <div className="px-4 pb-4 pt-1 border-t border-border">
+                    <StrategyEditor key={strategyEditorKey} value={strategyBase} onChange={handleStrategyChange} />
+                  </div>
+                )}
+              </div>
 
               {/* Generation Options */}
               <Field
@@ -1256,15 +1467,15 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
                           <div className={`w-7 h-7 rounded-lg flex items-center justify-center ${
                             active ? 'bg-db-red/10' : 'bg-bg-subtle group-hover:bg-bg'
                           }`}>
-                            <Icon size={14} className={active ? 'text-db-red' : 'text-text-tertiary'} />
+                            <Icon size={14} className={active ? 'text-db-red-fg' : 'text-text-tertiary'} />
                           </div>
                         </div>
-                        <span className={`text-xs font-semibold block ${active ? 'text-db-red' : 'text-text-primary'}`}>
+                        <span className={`text-xs font-semibold block ${active ? 'text-db-red-fg' : 'text-text-primary'}`}>
                           {opt.key}
                         </span>
                         <p className="text-[10px] text-text-tertiary leading-snug mt-0.5">{opt.desc}</p>
                         {active && (
-                          <CheckCircle2 size={14} className="absolute top-2.5 right-2.5 text-db-red" />
+                          <CheckCircle2 size={14} className="absolute top-2.5 right-2.5 text-db-red-fg" />
                         )}
                       </button>
                     );
@@ -1294,12 +1505,11 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
                   }
                 >
                   <DocumentLanguagesMultiselect
-                    variant="launch"
                     value={params['12_documents_languages']}
                     onChange={(v) => updateParam('12_documents_languages', v)}
                   />
                   {needsLanguage && selectedDocLanguages.length === 0 && (
-                    <p className="text-[11px] text-db-red mt-2 font-medium">
+                    <p className="text-[11px] text-db-red-fg mt-2 font-medium">
                       Select at least one language before launching.
                     </p>
                   )}
@@ -1328,7 +1538,7 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
                           onClick={() => updateParam('05_use_cases_quality', q)}
                           className={`flex-1 py-2 rounded-lg text-[11px] font-medium transition-smooth border ${
                             active
-                              ? 'border-db-red/30 bg-db-red-50 text-db-red'
+                              ? 'border-db-red/30 bg-db-red-50 text-db-red-fg'
                               : 'border-border text-text-secondary hover:border-border-strong'
                           }`}
                         >
@@ -1344,15 +1554,33 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
                 <Field
                   label="Auto-Genie scope"
                   icon={Bot}
-                  hint="13_generate_genie_code_for — in Discover mode, generate full Genie instructions for all, top-N (e.g. 5), or 0 to keep skeleton notebooks only."
+                  hint="13_generate_genie_code_for — in Discover mode, 0 (the default) keeps skeleton notebooks only; all or a top-N (e.g. 5) also writes their full Genie instructions."
                 >
                   <input
                     type="text"
                     value={params['13_generate_genie_code_for']}
                     onChange={(e) => updateParam('13_generate_genie_code_for', e.target.value)}
-                    placeholder="5"
+                    placeholder="0"
                     className="w-full pl-10 pr-4 py-2.5 text-sm border border-border rounded-lg bg-surface text-text-primary glow-focus transition-smooth font-mono"
                   />
+                </Field>
+                <Field
+                  label="Best of Best stars"
+                  icon={Star}
+                  hint="16_best_of_best_count — how many use cases to star (0 to 100). Empty uses the number in your generation instructions, or 20. Stars never add, remove or reorder a use case."
+                >
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    value={params['16_best_of_best_count']}
+                    onChange={(e) => updateParam('16_best_of_best_count', e.target.value)}
+                    placeholder="20"
+                    aria-invalid={bestOfBestInvalid}
+                    className={`w-full pl-10 pr-4 py-2.5 text-sm border rounded-lg bg-surface text-text-primary glow-focus transition-smooth font-mono ${bestOfBestInvalid ? 'border-error' : 'border-border'}`}
+                  />
+                  {bestOfBestInvalid && (
+                    <p className="mt-1.5 text-xs text-error-fg">Use a whole number from 0 to 100, or leave it empty for 20.</p>
+                  )}
                 </Field>
               </div>
             </div>
@@ -1395,11 +1623,18 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
               </Chip>
             )}
             <Chip icon={<Sliders size={10} />}>{params['05_use_cases_quality']}</Chip>
+            <Chip icon={params['03_discovery_type'] === 'Standard' ? <Lock size={10} /> : <Eye size={10} />}>
+              {params['03_discovery_type'] || 'Deep'}
+            </Chip>
+            {strategyBase && <Chip icon={<Target size={10} />}>Strategy set</Chip>}
+            <Chip icon={<Star size={10} />}>
+              Stars: {bestOfBestText === '0' ? 'off' : bestOfBestText || '20'}
+            </Chip>
             <Chip icon={<Bot size={10} />}>
               Genie:{' '}
-              {String(params['13_generate_genie_code_for'] || '').trim() === '0'
+              {['', '0'].includes(String(params['13_generate_genie_code_for'] || '').trim())
                 ? 'off'
-                : params['13_generate_genie_code_for'] || '5'}
+                : params['13_generate_genie_code_for']}
             </Chip>
           </div>
         )}
@@ -1407,7 +1642,7 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
         <button
           onClick={handleLaunch}
           disabled={launching || !canLaunch}
-          className="w-full py-3.5 bg-linear-to-r from-db-red to-db-red-hover text-white text-sm font-bold rounded-xl disabled:opacity-50 disabled:cursor-not-allowed transition-smooth flex items-center justify-center gap-2.5 hover:-translate-y-0.5"
+          className="w-full py-3.5 bg-linear-to-r from-db-red-solid to-db-red-solid-hover text-white text-sm font-bold rounded-xl disabled:opacity-50 disabled:cursor-not-allowed transition-smooth flex items-center justify-center gap-2.5 hover:-translate-y-0.5"
           style={{ boxShadow: '0 0 0 1px rgba(255,54,33,0.3), 0 4px 12px rgba(255,54,33,0.2), 0 8px 30px rgba(255,54,33,0.15), 0 20px 60px rgba(255,54,33,0.1)' }}
         >
           {launching ? (
@@ -1432,6 +1667,7 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
   );
 }
 
+
 /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
    Reusable form primitives
    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
@@ -1447,7 +1683,7 @@ function Field({ label, required, icon: Icon, hint, children }) {
         )}
         <span className="text-xs font-bold text-text-primary">
           {label}
-          {required && <span className="text-db-red ml-0.5">*</span>}
+          {required && <span className="text-db-red-fg ml-0.5">*</span>}
         </span>
         {hint && <span className="text-[10px] text-text-tertiary">&mdash; {hint}</span>}
       </div>
@@ -1462,7 +1698,7 @@ function FieldSection({ label, required, hint, children }) {
       <div className="flex items-baseline gap-1.5 mb-1.5">
         <span className="text-xs font-semibold text-text-primary">
           {label}
-          {required && <span className="text-db-red ml-0.5">*</span>}
+          {required && <span className="text-db-red-fg ml-0.5">*</span>}
         </span>
         {hint && <span className="text-[10px] text-text-tertiary">{hint}</span>}
       </div>
@@ -1519,7 +1755,7 @@ function PickerList({ items, selected, onToggle, getKey, getLabel, searchValue, 
                 onClick={() => onToggle(key)}
                 className={`w-full flex items-start gap-2 px-2.5 py-2 rounded-md text-xs text-left transition-smooth ${
                   active
-                    ? 'bg-db-red-50 text-db-red border border-db-red/20'
+                    ? 'bg-db-red-50 text-db-red-fg border border-db-red/20'
                     : 'text-text-primary hover:bg-bg-subtle border border-transparent'
                 }`}
               >
@@ -1540,7 +1776,7 @@ function PickerList({ items, selected, onToggle, getKey, getLabel, searchValue, 
 
 function Chip({ children, icon }) {
   return (
-    <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-semibold border border-db-red/20 bg-db-red-50 text-db-red">
+    <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-semibold border border-db-red/20 bg-db-red-50 text-db-red-fg">
       {icon} {children}
     </span>
   );
@@ -1558,17 +1794,17 @@ function TableSelectionGuidanceWarning({
 
   return (
     <div
-      className={`rounded-lg border border-amber-500/35 bg-amber-500/5 ${compact ? 'p-3' : 'p-4 mb-3'}`}
+      className={`rounded-lg border border-warning/35 bg-warning-bg ${compact ? 'p-3' : 'p-4 mb-3'}`}
       role="status"
     >
       <div className="flex gap-2.5">
-        <AlertCircle size={compact ? 16 : 18} className="text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+        <AlertCircle size={compact ? 16 : 18} className="text-warning-fg shrink-0 mt-0.5" />
         <div className="min-w-0 space-y-2 text-sm text-text-secondary leading-relaxed">
-          <p className="font-semibold text-amber-800 dark:text-amber-200">
+          <p className="font-semibold text-warning-fg">
             {selectionSummary} — this run will likely take longer
           </p>
           {isBroadScope && (
-            <p className="text-xs text-amber-800/90 dark:text-amber-200/90">
+            <p className="text-xs text-text-primary">
               You selected a {scope === 'catalogs' ? 'whole catalog' : 'whole schema'} without naming individual
               tables. Inspire will scan everything in scope. For faster, higher-quality discovery, open the table
               list and pick a focused set instead.
@@ -1594,7 +1830,7 @@ function TableSelectionGuidanceWarning({
             </li>
           </ul>
           {overIdeal && (
-            <p className="text-xs font-medium text-amber-700 dark:text-amber-300">
+            <p className="text-xs font-medium text-warning-fg">
               You are at or above {idealMax} tables — consider narrowing to transactional tables in a single domain
               before launching.
             </p>

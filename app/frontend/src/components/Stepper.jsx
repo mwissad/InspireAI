@@ -23,7 +23,7 @@ export default function Stepper({ currentStep }) {
                   isDone
                     ? 'bg-db-teal text-white'
                     : isCurrent
-                    ? 'bg-db-red text-white shadow-lg shadow-db-red/30'
+                    ? 'bg-db-red-solid text-white shadow-lg shadow-db-red/30'
                     : 'bg-white/5 text-slate-500 border border-white/10'
                 }`}
               >

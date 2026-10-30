@@ -51,7 +51,7 @@ resources:
     inspire_pipeline:
       name: "Inspire AI Pipeline"
       tags:
-        inspire_version: "v1.2.0"
+        inspire_version: "v1.3.0"
         dbx_inspire_ai_type: "discovery"
       tasks:
         - task_key: inspire_notebook
@@ -59,6 +59,7 @@ resources:
             notebook_path: ${var.notebook_path}
             source: WORKSPACE
           timeout_seconds: 14400
+          disable_auto_optimization: true
 
 artifacts:
   # ── Notebook to deploy ──

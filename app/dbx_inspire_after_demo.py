@@ -64,7 +64,7 @@ inspire_args = {
     "09_generation_options": "PDF Catalog",
     "11_generation_path": "./../demos/",
     "12_documents_languages": "English",
-    "13_generate_genie_code_for": "5",
+    "13_generate_genie_code_for": "0",
     "14_session_id": session_id,
 }
 

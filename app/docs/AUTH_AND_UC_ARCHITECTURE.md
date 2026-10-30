@@ -15,7 +15,7 @@ This document describes how **Databricks authentication** and **Unity Catalog (U
 │    │                                                                        │
 │    ├──► WorkspaceClient + SQL warehouse  (runs as NOTEBOOK USER)            │
 │    ├──► Write app.yaml + create/deploy Databricks App                       │
-│    └──► UC GRANTs + warehouse CAN_USE for APP SERVICE PRINCIPAL             │
+│    └──► UC GRANTs + warehouse CAN_MANAGE for APP SERVICE PRINCIPAL          │
 └─────────────────────────────────────────────────────────────────────────────┘
                                         │
                                         │ provisions
@@ -50,8 +50,8 @@ This document describes how **Databricks authentication** and **Unity Catalog (U
 | Catalog list for widget | `w.catalogs.list()` (SDK), excluding `system`, `information_schema`, `__databricks_internal`. |
 | Bundle | Unpacks zip or finds folder with `app.yaml`, publishes notebook under **`/Shared/inspire-ai/`** (SP-readable). |
 | `app.yaml` | `write_app_yaml_deploy`: `NODE_ENV=production`, `INSPIRE_DATABASE`, `INSPIRE_AUTO_SETUP`, optional `INSPIRE_WAREHOUSE_ID`, `NOTEBOOK_PATH`, and a **`service-principal`** resource so the runtime injects **OAuth client id/secret** for the App process. |
-| Grants | On chosen catalog/schema: `USE_CATALOG`, `BROWSE`, `USE_SCHEMA`, `CREATE_TABLE`, `SELECT`, `MODIFY`. On **other** catalogs: **`BROWSE` only** so the App SP can **list metadata** in the UI without broad data privileges. |
-| Warehouse | `PATCH .../permissions/sql/warehouses/{id}` → SP **`CAN_USE`**. |
+| Grants | On chosen catalog/schema: `USE_CATALOG`, `BROWSE`, `CREATE SCHEMA`, `USE_SCHEMA`, `CREATE_TABLE`, `SELECT`, `MODIFY`, `CREATE VOLUME`, `READ VOLUME`, `WRITE VOLUME` (the run log volume `vol_root`), and `MANAGE` on the Inspire schema so Implement can let the Apps it creates read their result tables. On **other** catalogs: **`USE_CATALOG` and `BROWSE`** so the App SP can **list metadata** in the UI without broad data privileges. |
+| Warehouse | `PATCH .../permissions/sql/warehouses/{id}` → SP **`CAN_MANAGE`**, so Implement can attach it to the Apps it creates. |
 
 **Installer sequence (conceptual):**
 

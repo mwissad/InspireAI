@@ -108,7 +108,7 @@ export default function TableBrowser({
       {/* Header */}
       <div className="px-4 py-3 border-b border-border">
         <div className="flex items-center gap-2 mb-3">
-          <Layers size={16} className="text-db-red" />
+          <Layers size={16} className="text-db-red-fg" />
           <h3 className="text-sm font-semibold text-text-primary">Table Browser</h3>
         </div>
 
@@ -133,7 +133,7 @@ export default function TableBrowser({
               onClick={() => setFilterType(f)}
               className={`px-2 py-0.5 text-[11px] font-medium rounded transition-smooth
                 ${filterType === f
-                  ? 'bg-db-red text-white'
+                  ? 'bg-db-red-solid text-white'
                   : 'text-text-secondary hover:bg-bg-subtle'
                 }`}
             >
@@ -145,7 +145,7 @@ export default function TableBrowser({
 
       {/* Error */}
       {error && (
-        <div className="mx-4 mt-2 p-2 bg-error-bg text-error text-xs rounded-md">
+        <div className="mx-4 mt-2 p-2 bg-error-bg text-error-fg text-xs rounded-md">
           {error}
         </div>
       )}
@@ -170,7 +170,7 @@ export default function TableBrowser({
                 ? <ChevronDown size={14} className="text-text-tertiary" />
                 : <ChevronRight size={14} className="text-text-tertiary" />
               }
-              <Database size={14} className="text-text-secondary group-hover:text-db-red transition-smooth" />
+              <Database size={14} className="text-text-secondary group-hover:text-db-red-fg transition-smooth" />
               <span className="font-medium truncate">{cat.name}</span>
               {loading[cat.name] && (
                 <Loader2 size={12} className="ml-auto animate-spin text-text-tertiary" />
@@ -222,7 +222,7 @@ export default function TableBrowser({
                                 >
                                   <Table2
                                     size={12}
-                                    className={selected ? 'text-db-red' : 'text-text-tertiary'}
+                                    className={selected ? 'text-db-red-fg' : 'text-text-tertiary'}
                                   />
                                   <span className="truncate flex-1 text-left">{tbl.name}</span>
                                   <span className="text-[10px] text-text-tertiary font-mono">
@@ -247,7 +247,7 @@ export default function TableBrowser({
       {selectedTables.length > 0 && (
         <div className="px-4 py-2.5 border-t border-border bg-bg">
           <div className="text-xs text-text-secondary">
-            <span className="font-medium text-db-red">{selectedTables.length}</span> table{selectedTables.length !== 1 ? 's' : ''} selected
+            <span className="font-medium text-db-red-fg">{selectedTables.length}</span> table{selectedTables.length !== 1 ? 's' : ''} selected
           </div>
         </div>
       )}

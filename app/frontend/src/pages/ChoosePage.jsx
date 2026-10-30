@@ -5,9 +5,9 @@ import MagneticButton from '../components/MagneticButton';
 import { SkeletonCard } from '../components/SkeletonLoader';
 
 const STATUS_CONFIG = {
-  completed: { label: 'Completed', bg: 'bg-[#27AE60]/10', text: 'text-[#27AE60]', dot: 'bg-[#27AE60]' },
-  running:   { label: 'In Progress', bg: 'bg-[#FF8A6B]/10', text: 'text-[#FF8A6B]', dot: 'bg-[#FF8A6B]' },
-  failed:    { label: 'Failed', bg: 'bg-[#E74C3C]/10', text: 'text-[#E74C3C]', dot: 'bg-[#E74C3C]' },
+  completed: { label: 'Completed', bg: 'bg-success-bg', text: 'text-success-fg', dot: 'bg-success' },
+  running:   { label: 'In Progress', bg: 'bg-info-bg', text: 'text-info-fg', dot: 'bg-info' },
+  failed:    { label: 'Failed', bg: 'bg-error-bg', text: 'text-error-fg', dot: 'bg-error' },
 };
 
 function getStatus(session) {
@@ -245,16 +245,16 @@ export default function ChoosePage({ settings, onNewExperiment, onNoData, onView
           <button
             type="button"
             onClick={onNewExperiment}
-            className="group w-full flex items-center gap-4 px-6 py-5 rounded-2xl border border-[#FF3621]/20 bg-gradient-to-r from-[#FF3621]/[0.06] to-transparent hover:from-[#FF3621]/[0.12] text-left transition-all"
+            className="group w-full flex items-center gap-4 px-6 py-5 rounded-2xl border border-db-red/20 bg-gradient-to-r from-db-red/[0.06] to-transparent hover:from-db-red/[0.12] text-left transition-all"
           >
-            <div className="w-12 h-12 rounded-xl bg-[#FF3621]/10 flex items-center justify-center">
-              <Rocket size={22} className="text-[#FF3621]" />
+            <div className="w-12 h-12 rounded-xl bg-db-red/10 flex items-center justify-center">
+              <Rocket size={22} className="text-db-red-fg" />
             </div>
             <div className="flex-1">
               <p className="text-sm font-semibold text-text-primary">I have Unity Catalog data</p>
               <p className="text-xs text-text-secondary mt-0.5">Pick catalogs, schemas, or tables</p>
             </div>
-            <ArrowRight size={18} className="text-text-tertiary group-hover:text-[#FF3621]" />
+            <ArrowRight size={18} className="text-text-tertiary group-hover:text-db-red-fg" />
           </button>
           <button
             type="button"
@@ -262,7 +262,7 @@ export default function ChoosePage({ settings, onNewExperiment, onNoData, onView
             className="group w-full flex items-center gap-4 px-6 py-5 rounded-2xl border border-border bg-surface hover:border-border-strong text-left transition-all"
           >
             <div className="w-12 h-12 rounded-xl bg-bg-subtle flex items-center justify-center">
-              <Sparkles size={22} className="text-db-red" />
+              <Sparkles size={22} className="text-db-red-fg" />
             </div>
             <div className="flex-1">
               <p className="text-sm font-semibold text-text-primary">I don&apos;t have data</p>
@@ -302,15 +302,15 @@ export default function ChoosePage({ settings, onNewExperiment, onNoData, onView
   return (
     <div className="min-h-[calc(100vh-64px)] flex items-start justify-center pt-12 pb-16 px-6 relative overflow-hidden">
       {/* Ambient background glows */}
-      <div className="absolute top-[-15%] left-[-5%] w-[40%] h-[40%] rounded-full bg-[#FF3621]/[0.03] blur-[120px] pointer-events-none" />
-      <div className="absolute bottom-[-10%] right-[-5%] w-[35%] h-[35%] rounded-full bg-[#FF6B50]/[0.02] blur-[100px] pointer-events-none" />
+      <div className="absolute top-[-15%] left-[-5%] w-[40%] h-[40%] rounded-full bg-db-red/[0.03] blur-[120px] pointer-events-none" />
+      <div className="absolute bottom-[-10%] right-[-5%] w-[35%] h-[35%] rounded-full bg-db-red/[0.02] blur-[100px] pointer-events-none" />
 
       <div className="relative z-10 max-w-3xl w-full space-y-8">
 
         {/* ── Header ── */}
         <div className="text-center space-y-3">
-          <div className="inline-flex items-center gap-2 px-3 py-1.5 bg-[rgba(255,248,237,0.04)] border border-[rgba(255,248,237,0.08)] rounded-full">
-            <BarChart3 size={12} className="text-[#FF3621]" />
+          <div className="inline-flex items-center gap-2 px-3 py-1.5 bg-bg-subtle border border-border rounded-full">
+            <BarChart3 size={12} className="text-db-red-fg" />
             <span className="text-[11px] font-medium text-text-secondary">
               {completedCount} completed{inProgressCount > 0 ? ` · ${inProgressCount} in progress` : ''}
             </span>
@@ -335,10 +335,10 @@ export default function ChoosePage({ settings, onNewExperiment, onNoData, onView
           <button
             type="button"
             onClick={onNewExperiment}
-            className="group flex items-center gap-4 px-5 py-4 rounded-2xl border border-[#FF3621]/20 bg-gradient-to-r from-[#FF3621]/[0.06] to-transparent hover:from-[#FF3621]/[0.12] text-left transition-all"
+            className="group flex items-center gap-4 px-5 py-4 rounded-2xl border border-db-red/20 bg-gradient-to-r from-db-red/[0.06] to-transparent hover:from-db-red/[0.12] text-left transition-all"
           >
-            <div className="w-10 h-10 rounded-xl bg-[#FF3621]/10 flex items-center justify-center shrink-0">
-              <Rocket size={20} className="text-[#FF3621]" />
+            <div className="w-10 h-10 rounded-xl bg-db-red/10 flex items-center justify-center shrink-0">
+              <Rocket size={20} className="text-db-red-fg" />
             </div>
             <div className="flex-1 min-w-0">
               <p className="text-sm font-semibold text-text-primary">I have data</p>
@@ -351,7 +351,7 @@ export default function ChoosePage({ settings, onNewExperiment, onNoData, onView
             className="group flex items-center gap-4 px-5 py-4 rounded-2xl border border-border bg-surface hover:border-border-strong text-left transition-all"
           >
             <div className="w-10 h-10 rounded-xl bg-bg-subtle flex items-center justify-center shrink-0">
-              <Sparkles size={20} className="text-db-red" />
+              <Sparkles size={20} className="text-db-red-fg" />
             </div>
             <div className="flex-1 min-w-0">
               <p className="text-sm font-semibold text-text-primary">No data yet</p>
@@ -366,7 +366,7 @@ export default function ChoosePage({ settings, onNewExperiment, onNoData, onView
             <h2 className="text-xs font-semibold text-text-secondary uppercase tracking-[0.1em]">Previous Experiments</h2>
             <button
               onClick={() => onViewResults(null)}
-              className="text-[11px] text-text-tertiary hover:text-[#FF3621] transition-colors flex items-center gap-1"
+              className="text-[11px] text-text-tertiary hover:text-db-red-fg transition-colors flex items-center gap-1"
             >
               View all <ChevronRight size={12} />
             </button>
@@ -417,7 +417,7 @@ export default function ChoosePage({ settings, onNewExperiment, onNoData, onView
               return (
                 <div
                   key={session.session_id}
-                  className={`rounded-xl bg-surface/50 border transition-all duration-200 ${isQuickOpen ? 'border-border-strong' : 'border-border hover:border-[rgba(255,248,237,0.12)]'}`}
+                  className={`rounded-xl bg-surface/50 border transition-all duration-200 ${isQuickOpen ? 'border-border-strong' : 'border-border hover:border-border-strong'}`}
                 >
                   {/* Main clickable row */}
                   <button
@@ -451,7 +451,7 @@ export default function ChoosePage({ settings, onNewExperiment, onNoData, onView
                           </span>
                         )}
                         {mode && (
-                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-[rgba(255,248,237,0.04)] text-text-tertiary font-mono">
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-subtle text-text-tertiary font-mono">
                             {mode}
                           </span>
                         )}
@@ -489,9 +489,9 @@ export default function ChoosePage({ settings, onNewExperiment, onNoData, onView
                     {/* Progress / Quick View / Delete / Arrow */}
                     <div className="flex-shrink-0 flex items-center gap-2">
                       {status === 'running' && (
-                        <div className="w-16 h-1.5 rounded-full bg-[rgba(255,248,237,0.06)] overflow-hidden">
+                        <div className="w-16 h-1.5 rounded-full bg-bg-subtle overflow-hidden">
                           <div
-                            className="h-full rounded-full bg-[#FF8A6B] transition-all duration-500"
+                            className="h-full rounded-full bg-db-red transition-all duration-500"
                             style={{ width: `${session.completed_percent || 0}%` }}
                           />
                         </div>
@@ -513,7 +513,7 @@ export default function ChoosePage({ settings, onNewExperiment, onNoData, onView
                               if (!has) fetchUcsForQuickView(session.session_id);
                             }
                           }}
-                          className="px-2.5 py-1.5 text-[10px] font-medium rounded-lg flex items-center gap-1 transition-all border border-border hover:border-[#FF3621]/30 hover:bg-[#FF3621]/5 text-text-tertiary hover:text-[#FF3621]"
+                          className="px-2.5 py-1.5 text-[10px] font-medium rounded-lg flex items-center gap-1 transition-all border border-border hover:border-db-red/30 hover:bg-db-red-50 text-text-tertiary hover:text-db-red-fg"
                           title="Quick view use cases"
                         >
                           {isQuickOpen ? (
@@ -534,13 +534,13 @@ export default function ChoosePage({ settings, onNewExperiment, onNoData, onView
                           <button
                             onClick={(e) => { e.stopPropagation(); deleteSession(session.session_id); }}
                             disabled={deleting === session.session_id}
-                            className="px-2 py-1 text-[10px] font-medium rounded-md bg-[#E74C3C]/15 text-[#E74C3C] hover:bg-[#E74C3C]/25 transition-colors"
+                            className="px-2 py-1 text-[10px] font-medium rounded-md bg-error-bg text-error-fg hover:bg-error/20 transition-colors"
                           >
                             {deleting === session.session_id ? <Loader2 size={10} className="animate-spin" /> : 'Delete'}
                           </button>
                           <button
                             onClick={(e) => { e.stopPropagation(); setConfirmDelete(null); }}
-                            className="px-2 py-1 text-[10px] font-medium rounded-md bg-[rgba(255,248,237,0.06)] text-text-tertiary hover:text-text-secondary transition-colors"
+                            className="px-2 py-1 text-[10px] font-medium rounded-md bg-bg-subtle text-text-tertiary hover:text-text-secondary transition-colors"
                           >
                             Cancel
                           </button>
@@ -548,7 +548,7 @@ export default function ChoosePage({ settings, onNewExperiment, onNoData, onView
                       ) : (
                         <button
                           onClick={(e) => { e.stopPropagation(); setConfirmDelete(session.session_id); }}
-                          className="p-1.5 rounded-lg text-text-tertiary opacity-0 group-hover:opacity-100 hover:text-[#E74C3C] hover:bg-[#E74C3C]/10 transition-all"
+                          className="p-1.5 rounded-lg text-text-tertiary opacity-0 group-hover:opacity-100 hover:text-error-fg hover:bg-error-bg transition-all"
                           title="Delete experiment"
                         >
                           <Trash2 size={14} />
@@ -565,7 +565,7 @@ export default function ChoosePage({ settings, onNewExperiment, onNoData, onView
                     <div className="border-t border-border px-5 py-4 space-y-4">
                       {quickViewLoadingSid === sidStr && !panelSummary && (
                         <div className="flex items-center gap-2 text-sm text-text-secondary py-2">
-                          <Loader2 size={14} className="animate-spin text-[#FF3621]" />
+                          <Loader2 size={14} className="animate-spin text-db-red-fg" />
                           Loading use cases…
                         </div>
                       )}
@@ -583,7 +583,7 @@ export default function ChoosePage({ settings, onNewExperiment, onNoData, onView
                       {panelSummary.domainNames.length > 0 && (
                         <div className="flex flex-wrap gap-1.5">
                           {panelSummary.domainNames.map((d) => (
-                            <span key={d} className="text-[10px] font-medium px-2.5 py-1 rounded-full bg-[#FF3621]/8 text-[#FF3621] border border-[#FF3621]/15">
+                            <span key={d} className="text-[10px] font-medium px-2.5 py-1 rounded-full bg-db-red-50 text-db-red-fg border border-db-red/15">
                               {d}
                             </span>
                           ))}
@@ -631,7 +631,7 @@ export default function ChoosePage({ settings, onNewExperiment, onNoData, onView
                       <button
                         type="button"
                         onClick={() => onViewResults(session.session_id)}
-                        className="w-full flex items-center justify-center gap-2 py-2.5 rounded-lg bg-[#FF3621]/10 text-[#FF3621] text-[11px] font-semibold hover:bg-[#FF3621]/15 transition-colors"
+                        className="w-full flex items-center justify-center gap-2 py-2.5 rounded-lg bg-db-red-50 text-db-red-fg text-[11px] font-semibold hover:bg-db-red-100 transition-colors"
                       >
                         <BarChart3 size={12} /> View Full Results
                         <ArrowRight size={12} />
@@ -645,7 +645,7 @@ export default function ChoosePage({ settings, onNewExperiment, onNoData, onView
             {sessions.length > 5 && (
               <button
                 onClick={() => setShowAll(prev => !prev)}
-                className="w-full flex items-center justify-center gap-2 py-3 rounded-xl border border-dashed border-border hover:border-[rgba(255,248,237,0.15)] text-text-tertiary hover:text-text-secondary transition-all duration-200 text-xs font-medium"
+                className="w-full flex items-center justify-center gap-2 py-3 rounded-xl border border-dashed border-border hover:border-border-strong text-text-tertiary hover:text-text-secondary transition-all duration-200 text-xs font-medium"
               >
                 {showAll ? (
                   <><ChevronUp size={14} /> Show less</>
@@ -658,7 +658,7 @@ export default function ChoosePage({ settings, onNewExperiment, onNoData, onView
         </div>
 
         {error && (
-          <div className="flex flex-col items-center gap-1 text-xs text-yellow-400/80 justify-center pt-2 px-4 text-center">
+          <div className="flex flex-col items-center gap-1 text-xs text-warning-fg justify-center pt-2 px-4 text-center">
             <div className="flex items-center gap-2">
               <AlertCircle size={13} />
               <span>Could not load all sessions — you can still start a new experiment.</span>

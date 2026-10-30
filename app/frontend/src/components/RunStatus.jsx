@@ -4,11 +4,14 @@ import {
   RotateCcw, StopCircle, Timer, Cpu, Trash2, FileText
 } from 'lucide-react';
 import DatabricksLogo from './DatabricksLogo';
+import { formatDuration as formatSpan } from '../lib/formatWhen';
+
+const formatDuration = (ms) => formatSpan(ms, '—');
 
 const STATE_CONFIG = {
   PENDING: { color: 'text-db-gold', bg: 'bg-db-gold/10', border: 'border-db-gold/30', icon: Clock, label: 'Pending' },
   QUEUED: { color: 'text-db-gold', bg: 'bg-db-gold/10', border: 'border-db-gold/30', icon: Clock, label: 'Queued' },
-  RUNNING: { color: 'text-db-red-light', bg: 'bg-db-red/10', border: 'border-db-red/30', icon: Loader2, label: 'Running', spin: true },
+  RUNNING: { color: 'text-db-red-fg', bg: 'bg-db-red/10', border: 'border-db-red/30', icon: Loader2, label: 'Running', spin: true },
   TERMINATING: { color: 'text-db-orange', bg: 'bg-db-orange/10', border: 'border-db-orange/30', icon: StopCircle, label: 'Terminating' },
   TERMINATED: { color: 'text-db-teal', bg: 'bg-db-teal/10', border: 'border-db-teal/30', icon: CheckCircle2, label: 'Completed' },
   SKIPPED: { color: 'text-slate-400', bg: 'bg-slate-500/10', border: 'border-slate-500/30', icon: Trash2, label: 'Skipped' },
@@ -34,17 +37,6 @@ function isTerminal(state) {
   return ls === 'TERMINATED' || ls === 'INTERNAL_ERROR' || ls === 'SKIPPED';
 }
 
-function formatDuration(ms) {
-  if (!ms) return '—';
-  const seconds = Math.floor(ms / 1000);
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  const remSec = seconds % 60;
-  if (minutes < 60) return `${minutes}m ${remSec}s`;
-  const hours = Math.floor(minutes / 60);
-  const remMin = minutes % 60;
-  return `${hours}h ${remMin}m`;
-}
 
 export default function RunStatus({ runId, onNewRun, apiFetch }) {
   const [status, setStatus] = useState(null);
@@ -156,7 +148,7 @@ export default function RunStatus({ runId, onNewRun, apiFetch }) {
                   href={status.run_page_url}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="px-4 py-2 rounded-xl bg-db-red/10 border border-db-red/30 text-db-red-light text-sm font-medium hover:bg-db-red/20 transition-all"
+                  className="px-4 py-2 rounded-xl bg-db-red/10 border border-db-red/30 text-db-red-fg text-sm font-medium hover:bg-db-red/20 transition-all"
                 >
                   <ExternalLink className="w-4 h-4 inline mr-1.5" />
                   View in Databricks
@@ -201,7 +193,7 @@ export default function RunStatus({ runId, onNewRun, apiFetch }) {
       {output && (
         <div className="rounded-2xl border border-white/10 bg-db-navy/50 backdrop-blur-lg overflow-hidden">
           <div className="px-6 py-4 border-b border-white/5 flex items-center gap-2">
-            <FileText className="w-4 h-4 text-db-red-light" />
+            <FileText className="w-4 h-4 text-db-red-fg" />
             <h3 className="text-sm font-semibold text-white">Notebook Output</h3>
           </div>
           <div className="p-6">

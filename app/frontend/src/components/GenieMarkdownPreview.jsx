@@ -171,7 +171,7 @@ const mdComponents = {
     />
   ),
   h2: (props) => (
-    <h2 className="text-[12px] font-bold text-db-red mt-2.5 mb-1 leading-snug" {...props} />
+    <h2 className="text-[12px] font-bold text-db-red-fg mt-2.5 mb-1 leading-snug" {...props} />
   ),
   h3: (props) => (
     <h3 className="text-[11px] font-semibold text-text-primary mt-2 mb-0.5 leading-snug" {...props} />
@@ -195,7 +195,7 @@ const mdComponents = {
   em: (props) => <em className="italic text-text-secondary" {...props} />,
   a: ({ children, ...props }) => (
     <a
-      className="text-db-red underline underline-offset-2 decoration-db-red/40 hover:decoration-db-red wrap-break-word"
+      className="text-db-red-fg underline underline-offset-2 decoration-db-red/40 hover:decoration-db-red wrap-break-word"
       target="_blank"
       rel="noopener noreferrer"
       {...props}
@@ -247,7 +247,7 @@ const mdComponents = {
     }
     return (
       <code
-        className="rounded px-1 py-0.5 text-[10px] font-mono text-db-red bg-db-red-50/80 dark:bg-db-red/10 border border-db-red/15 whitespace-pre-wrap wrap-break-word"
+        className="rounded px-1 py-0.5 text-[10px] font-mono text-db-red-fg bg-db-red-50/80 dark:bg-db-red/10 border border-db-red/15 whitespace-pre-wrap wrap-break-word"
         {...rest}
       >
         {children}
@@ -290,22 +290,22 @@ function NotebookCell({ cell, index }) {
           <span className="font-semibold uppercase tracking-wide text-text-secondary">{label}</span>
           {cell?.cell_type === 'code' && lang && (
             <>
-              <span className="text-border">·</span>
-              <span className="text-warning font-semibold uppercase">{lang}</span>
+              <span className="text-text-tertiary">·</span>
+              <span className="text-warning-fg font-semibold uppercase">{lang}</span>
             </>
           )}
-          <span className="text-border">·</span>
+          <span className="text-text-tertiary">·</span>
           <span>Cell {index + 1}</span>
           {cell?.cell_type === 'code' && (
             <>
-              <span className="text-border">·</span>
-              <span className="text-info">In [{exec ?? ' '}]</span>
+              <span className="text-text-tertiary">·</span>
+              <span className="text-info-fg">In [{exec ?? ' '}]</span>
             </>
           )}
         </header>
         <div className="px-3 py-2.5">
           {cell?.cell_type === 'code' ? (
-            <pre className="rounded-md bg-[#1e1e24] text-[#d4d4d8] border border-border p-3 overflow-x-auto text-[10px] font-mono leading-relaxed whitespace-pre-wrap wrap-break-word dark:bg-[#0d0d10]">
+            <pre className="rounded-md bg-bg-subtle text-text-primary border border-border p-3 overflow-x-auto text-[10px] font-mono leading-relaxed whitespace-pre-wrap wrap-break-word">
               {truncated || <span className="text-text-tertiary italic">(empty code cell)</span>}
             </pre>
           ) : cell?.cell_type === 'raw' ? (

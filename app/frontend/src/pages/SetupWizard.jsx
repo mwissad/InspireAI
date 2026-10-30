@@ -15,9 +15,9 @@ const STEPS = [
 ];
 
 function StatusIcon({ status, size = 16 }) {
-  if (status === 'ok') return <CheckCircle2 size={size} className="text-success" />;
-  if (status === 'error') return <XCircle size={size} className="text-error" />;
-  if (status === 'loading') return <Loader2 size={size} className="animate-spin text-info" />;
+  if (status === 'ok') return <CheckCircle2 size={size} className="text-success-fg" />;
+  if (status === 'error') return <XCircle size={size} className="text-error-fg" />;
+  if (status === 'loading') return <Loader2 size={size} className="animate-spin text-info-fg" />;
   return <div className="w-4 h-4 rounded-full border-2 border-border" />;
 }
 
@@ -244,8 +244,8 @@ export default function SetupWizard({ settings, update, onComplete }) {
               <button
                 onClick={() => i < step && setStep(i)}
                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-medium transition-all ${
-                  i === step ? 'bg-db-red text-white' :
-                  i < step ? 'bg-success/10 text-success cursor-pointer hover:bg-success/20' :
+                  i === step ? 'bg-db-red-solid text-white' :
+                  i < step ? 'bg-success/10 text-success-fg cursor-pointer hover:bg-success/20' :
                   'bg-bg-subtle text-text-tertiary'
                 }`}
               >
@@ -279,7 +279,7 @@ export default function SetupWizard({ settings, update, onComplete }) {
                 </p>
               </div>
               {databricksHost && (
-                <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-success-bg text-success text-xs">
+                <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-success-bg text-success-fg text-xs">
                   <CheckCircle2 size={14} /> Workspace URL configured
                 </div>
               )}
@@ -290,7 +290,7 @@ export default function SetupWizard({ settings, update, onComplete }) {
           {step === 1 && (
             <div className="space-y-4">
               {isDatabricksApp ? (
-                <div className="flex items-center gap-2 px-4 py-3 rounded-lg bg-success-bg text-success text-sm">
+                <div className="flex items-center gap-2 px-4 py-3 rounded-lg bg-success-bg text-success-fg text-sm">
                   <CheckCircle2 size={16} /> Authenticated automatically via Databricks App. No PAT needed.
                 </div>
               ) : (
@@ -301,7 +301,7 @@ export default function SetupWizard({ settings, update, onComplete }) {
                         key={mode}
                         onClick={() => update('authMode', mode)}
                         className={`flex-1 px-4 py-2.5 rounded-xl text-xs font-medium border transition-all ${
-                          authMode === mode ? 'border-db-red bg-db-red-50 text-db-red' : 'border-border text-text-secondary hover:border-border-strong'
+                          authMode === mode ? 'border-db-red bg-db-red-50 text-db-red-fg' : 'border-border text-text-secondary hover:border-border-strong'
                         }`}
                       >
                         {mode === 'pat' ? 'Personal Access Token' : 'Service Principal'}
@@ -344,7 +344,7 @@ export default function SetupWizard({ settings, update, onComplete }) {
                   )}
 
                   {token && (
-                    <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-success-bg text-success text-xs">
+                    <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-success-bg text-success-fg text-xs">
                       <CheckCircle2 size={14} /> Token configured ({token.slice(0, 6)}...{token.slice(-4)})
                     </div>
                   )}
@@ -376,7 +376,7 @@ export default function SetupWizard({ settings, update, onComplete }) {
                         <p className="text-sm font-medium text-text-primary">{wh.name}</p>
                         <p className="text-[10px] text-text-tertiary">{wh.id} · {wh.state}{wh.enable_serverless_compute ? ' · Serverless' : ''}</p>
                       </div>
-                      {warehouseId === wh.id && <CheckCircle2 size={16} className="text-db-red" />}
+                      {warehouseId === wh.id && <CheckCircle2 size={16} className="text-db-red-fg" />}
                     </button>
                   ))}
                 </>
@@ -419,7 +419,7 @@ export default function SetupWizard({ settings, update, onComplete }) {
                 </div>
               </div>
               {inspireDatabase && inspireDatabase.includes('.') && (
-                <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-info-bg text-info text-xs">
+                <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-info-bg text-info-fg text-xs">
                   <Database size={14} /> Will use <span className="font-mono font-bold">{inspireDatabase}</span>
                   {creatingDb && <Loader2 size={12} className="animate-spin ml-1" />}
                 </div>
@@ -435,7 +435,7 @@ export default function SetupWizard({ settings, update, onComplete }) {
                   <p className="text-sm text-text-secondary mb-4">Ready to verify your configuration.</p>
                   <button
                     onClick={runVerification}
-                    className="inline-flex items-center gap-2 px-6 py-3 bg-db-red text-white text-sm font-semibold rounded-xl hover:bg-db-red-hover transition-colors"
+                    className="inline-flex items-center gap-2 px-6 py-3 bg-db-red-solid text-white text-sm font-semibold rounded-xl hover:bg-db-red-solid-hover transition-colors"
                   >
                     <ClipboardCheck size={16} /> Run Verification
                   </button>
@@ -444,7 +444,7 @@ export default function SetupWizard({ settings, update, onComplete }) {
 
               {verifying && (
                 <div className="flex items-center gap-3 py-8 justify-center">
-                  <Loader2 size={20} className="animate-spin text-db-red" />
+                  <Loader2 size={20} className="animate-spin text-db-red-fg" />
                   <span className="text-sm text-text-secondary">Checking all prerequisites...</span>
                 </div>
               )}
@@ -465,7 +465,7 @@ export default function SetupWizard({ settings, update, onComplete }) {
                     <button
                       onClick={publishNotebook}
                       disabled={publishing}
-                      className="w-full flex items-center justify-center gap-2 px-4 py-3 mt-4 bg-db-red text-white text-sm font-semibold rounded-xl hover:bg-db-red-hover transition-colors disabled:opacity-50"
+                      className="w-full flex items-center justify-center gap-2 px-4 py-3 mt-4 bg-db-red-solid text-white text-sm font-semibold rounded-xl hover:bg-db-red-solid-hover transition-colors disabled:opacity-50"
                     >
                       {publishing ? <><Loader2 size={14} className="animate-spin" /> Publishing notebook...</> : <><FileCode size={14} /> Publish Notebook to Workspace</>}
                     </button>
@@ -473,9 +473,9 @@ export default function SetupWizard({ settings, update, onComplete }) {
 
                   {publishResult?.ok && (
                     <div className="flex items-center gap-2 px-4 py-3 rounded-xl border border-success/20 bg-success-bg">
-                      <CheckCircle2 size={16} className="text-success" />
+                      <CheckCircle2 size={16} className="text-success-fg" />
                       <div>
-                        <p className="text-xs font-semibold text-success">Notebook published!</p>
+                        <p className="text-xs font-semibold text-success-fg">Notebook published!</p>
                         <p className="text-[10px] text-text-secondary font-mono">{publishResult.path}</p>
                       </div>
                     </div>
@@ -511,7 +511,7 @@ export default function SetupWizard({ settings, update, onComplete }) {
               <button
                 onClick={handleNext}
                 disabled={!canProceed() && step < 4}
-                className="flex items-center gap-2 px-6 py-2.5 bg-db-red text-white text-sm font-semibold rounded-xl hover:bg-db-red-hover disabled:opacity-30 transition-all"
+                className="flex items-center gap-2 px-6 py-2.5 bg-db-red-solid text-white text-sm font-semibold rounded-xl hover:bg-db-red-solid-hover disabled:opacity-30 transition-all"
               >
                 {step === 4 ? (verification?.ok ? 'Get Started' : 'Verify') : 'Continue'} <ArrowRight size={14} />
               </button>

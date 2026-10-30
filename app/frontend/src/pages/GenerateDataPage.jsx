@@ -9,6 +9,7 @@ import {
   AlertCircle,
   CheckCircle2,
 } from 'lucide-react';
+import { responseError } from '../lib/apiClient';
 
 export default function GenerateDataPage({ settings, onBack, onLaunched }) {
   const { databricksHost, token, inspireDatabase, serverEnvHasPat } = settings;
@@ -29,17 +30,7 @@ export default function GenerateDataPage({ settings, onBack, onLaunched }) {
       }
       if (databricksHost) headers['X-Databricks-Host'] = databricksHost;
       const resp = await fetch(url, { ...opts, headers });
-      if (!resp.ok) {
-        const errText = await resp.text().catch(() => '');
-        let msg = errText || `${resp.status}`;
-        try {
-          const j = JSON.parse(errText);
-          if (j.error) msg = j.error;
-        } catch {
-          /* ignore */
-        }
-        throw new Error(msg);
-      }
+      if (!resp.ok) throw await responseError(resp);
       return resp.json();
     },
     [token, databricksHost],
@@ -86,7 +77,7 @@ export default function GenerateDataPage({ settings, onBack, onLaunched }) {
 
       <div className="flex items-start gap-4 mb-8">
         <div className="w-12 h-12 rounded-xl bg-db-red/10 flex items-center justify-center shrink-0">
-          <Sparkles size={24} className="text-db-red" />
+          <Sparkles size={24} className="text-db-red-fg" />
         </div>
         <div>
           <h1 className="text-2xl font-bold text-text-primary tracking-tight">I don&apos;t have data</h1>
@@ -100,8 +91,8 @@ export default function GenerateDataPage({ settings, onBack, onLaunched }) {
       </div>
 
       {!canCallApi && (
-        <div className="mb-6 p-4 rounded-lg border border-amber-500/30 bg-amber-500/5 flex gap-3">
-          <AlertCircle size={18} className="text-amber-600 shrink-0 mt-0.5" />
+        <div className="mb-6 p-4 rounded-lg border border-warning/30 bg-warning-bg flex gap-3">
+          <AlertCircle size={18} className="text-warning-fg shrink-0 mt-0.5" />
           <p className="text-sm text-text-secondary">
             Connect your workspace first: set <code className="text-xs">DATABRICKS_HOST</code> and{' '}
             <code className="text-xs">DATABRICKS_TOKEN</code> in <code className="text-xs">.env</code>, or use the Setup Wizard.
@@ -114,7 +105,7 @@ export default function GenerateDataPage({ settings, onBack, onLaunched }) {
           <label className="flex items-center gap-2 text-xs font-bold text-text-primary mb-2">
             <Building2 size={14} className="text-text-tertiary" />
             Business name
-            <span className="text-db-red">*</span>
+            <span className="text-db-red-fg">*</span>
           </label>
           <input
             type="text"
@@ -130,7 +121,7 @@ export default function GenerateDataPage({ settings, onBack, onLaunched }) {
           <label className="flex items-center gap-2 text-xs font-bold text-text-primary mb-2">
             <Sparkles size={14} className="text-text-tertiary" />
             Describe your data
-            <span className="text-db-red">*</span>
+            <span className="text-db-red-fg">*</span>
           </label>
           <textarea
             value={description}
@@ -141,7 +132,7 @@ export default function GenerateDataPage({ settings, onBack, onLaunched }) {
             required
           />
           <p className="text-[11px] text-text-tertiary mt-1.5">
-            Genie-style: prompt → JSON (code + 5 tables + column descriptions) → execute on Spark. Tables land in{' '}
+            Genie-style: your prompt becomes the code, 5 tables and their column descriptions, which then run on Spark. Tables land in{' '}
             <code className="font-mono">{inspireDatabase?.split('.')[0] || 'catalog'}.inspire_demo_*</code>;
             tracking in <code className="font-mono">{inspireDatabase || 'catalog._inspire'}</code>.
           </p>
@@ -155,19 +146,19 @@ export default function GenerateDataPage({ settings, onBack, onLaunched }) {
         </div>
 
         {error && (
-          <div className="p-3 rounded-lg border border-red-500/30 bg-red-500/5 text-sm text-red-700 flex gap-2">
+          <div className="p-3 rounded-lg border border-error/30 bg-error-bg text-sm text-error-fg flex gap-2">
             <AlertCircle size={16} className="shrink-0" />
             <span>{error}</span>
           </div>
         )}
 
         {lastResult?.ok && (
-          <div className="p-3 rounded-lg border border-green-500/30 bg-green-500/5 text-sm text-green-800">
+          <div className="p-3 rounded-lg border border-success/30 bg-success-bg text-sm text-success-fg">
             <div className="flex items-center gap-2 font-medium mb-1">
               <CheckCircle2 size={16} />
               Pipeline started
             </div>
-            <ol className="text-xs opacity-90 list-decimal list-inside space-y-0.5 mt-1">
+            <ol className="text-xs list-decimal list-inside space-y-0.5 mt-1">
               <li>Generate 5 Delta tables with UC table/column comments</li>
               <li>
                 Run Inspire discovery →{' '}
@@ -190,7 +181,7 @@ export default function GenerateDataPage({ settings, onBack, onLaunched }) {
         <button
           type="submit"
           disabled={submitting || !canCallApi}
-          className="w-full flex items-center justify-center gap-2 py-3 rounded-lg bg-db-red text-white font-semibold text-sm hover:bg-db-red-dark disabled:opacity-50 disabled:cursor-not-allowed transition-smooth"
+          className="w-full flex items-center justify-center gap-2 py-3 rounded-lg bg-db-red-solid text-white font-semibold text-sm hover:bg-db-red-solid-hover disabled:opacity-50 disabled:cursor-not-allowed transition-smooth"
         >
           {submitting ? (
             <>

@@ -10,10 +10,13 @@
  */
 import fs from 'fs';
 import path from 'path';
+import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const distJs = path.join(root, 'frontend/dist/assets');
+const { INSPIRE_AGENT_VERSION } = createRequire(import.meta.url)(path.join(root, 'backend/lib/inspireJobParams.js'));
+const V130_UI_STRINGS = ['Discovery Type', 'Strategy and organization', 'Strategy coverage', 'Hidden by feedback', 'Your feedback'];
 
 function checkLocalBundle() {
   if (!fs.existsSync(distJs)) {
@@ -27,17 +30,22 @@ function checkLocalBundle() {
   const text = fs.readFileSync(path.join(distJs, latest), 'utf8');
   const hasUi = text.includes('No data yet');
   const hasRetiredGenerationDefault = text.includes('PDF Catalog,Genie Code Instructions');
+  const missingV130 = V130_UI_STRINGS.filter((s) => !text.includes(s));
+  const ok = hasUi && !hasRetiredGenerationDefault && missingV130.length === 0;
   return {
-    ok: hasUi && !hasRetiredGenerationDefault,
+    ok,
     jsBundle: latest,
     hasDemoDataUi: hasUi,
     hasV113GenerationOptions: !hasRetiredGenerationDefault,
-    message: hasUi && !hasRetiredGenerationDefault
+    hasV130Ui: missingV130.length === 0,
+    message: ok
       ? `Local bundle OK (${latest})`
       : `Local bundle STALE (${latest}) — ${
           !hasUi
             ? 'missing "No data yet"'
-            : 'still contains the retired Genie generation-option default'
+            : hasRetiredGenerationDefault
+              ? 'still contains the retired Genie generation-option default'
+              : `missing v1.3.0 UI text: ${missingV130.map((s) => `"${s}"`).join(', ')}`
         }; rebuild and redeploy`,
   };
 }
@@ -53,7 +61,7 @@ async function checkLiveApp(baseUrl) {
   const templatesOk = templatesResp.ok;
 
   const ui = defaults?.frontendBuild?.hasDemoDataUi ?? defaults?.features?.demoDataUi;
-  const agentVersionOk = defaults?.agentVersion === 'v1.2.0';
+  const agentVersionOk = defaults?.agentVersion === INSPIRE_AGENT_VERSION;
   const ok = ui === true && templatesOk && agentVersionOk;
   return {
     ok,
@@ -66,7 +74,7 @@ async function checkLiveApp(baseUrl) {
       : [
           ui ? null : 'UI bundle missing "No data yet" (stale deploy — run npm run deploy)',
           templatesOk ? null : '/api/demo-data/templates not found (stale backend)',
-          agentVersionOk ? null : `/api/defaults reports agent ${defaults?.agentVersion || 'unknown'}, expected v1.2.0`,
+          agentVersionOk ? null : `/api/defaults reports agent ${defaults?.agentVersion || 'unknown'}, expected ${INSPIRE_AGENT_VERSION}`,
         ]
           .filter(Boolean)
           .join('; ') || 'check failed',

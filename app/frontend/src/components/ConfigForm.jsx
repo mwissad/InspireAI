@@ -97,7 +97,7 @@ export default function ConfigForm({ onSubmit, isSubmitting, submitError, disabl
     generation_path: './../demos/',
     documents_languages: ['English'],
     session_id: '',
-    generate_genie_code_for: '5',
+    generate_genie_code_for: '0',
   });
 
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -305,7 +305,7 @@ export default function ConfigForm({ onSubmit, isSubmitting, submitError, disabl
             type="button"
             onClick={goNext}
             disabled={step === 0 ? !canProceedStep0 : !canProceedStep1}
-            className="flex items-center gap-2 px-6 py-2.5 rounded-xl text-sm font-semibold text-white bg-db-red hover:bg-db-red-light disabled:opacity-30 disabled:cursor-not-allowed transition-all shadow-lg shadow-db-red/20"
+            className="flex items-center gap-2 px-6 py-2.5 rounded-xl text-sm font-semibold text-white bg-db-red-solid hover:bg-db-red-solid-hover disabled:opacity-30 disabled:cursor-not-allowed transition-all shadow-lg shadow-db-red/20"
           >
             Continue
             <ChevronRight className="w-4 h-4" />
@@ -315,7 +315,7 @@ export default function ConfigForm({ onSubmit, isSubmitting, submitError, disabl
             type="button"
             onClick={handleSubmit}
             disabled={disabled || isSubmitting}
-            className="flex items-center gap-2.5 px-8 py-3 rounded-xl text-sm font-bold text-white bg-linear-to-r from-db-red to-db-orange hover:from-db-red-light hover:to-db-orange disabled:opacity-30 disabled:cursor-not-allowed transition-all shadow-lg shadow-db-red/25 hover:shadow-db-red/40 active:scale-[0.97]"
+            className="flex items-center gap-2.5 px-8 py-3 rounded-xl text-sm font-bold text-white bg-linear-to-r from-db-red-solid to-db-red-solid-hover hover:from-db-red-solid-hover disabled:opacity-30 disabled:cursor-not-allowed transition-all shadow-lg shadow-db-red/25 hover:shadow-db-red/40 active:scale-[0.97]"
           >
             {isSubmitting ? (
               <>
@@ -362,7 +362,7 @@ function StepEssentials({ form, update, catalogs, catalogsLoading, isValidInspir
       {/* Business Name */}
       <div className="rounded-xl border border-white/10 bg-db-navy/40 p-5">
         <label className="block text-sm font-medium text-white mb-1">
-          Business Name <span className="text-db-red">*</span>
+          Business Name <span className="text-db-red-fg">*</span>
         </label>
         <p className="text-xs text-slate-500 mb-3">
           Your organization or project name — used for titles and context in generated artifacts.
@@ -383,7 +383,7 @@ function StepEssentials({ form, update, catalogs, catalogsLoading, isValidInspir
       {/* UC Metadata */}
       <div className="rounded-xl border border-white/10 bg-db-navy/40 p-5">
         <label className="block text-sm font-medium text-white mb-1">
-          Unity Catalog Metadata <span className="text-db-red">*</span>
+          Unity Catalog Metadata <span className="text-db-red-fg">*</span>
         </label>
         <p className="text-xs text-slate-500 mb-3">
           Comma-separated list of Catalogs, Schemas, or individual Tables to analyze.
@@ -404,7 +404,7 @@ function StepEssentials({ form, update, catalogs, catalogsLoading, isValidInspir
       {/* Inspire Database — REQUIRED */}
       <div className={`rounded-xl border ${isValidInspireDb ? 'border-db-teal/30 bg-db-teal/5' : 'border-white/10 bg-db-navy/40'} p-5 transition-colors`}>
         <label className="block text-sm font-medium text-white mb-1">
-          Inspire Database <span className="text-db-red">*</span>
+          Inspire Database <span className="text-db-red-fg">*</span>
         </label>
         <p className="text-xs text-slate-500 mb-3">
           Where Inspire stores generated tables. Format: <code className="text-slate-400 bg-white/5 px-1 rounded">catalog.schema</code> (e.g. <code className="text-slate-400 bg-white/5 px-1 rounded">my_catalog._inspire</code>).
@@ -490,7 +490,7 @@ function StepEssentials({ form, update, catalogs, catalogsLoading, isValidInspir
                     <Check className="w-3 h-3 text-white" />
                   </div>
                 )}
-                <Icon className={`w-5 h-5 mb-2 ${sel ? 'text-db-red-light' : 'text-slate-500'}`} />
+                <Icon className={`w-5 h-5 mb-2 ${sel ? 'text-db-red-fg' : 'text-slate-500'}`} />
                 <p className={`text-sm font-medium ${sel ? 'text-white' : 'text-slate-300'}`}>{opt.label}</p>
                 <p className="text-xs text-slate-500 mt-0.5">{opt.desc}</p>
               </button>
@@ -604,7 +604,7 @@ function StepCustomize({ form, update, toggleMulti, showAdvanced, setShowAdvance
                     : 'bg-db-darkest/40 text-slate-400 border-white/8 hover:border-white/20 hover:text-slate-300'
                 }`}
               >
-                <Icon className={`w-4 h-4 mx-auto block mb-0.5 ${sel ? 'text-db-red-light' : 'text-slate-500'}`} aria-hidden />
+                <Icon className={`w-4 h-4 mx-auto block mb-0.5 ${sel ? 'text-db-red-fg' : 'text-slate-500'}`} aria-hidden />
                 {p.shortLabel}
               </button>
             );
@@ -619,7 +619,7 @@ function StepCustomize({ form, update, toggleMulti, showAdvanced, setShowAdvance
       <div className="rounded-xl border border-white/10 bg-db-navy/40 p-5">
         <div className="flex items-center justify-between mb-1">
           <label className="text-sm font-medium text-white">Generation Options</label>
-          <span className="text-xs text-db-red-light font-medium">{form.generation_options.length} selected</span>
+          <span className="text-xs text-db-red-fg font-medium">{form.generation_options.length} selected</span>
         </div>
         <p className="text-xs text-slate-500 mb-3">
           PDF and presentation outputs. Genie instructions are controlled separately by <strong className="text-slate-400">Operation</strong> and Auto-Genie scope.
@@ -645,7 +645,7 @@ function StepCustomize({ form, update, toggleMulti, showAdvanced, setShowAdvance
                 } flex items-center justify-center`}>
                   {sel && <Check className="w-2.5 h-2.5 text-white" />}
                 </div>
-                <Icon className={`w-4 h-4 mb-1.5 ${sel ? 'text-db-red-light' : 'text-slate-500'}`} />
+                <Icon className={`w-4 h-4 mb-1.5 ${sel ? 'text-db-red-fg' : 'text-slate-500'}`} />
                 <p className={`text-xs font-medium leading-tight ${sel ? 'text-white' : 'text-slate-300'}`}>{opt.label}</p>
                 <p className="text-[11px] text-slate-500 mt-0.5 leading-tight">{opt.desc}</p>
               </button>
@@ -658,7 +658,7 @@ function StepCustomize({ form, update, toggleMulti, showAdvanced, setShowAdvance
       <div className="rounded-xl border border-white/10 bg-db-navy/40 p-5">
         <div className="flex items-center justify-between mb-1">
           <label className="text-sm font-medium text-white">Document Languages</label>
-          <span className="text-xs text-db-red-light font-medium">{form.documents_languages.length} selected</span>
+          <span className="text-xs text-db-red-fg font-medium">{form.documents_languages.length} selected</span>
         </div>
         <p className="text-xs text-slate-500 mb-3">
           Choose language(s) for PDF and Presentation outputs (widget <span className="font-mono">12_documents_languages</span>).
@@ -749,14 +749,14 @@ function StepCustomize({ form, update, toggleMulti, showAdvanced, setShowAdvance
             <MiniInput
               icon={Bot}
               label="Auto-Genie scope (13_generate_genie_code_for)"
-              placeholder="5 — or all, or 0 to skip"
+              placeholder="0 — or all, or a top-N"
               value={form.generate_genie_code_for}
               onChange={(v) => update('generate_genie_code_for', v)}
             />
             <p className="text-[10px] text-slate-600 leading-relaxed">
               <span className="font-mono text-slate-500">all</span> = every use case;
               <span className="font-mono text-slate-500"> 0</span> = skip Auto-Genie;
-              positive integer = top-N by Inspire score (default <span className="font-mono">5</span>).
+              positive integer = top-N by Inspire score (default <span className="font-mono">0</span>).
             </p>
           </div>
         )}
@@ -808,11 +808,11 @@ function StepReview({ form, onEdit }) {
         {/* Advanced (only if set) */}
         {(form.generation_path !== './../demos/'
           || form.session_id
-          || String(form.generate_genie_code_for || '').trim() !== '5') && (
+          || !['', '0'].includes(String(form.generate_genie_code_for || '').trim())) && (
           <ReviewSection title="Advanced" onEdit={() => onEdit(1)}>
             {form.generation_path !== './../demos/' && <ReviewRow label="Generation Path" value={form.generation_path} mono />}
             {form.session_id && <ReviewRow label="Session ID" value={form.session_id} mono />}
-            {String(form.generate_genie_code_for || '').trim() !== '5' && (
+            {!['', '0'].includes(String(form.generate_genie_code_for || '').trim()) && (
               <ReviewRow label="Auto-Genie scope" value={form.generate_genie_code_for} mono />
             )}
           </ReviewSection>
@@ -821,7 +821,7 @@ function StepReview({ form, onEdit }) {
 
       {/* Launch confirmation */}
       <div className="rounded-xl border border-db-red/20 bg-db-red/5 p-4 flex items-start gap-3">
-        <Info className="w-4 h-4 text-db-red-light shrink-0 mt-0.5" />
+        <Info className="w-4 h-4 text-db-red-fg shrink-0 mt-0.5" />
         <div className="text-xs text-slate-400 leading-relaxed">
           <p>
             Clicking <strong className="text-white">Get Started</strong> will create a one-time job run on your Databricks workspace.
@@ -870,7 +870,7 @@ function ReviewSection({ title, onEdit, children }) {
         <button
           type="button"
           onClick={onEdit}
-          className="flex items-center gap-1 text-[11px] text-db-red-light hover:text-db-red font-medium transition-colors"
+          className="flex items-center gap-1 text-[11px] text-db-red-fg hover:text-db-red-fg font-medium transition-colors"
         >
           <Pencil className="w-3 h-3" />
           Edit
@@ -887,7 +887,7 @@ function ReviewRow({ label, value, mono, badge }) {
       <span className="text-xs text-slate-500 shrink-0">{label}</span>
       <div className="text-right flex items-center gap-2">
         {badge && (
-          <span className="px-1.5 py-0.5 rounded-md text-[10px] font-bold bg-db-red/15 text-db-red-light">{badge}</span>
+          <span className="px-1.5 py-0.5 rounded-md text-[10px] font-bold bg-db-red/15 text-db-red-fg">{badge}</span>
         )}
         <span className={`text-xs text-slate-200 ${mono ? 'font-mono' : ''} text-right max-w-xs truncate`}>
           {value || <span className="text-slate-600 italic">Not set</span>}

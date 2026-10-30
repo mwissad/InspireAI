@@ -169,12 +169,13 @@ The script packages the zip, imports it and **installer_workspace.py**, and subm
 
 ## 8. Permissions (short)
 
-- **While you run the installer:** your user identity needs warehouse **CAN_USE**, rights to create or use **{catalog}._inspire**, and permissions to create or update the App and workspace paths the notebook touches.
+- **While you run the installer:** your user identity needs warehouse **CAN_MANAGE** (to grant the App service principal access to it), rights to create or use **{catalog}._inspire**, and permissions to create or update the App and workspace paths the notebook touches.
 - **After deployment:** the **App service principal** is what the running app uses. The installer grants:
-  - On the **chosen Inspire catalog**: **USE_CATALOG**, **BROWSE**, **CREATE SCHEMA** (so demo schemas can be created), and on **`{catalog}._inspire`**: **USE_SCHEMA**, **CREATE_TABLE**, **SELECT**, **MODIFY** (session and `__inspire_*` tables live here).
+  - On the **chosen Inspire catalog**: **USE_CATALOG**, **BROWSE**, **CREATE SCHEMA** (so demo schemas can be created), and on **`{catalog}._inspire`**: **USE_SCHEMA**, **CREATE_TABLE**, **SELECT**, **MODIFY** (session and `__inspire_*` tables live here), and **CREATE VOLUME**, **READ VOLUME**, **WRITE VOLUME** (each run streams its live log to the `vol_root` volume here), and **MANAGE** (so Implement can let the Apps it creates read their result tables).
   - The **“I don’t have data”** pipeline task 1 additionally grants **USE_SCHEMA**, **SELECT**, and **MODIFY** on each new **`{catalog}.inspire_demo_*`** schema after demo tables are created.
-  - On **every other catalog** (except a few system names): **BROWSE** only so the UI can list catalogs/schemas/tables for discovery — **no** **USE_CATALOG** elsewhere, so the SP cannot run queries against arbitrary catalogs through UC alone.
-  - **CAN_USE** on the SQL warehouse you picked.
+  - On **every other catalog** (except a few system names): **USE_CATALOG** and **BROWSE** so the UI can list catalogs/schemas/tables for discovery — no **USE_SCHEMA** or **SELECT** elsewhere, so the SP reads metadata only.
+  - **CAN_MANAGE** on the SQL warehouse you picked, so Implement can attach it to the Apps it creates.
+  - Apps that Implement creates also need **USE_CATALOG** on the Inspire catalog. The installer checks that account users hold it or that the App service principal holds **MANAGE** on the catalog, and otherwise prints the statement a catalog owner can run.
 
 If identity resolution fails, follow the SQL hints printed by the notebook.
 

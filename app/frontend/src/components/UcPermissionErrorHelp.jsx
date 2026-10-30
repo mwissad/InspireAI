@@ -23,8 +23,8 @@ export default function UcPermissionErrorHelp({ guidance }) {
   if (!guidance.isPermissionIssue) {
     return (
       <div className="flex items-start gap-2 p-3 bg-error-bg border border-error/20 rounded-lg mb-6">
-        <AlertCircle size={16} className="text-error shrink-0 mt-0.5" />
-        <p className="text-sm text-error">{guidance.userMessage}</p>
+        <AlertCircle size={16} className="text-error-fg shrink-0 mt-0.5" />
+        <p className="text-sm text-error-fg">{guidance.userMessage}</p>
       </div>
     );
   }
@@ -32,9 +32,9 @@ export default function UcPermissionErrorHelp({ guidance }) {
   return (
     <div className="mb-6 rounded-xl border border-error/25 bg-error-bg/80 overflow-hidden">
       <div className="flex items-start gap-3 px-4 py-3 border-b border-error/15">
-        <AlertCircle size={18} className="text-error shrink-0 mt-0.5" />
+        <AlertCircle size={18} className="text-error-fg shrink-0 mt-0.5" />
         <div className="min-w-0 flex-1">
-          <p className="text-sm font-semibold text-error">{guidance.title}</p>
+          <p className="text-sm font-semibold text-error-fg">{guidance.title}</p>
           <p className="text-sm text-text-secondary mt-1">{guidance.userMessage}</p>
         </div>
       </div>
@@ -62,7 +62,7 @@ export default function UcPermissionErrorHelp({ guidance }) {
             onClick={copyAdminText}
             className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-border text-xs font-medium text-text-secondary hover:border-border-strong hover:text-text-primary transition-smooth"
           >
-            {copied ? <Check size={14} className="text-success" /> : <Copy size={14} />}
+            {copied ? <Check size={14} className="text-success-fg" /> : <Copy size={14} />}
             {copied ? 'Copied for admin' : 'Copy message for admin'}
           </button>
         )}

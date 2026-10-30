@@ -175,7 +175,7 @@ export default function SettingsPanel({ settings, update, onClose }) {
                 onClick={() => update('authMode', 'pat')}
                 className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded-md text-xs font-medium transition-smooth border ${
                   settings.authMode !== 'sp'
-                    ? 'border-db-red/30 bg-db-red-50 text-db-red'
+                    ? 'border-db-red/30 bg-db-red-50 text-db-red-fg'
                     : 'border-border text-text-secondary hover:border-border-strong'
                 }`}
               >
@@ -187,7 +187,7 @@ export default function SettingsPanel({ settings, update, onClose }) {
                 onClick={() => update('authMode', 'sp')}
                 className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded-md text-xs font-medium transition-smooth border ${
                   settings.authMode === 'sp'
-                    ? 'border-db-red/30 bg-db-red-50 text-db-red'
+                    ? 'border-db-red/30 bg-db-red-50 text-db-red-fg'
                     : 'border-border text-text-secondary hover:border-border-strong'
                 }`}
               >
@@ -220,7 +220,7 @@ export default function SettingsPanel({ settings, update, onClose }) {
               ))}
               <div className="p-2.5 bg-info-bg border border-info/20 rounded-md">
                 <p className="text-[10px] text-text-secondary leading-relaxed">
-                  <span className="font-semibold text-info">Required SP permissions:</span> Volume & UC access, Job creation & execution, SQL Warehouse usage.
+                  <span className="font-semibold text-info-fg">Required SP permissions:</span> Volume & UC access, Job creation & execution, SQL Warehouse usage.
                 </p>
               </div>
             </>
@@ -299,7 +299,7 @@ export default function SettingsPanel({ settings, update, onClose }) {
                         }
                       } catch { alert('Error re-publishing notebook.'); }
                     }}
-                    className="text-[10px] text-db-red hover:underline font-medium"
+                    className="text-[10px] text-db-red-fg hover:underline font-medium"
                     title="Force re-upload the latest DBC to your workspace"
                   >
                     Re-publish

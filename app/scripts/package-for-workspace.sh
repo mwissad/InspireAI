@@ -56,6 +56,7 @@ zip -r "$OUT" . \
   -x "./.DS_Store" \
   -x "./frontend/node_modules/*" \
   -x "./frontend/src/*" \
+  -x "./frontend/test/*" \
   -x "./frontend/public/*" \
   -x "./dist/InspireAI-workspace.zip" \
   -x "./.env" \
