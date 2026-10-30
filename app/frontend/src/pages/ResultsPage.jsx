@@ -1705,7 +1705,7 @@ export default function ResultsPage({
             <div className="min-w-0">
               <h1
                 className={`font-semibold tracking-tight text-foreground ${
-                  results ? 'text-2xl line-clamp-2 break-words' : 'text-3xl sm:text-4xl'
+                  results ? 'text-3xl line-clamp-2 break-words' : 'text-3xl sm:text-4xl'
                 }`}
                 title={results && resultsPageTitle ? resultsPageTitle : undefined}
               >

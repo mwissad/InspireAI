@@ -19,6 +19,8 @@ import {
   BarChart3,
 } from 'lucide-react';
 import ResultsPage from './ResultsPage';
+import { PageHeader, PageShell } from '../components/PageHeader';
+import { Button } from '../components/ui/button';
 import { countEntries, parseStrategicContext, treeDepth } from '../lib/strategyContext';
 
 // Run lifecycle phases
@@ -336,32 +338,22 @@ export default function MonitorPage({ settings, update, sessionId, runId, onComp
   }, [steps]);
 
   return (
-    <div className="max-w-6xl mx-auto px-6 py-8">
-      {/* ═══ Page Header ═══ */}
-      <div className="flex items-center justify-between mb-6">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-db-red to-db-red-hover flex items-center justify-center shadow-sm">
-            <Activity size={20} className="text-white" />
-          </div>
-          <div>
-            <h1 className="text-2xl font-bold text-text-primary">Pipeline Monitor</h1>
-            <p className="text-sm text-text-secondary">
-              Real-time tracking of the Inspire AI pipeline.
-            </p>
-          </div>
-        </div>
-        {runInfo?.run_page_url && (
-          <a
-            href={runInfo.run_page_url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 text-sm text-text-secondary border border-border rounded-lg hover:bg-bg-subtle hover:shadow-sm transition-smooth"
-          >
-            View in Databricks
-            <ExternalLink size={14} aria-hidden="true" />
-          </a>
-        )}
-      </div>
+    <PageShell>
+      <PageHeader
+        icon={Activity}
+        title="Pipeline Monitor"
+        subtitle="Real-time tracking of the Inspire AI pipeline."
+        actions={
+          runInfo?.run_page_url ? (
+            <Button asChild variant="outline">
+              <a href={runInfo.run_page_url} target="_blank" rel="noopener noreferrer">
+                View in Databricks
+                <ExternalLink size={14} aria-hidden="true" />
+              </a>
+            </Button>
+          ) : null
+        }
+      />
 
       {/* ═══ Status Card ═══ */}
       <div className={`border rounded-xl p-5 mb-6 shadow-sm ${
@@ -916,7 +908,7 @@ export default function MonitorPage({ settings, update, sessionId, runId, onComp
           )}
         </div>
       )}
-    </div>
+    </PageShell>
   );
 }
 

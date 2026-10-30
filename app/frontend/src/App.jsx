@@ -333,7 +333,7 @@ export default function App() {
         )}
 
         {page === 'monitor' && (
-          <div className="max-w-7xl mx-auto px-6 py-8">
+          <div>
             <MonitorPage
               settings={settings}
               update={update}

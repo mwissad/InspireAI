@@ -3,10 +3,12 @@ import { Rocket, BarChart3, Loader2, AlertCircle, Clock, CheckCircle2, ArrowRigh
 import SessionSparkline from '../components/SessionSparkline';
 import MagneticButton from '../components/MagneticButton';
 import { SkeletonCard } from '../components/SkeletonLoader';
+import { PageHeader, PageShell } from '../components/PageHeader';
+import { Button } from '../components/ui/button';
 
 const STATUS_CONFIG = {
   completed: { label: 'Completed', bg: 'bg-success-bg', text: 'text-success', dot: 'bg-success' },
-  running:   { label: 'In Progress', bg: 'bg-db-red-50', text: 'text-db-red', dot: 'bg-db-red' },
+  running:   { label: 'In Progress', bg: 'bg-muted', text: 'text-foreground', dot: 'bg-foreground' },
   failed:    { label: 'Failed', bg: 'bg-error-bg', text: 'text-error', dot: 'bg-error' },
 };
 
@@ -236,42 +238,43 @@ export default function ChoosePage({ settings, onNewExperiment, onNoData, onView
 
   if (sessions.length === 0 && !error) {
     return (
-      <div className="min-h-[calc(100vh-64px)] flex items-start justify-center pt-12 pb-16 px-6">
-        <div className="max-w-lg w-full space-y-6 text-center">
-          <h1 className="text-3xl font-bold tracking-tight">Get started with Inspire AI</h1>
-          <p className="text-sm text-text-secondary">
-            Use your Unity Catalog data, or generate realistic demo tables first.
-          </p>
+      <PageShell>
+        <PageHeader
+          icon={BarChart3}
+          title="Get started with Inspire AI"
+          subtitle="Use your Unity Catalog data, or generate realistic demo tables first."
+        />
+        <div className="grid max-w-2xl gap-3">
           <button
             type="button"
             onClick={onNewExperiment}
-            className="group w-full flex items-center gap-4 px-6 py-5 rounded-2xl border border-[#FF3621]/20 bg-gradient-to-r from-[#FF3621]/[0.06] to-transparent hover:from-[#FF3621]/[0.12] text-left transition-all"
+            className="group flex w-full items-center gap-4 rounded-xl border bg-card px-5 py-4 text-left shadow-none transition-colors hover:bg-muted"
           >
-            <div className="w-12 h-12 rounded-xl bg-db-red/10 flex items-center justify-center">
-              <Rocket size={22} className="text-db-red" />
+            <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-accent text-accent-foreground">
+              <Rocket size={18} />
             </div>
             <div className="flex-1">
-              <p className="text-sm font-semibold text-text-primary">I have Unity Catalog data</p>
-              <p className="text-xs text-text-secondary mt-0.5">Pick catalogs, schemas, or tables</p>
+              <p className="text-sm font-semibold text-foreground">I have Unity Catalog data</p>
+              <p className="mt-0.5 text-xs text-muted-foreground">Pick catalogs, schemas, or tables</p>
             </div>
-            <ArrowRight size={18} className="text-text-tertiary group-hover:text-db-red" />
+            <ArrowRight size={16} className="text-muted-foreground" />
           </button>
           <button
             type="button"
             onClick={onNoData}
-            className="group w-full flex items-center gap-4 px-6 py-5 rounded-2xl border border-border bg-surface hover:border-border-strong text-left transition-all"
+            className="group flex w-full items-center gap-4 rounded-xl border bg-card px-5 py-4 text-left transition-colors hover:bg-muted"
           >
-            <div className="w-12 h-12 rounded-xl bg-bg-subtle flex items-center justify-center">
-              <Sparkles size={22} className="text-db-red" />
+            <div className="flex size-10 shrink-0 items-center justify-center rounded-lg border bg-muted">
+              <Sparkles size={18} className="text-muted-foreground" />
             </div>
             <div className="flex-1">
-              <p className="text-sm font-semibold text-text-primary">I don&apos;t have data</p>
-              <p className="text-xs text-text-secondary mt-0.5">Describe your business — we create demo tables and run Inspire</p>
+              <p className="text-sm font-semibold text-foreground">I don&apos;t have data</p>
+              <p className="mt-0.5 text-xs text-muted-foreground">Describe your business — we create demo tables and run Inspire</p>
             </div>
-            <ArrowRight size={18} className="text-text-tertiary" />
+            <ArrowRight size={16} className="text-muted-foreground" />
           </button>
         </div>
-      </div>
+      </PageShell>
     );
   }
 
@@ -300,62 +303,47 @@ export default function ChoosePage({ settings, onNewExperiment, onNoData, onView
   })();
 
   return (
-    <div className="min-h-[calc(100vh-64px)] flex items-start justify-center pt-12 pb-16 px-6 relative overflow-hidden">
-      {/* Ambient background glows */}
-      <div className="absolute top-[-15%] left-[-5%] w-[40%] h-[40%] rounded-full bg-[#FF3621]/[0.03] blur-[120px] pointer-events-none" />
-      <div className="absolute bottom-[-10%] right-[-5%] w-[35%] h-[35%] rounded-full bg-[#FF6B50]/[0.02] blur-[100px] pointer-events-none" />
-
-      <div className="relative z-10 max-w-3xl w-full space-y-8">
-
-        {/* ── Header ── */}
-        <div className="text-center space-y-3">
-          <div className="inline-flex items-center gap-2 px-3 py-1.5 bg-[rgba(255,248,237,0.04)] border border-[rgba(255,248,237,0.08)] rounded-full">
-            <BarChart3 size={12} className="text-[#FF3621]" />
-            <span className="text-[11px] font-medium text-text-secondary">
-              {completedCount} completed{inProgressCount > 0 ? ` · ${inProgressCount} in progress` : ''}
-            </span>
-          </div>
-          <h1 className="text-3xl sm:text-4xl font-bold tracking-[-0.03em]">
-            Welcome back
-          </h1>
-          <p className="text-sm text-text-secondary max-w-md mx-auto">
-            Pick up where you left off or start a fresh experiment.
-          </p>
-          {totalSummary && (
-            <p className="text-[11px] text-text-tertiary">
-              {totalSummary.total} use cases discovered · {totalSummary.high} high priority
-              {totalSummary.domains != null &&
-                ` · ${totalSummary.domains} domain${totalSummary.domains !== 1 ? 's' : ''} explored`}
-            </p>
-          )}
-        </div>
+    <PageShell className="space-y-8">
+      <PageHeader
+        icon={BarChart3}
+        title="Welcome back"
+        subtitle={
+          totalSummary
+            ? `Pick up where you left off or start a fresh experiment. ${totalSummary.total} use cases discovered · ${totalSummary.high} high priority${
+                totalSummary.domains != null
+                  ? ` · ${totalSummary.domains} domain${totalSummary.domains !== 1 ? 's' : ''} explored`
+                  : ''
+              }. ${completedCount} completed${inProgressCount > 0 ? ` · ${inProgressCount} in progress` : ''}.`
+            : `Pick up where you left off or start a fresh experiment. ${completedCount} completed${inProgressCount > 0 ? ` · ${inProgressCount} in progress` : ''}.`
+        }
+      />
 
         {/* ── New experiment CTAs ── */}
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-stretch">
           <button
             type="button"
             onClick={onNewExperiment}
-            className="group flex items-center gap-4 min-h-[4.5rem] px-5 py-4 rounded-2xl border border-db-red/20 bg-linear-to-r from-db-red/[0.06] to-transparent hover:from-db-red/[0.12] text-left transition-all"
+            className="group flex min-h-[4.5rem] items-center gap-4 rounded-xl border bg-card px-5 py-4 text-left transition-colors hover:bg-muted"
           >
-            <div className="w-10 h-10 rounded-xl bg-db-red/10 flex items-center justify-center shrink-0">
-              <Rocket size={20} className="text-db-red" />
+            <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-accent text-accent-foreground">
+              <Rocket size={18} />
             </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-sm font-semibold text-text-primary">I have data</p>
-              <p className="text-[11px] text-text-secondary mt-0.5 truncate">Unity Catalog</p>
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-semibold text-foreground">I have data</p>
+              <p className="mt-0.5 truncate text-xs text-muted-foreground">Unity Catalog</p>
             </div>
           </button>
           <button
             type="button"
             onClick={onNoData}
-            className="group flex items-center gap-4 min-h-[4.5rem] px-5 py-4 rounded-2xl border border-border bg-surface hover:border-border-strong text-left transition-all"
+            className="group flex min-h-[4.5rem] items-center gap-4 rounded-xl border bg-card px-5 py-4 text-left transition-colors hover:bg-muted"
           >
-            <div className="w-10 h-10 rounded-xl bg-bg-subtle flex items-center justify-center shrink-0">
-              <Sparkles size={20} className="text-db-red" />
+            <div className="flex size-10 shrink-0 items-center justify-center rounded-lg border bg-muted">
+              <Sparkles size={18} className="text-muted-foreground" />
             </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-sm font-semibold text-text-primary">No data yet</p>
-              <p className="text-[11px] text-text-secondary mt-0.5 truncate">Generate demo tables</p>
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-semibold text-foreground">No data yet</p>
+              <p className="mt-0.5 truncate text-xs text-muted-foreground">Generate demo tables</p>
             </div>
           </button>
         </div>
@@ -363,13 +351,10 @@ export default function ChoosePage({ settings, onNewExperiment, onNoData, onView
         {/* ── Previous Experiments ── */}
         <div className="space-y-3">
           <div className="flex items-center justify-between px-1">
-            <h2 className="text-xs font-semibold text-text-secondary uppercase tracking-[0.1em]">Previous Experiments</h2>
-            <button
-              onClick={() => onViewResults(null)}
-              className="text-[11px] text-text-tertiary hover:text-db-red transition-colors flex items-center gap-1"
-            >
-              View all <ChevronRight size={12} />
-            </button>
+            <h2 className="text-base font-semibold text-foreground">Previous experiments</h2>
+            <Button variant="link" size="sm" onClick={() => onViewResults(null)} className="text-foreground">
+              View all <ChevronRight size={14} />
+            </Button>
           </div>
 
           <div className="space-y-2">
@@ -513,7 +498,7 @@ export default function ChoosePage({ settings, onNewExperiment, onNoData, onView
                               if (!has) fetchUcsForQuickView(session.session_id);
                             }
                           }}
-                          className="px-2.5 py-1.5 text-[10px] font-medium rounded-lg flex items-center gap-1 transition-all border border-border hover:border-[#FF3621]/30 hover:bg-[#FF3621]/5 text-text-tertiary hover:text-db-red"
+                          className="px-2.5 py-1.5 text-[10px] font-medium rounded-lg flex items-center gap-1 transition-all border border-border hover:bg-muted text-muted-foreground hover:text-foreground"
                           title="Quick view use cases"
                         >
                           {isQuickOpen ? (
@@ -583,7 +568,7 @@ export default function ChoosePage({ settings, onNewExperiment, onNoData, onView
                       {panelSummary.domainNames.length > 0 && (
                         <div className="flex flex-wrap gap-1.5">
                           {panelSummary.domainNames.map((d) => (
-                            <span key={d} className="text-[10px] font-medium px-2.5 py-1 rounded-full bg-[#FF3621]/8 text-[#FF3621] border border-[#FF3621]/15">
+                            <span key={d} className="text-[10px] font-medium px-2.5 py-1 rounded-full border bg-muted text-foreground">
                               {d}
                             </span>
                           ))}
@@ -668,7 +653,6 @@ export default function ChoosePage({ settings, onNewExperiment, onNoData, onView
             )}
           </div>
         )}
-      </div>
-    </div>
+    </PageShell>
   );
 }

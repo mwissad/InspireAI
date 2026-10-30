@@ -181,9 +181,9 @@ body {
 }
 .seg-btn[data-active="true"],
 .seg-btn.is-active {
-  border-color: rgba(255, 54, 33, 0.35);
-  background: var(--color-db-red-50);
-  color: var(--color-db-red);
+  border-color: var(--t-text-primary);
+  background: var(--t-text-primary);
+  color: var(--t-surface);
 }
 .btn-primary {
   display: inline-flex;

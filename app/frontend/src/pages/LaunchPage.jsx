@@ -36,6 +36,7 @@ import {
 } from 'lucide-react';
 import DocumentLanguagesMultiselect from '../components/DocumentLanguagesMultiselect';
 import SegmentedControl from '../components/SegmentedControl';
+import { PageHeader, PageShell } from '../components/PageHeader';
 import StrategyEditor from '../components/StrategyEditor';
 import { parseStrategicContext, splitPriorities, validateStrategicContextText, withPriorities } from '../lib/strategyContext';
 import UcPermissionErrorHelp from '../components/UcPermissionErrorHelp';
@@ -811,27 +812,12 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
     : 'Get Started';
 
   return (
-    <div className="max-w-5xl mx-auto px-6 py-8">
-      {/* Page Header */}
-      <div className="mb-8">
-        <div className="flex items-center gap-3 mb-2 min-w-0">
-          <div className="w-10 h-10 shrink-0 rounded-xl bg-linear-to-br from-db-red to-db-red-hover flex items-center justify-center shadow-sm">
-            <Rocket size={20} className="text-white" />
-          </div>
-          <div className="min-w-0 flex-1">
-            <h1
-              className="text-2xl font-bold text-text-primary line-clamp-2 wrap-break-word"
-              title={headlineBusiness ? launchPageHeading : undefined}
-              aria-live="polite"
-            >
-              {launchPageHeading}
-            </h1>
-            <p className="text-sm text-text-secondary">
-              Fill in the essentials below, then get started. Everything else is optional.
-            </p>
-          </div>
-        </div>
-      </div>
+    <PageShell>
+      <PageHeader
+        icon={Rocket}
+        title={launchPageHeading}
+        subtitle="Fill in the essentials below, then get started. Everything else is optional."
+      />
 
       {(token || serverEnvHasPat) && warehouseId && previewDb && (
         <section
@@ -1286,16 +1272,16 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
                         updateParam('03_discovery_type', opt.key);
                       }}
                       className={`relative flex flex-col h-full min-h-[5.5rem] p-3.5 rounded-xl text-left transition-smooth border ${
-                        active ? 'border-db-red/30 bg-db-red-50 shadow-sm' : 'border-border hover:border-border-strong bg-surface'
+                        active ? 'border-foreground bg-muted shadow-none' : 'border-border hover:border-border-strong bg-surface'
                       }`}
                     >
-                      <span className={`flex items-center gap-1.5 text-xs font-semibold ${active ? 'text-db-red' : 'text-text-primary'}`}>
-                        <Icon size={14} className={active ? 'text-db-red' : 'text-text-tertiary'} />
+                      <span className={`flex items-center gap-1.5 text-xs font-semibold ${active ? 'text-foreground' : 'text-text-primary'}`}>
+                        <Icon size={14} className={active ? 'text-foreground' : 'text-text-tertiary'} />
                         {opt.key}
                         {opt.key === 'Deep' && <span className="text-[10px] font-normal text-text-tertiary">(default)</span>}
                       </span>
                       <p className="text-[11px] text-text-tertiary leading-snug mt-1.5 pr-5">{opt.desc}</p>
-                      {active && <CheckCircle2 size={14} className="absolute top-3 right-3 text-db-red" />}
+                      {active && <CheckCircle2 size={14} className="absolute top-3 right-3 text-foreground" />}
                     </button>
                   );
                 })}
@@ -1363,24 +1349,24 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
                         onClick={() => toggleBuiltInPriority(bp.key)}
                         className={`relative flex items-center min-h-10 px-3 py-2 rounded-lg text-xs font-medium text-left transition-smooth border ${
                           active
-                            ? 'border-db-red/30 bg-db-red-50 text-db-red'
+                            ? 'border-foreground bg-muted text-foreground'
                             : 'border-border text-text-secondary hover:border-border-strong bg-surface'
                         }`}
                       >
                         <span className="flex items-center gap-1.5 min-w-0 pr-4">
-                          <bp.icon size={13} className={`shrink-0 ${active ? 'text-db-red' : 'text-text-tertiary'}`} />
+                          <bp.icon size={13} className={`shrink-0 ${active ? 'text-foreground' : 'text-text-tertiary'}`} />
                           <span className="truncate">{bp.key}</span>
                         </span>
-                        {active && <CheckCircle2 size={12} className="absolute top-1/2 -translate-y-1/2 right-1.5 text-db-red" />}
+                        {active && <CheckCircle2 size={12} className="absolute top-1/2 -translate-y-1/2 right-1.5 text-foreground" />}
                       </button>
                     );
                   })}
                   {customPriorities.map((name) => (
                     <span
                       key={name}
-                      className="relative min-h-10 px-3 py-2 rounded-lg text-xs font-medium border border-db-red/30 bg-db-red-50 text-db-red flex items-center gap-1.5"
+                      className="relative min-h-10 px-3 py-2 rounded-lg text-xs font-medium border bg-muted text-foreground flex items-center gap-1.5"
                     >
-                      <Target size={13} className="text-db-red shrink-0" />
+                      <Target size={13} className="text-foreground shrink-0" />
                       <span className="truncate" title={name}>{name}</span>
                       <button
                         type="button"
@@ -1483,23 +1469,23 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
                         onClick={() => setGenChecks((p) => ({ ...p, [opt.key]: !p[opt.key] }))}
                         className={`relative flex flex-col h-full min-h-[6.5rem] p-3.5 rounded-xl text-left transition-smooth border group ${
                           active
-                            ? 'border-db-red/30 bg-db-red-50 shadow-sm'
-                            : 'border-border hover:border-border-strong hover:shadow-sm bg-surface'
+                            ? 'border-foreground bg-muted'
+                            : 'border-border hover:border-border-strong bg-surface'
                         }`}
                       >
                         <div className="flex items-center gap-2 mb-1.5">
                           <div className={`w-7 h-7 rounded-lg flex items-center justify-center ${
-                            active ? 'bg-db-red/10' : 'bg-bg-subtle group-hover:bg-bg'
+                            active ? 'bg-card' : 'bg-bg-subtle group-hover:bg-bg'
                           }`}>
-                            <Icon size={14} className={active ? 'text-db-red' : 'text-text-tertiary'} />
+                            <Icon size={14} className={active ? 'text-foreground' : 'text-text-tertiary'} />
                           </div>
                         </div>
-                        <span className={`text-xs font-semibold block ${active ? 'text-db-red' : 'text-text-primary'}`}>
+                        <span className={`text-xs font-semibold block ${active ? 'text-foreground' : 'text-text-primary'}`}>
                           {opt.key}
                         </span>
                         <p className="text-[10px] text-text-tertiary leading-snug mt-0.5">{opt.desc}</p>
                         {active && (
-                          <CheckCircle2 size={14} className="absolute top-2.5 right-2.5 text-db-red" />
+                          <CheckCircle2 size={14} className="absolute top-2.5 right-2.5 text-foreground" />
                         )}
                       </button>
                     );
@@ -1674,7 +1660,7 @@ export default function LaunchPage({ settings, update, onLaunched, onOpenResults
           {warehouseId && <> &middot; Warehouse: <span className="font-mono text-text-secondary">{warehouseId.slice(0, 12)}...</span></>}
         </p>
       </div>
-    </div>
+    </PageShell>
   );
 }
 
@@ -1766,12 +1752,12 @@ function PickerList({ items, selected, onToggle, getKey, getLabel, searchValue, 
                 onClick={() => onToggle(key)}
                 className={`w-full flex items-start gap-2 px-2.5 py-2 rounded-md text-xs text-left transition-smooth ${
                   active
-                    ? 'bg-db-red-50 text-db-red border border-db-red/20'
+                    ? 'bg-muted text-foreground border border-border'
                     : 'text-text-primary hover:bg-bg-subtle border border-transparent'
                 }`}
               >
                 <div className={`w-3.5 h-3.5 rounded border flex items-center justify-center shrink-0 mt-0.5 ${
-                  active ? 'bg-db-red border-db-red' : 'border-border-strong'
+                  active ? 'bg-foreground border-foreground' : 'border-border-strong'
                 }`}>
                   {active && <CheckCircle2 size={10} className="text-white" />}
                 </div>
@@ -1787,7 +1773,7 @@ function PickerList({ items, selected, onToggle, getKey, getLabel, searchValue, 
 
 function Chip({ children, icon }) {
   return (
-    <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-semibold border border-db-red/20 bg-db-red-50 text-db-red">
+    <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-semibold border bg-muted text-foreground">
       {icon} {children}
     </span>
   );
